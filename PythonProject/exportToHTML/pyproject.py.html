@@ -1,0 +1,204 @@
+<html>
+<head>
+<title>pyproject.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pyproject.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">util</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">namedtuple</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Any</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">packaging</span><span class="s2">.</span><span class="s1">requirements </span><span class="s0">import </span><span class="s1">InvalidRequirement</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">exceptions </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">InstallationError</span><span class="s2">,</span>
+    <span class="s1">InvalidPyProjectBuildRequires</span><span class="s2">,</span>
+    <span class="s1">MissingPyProjectBuildRequires</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">compat </span><span class="s0">import </span><span class="s1">tomllib</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">packaging </span><span class="s0">import </span><span class="s1">get_requirement</span>
+
+
+<span class="s0">def </span><span class="s1">_is_list_of_str</span><span class="s2">(</span><span class="s1">obj</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">obj</span><span class="s2">, </span><span class="s1">list</span><span class="s2">) </span><span class="s0">and </span><span class="s1">all</span><span class="s2">(</span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">item</span><span class="s2">, </span><span class="s1">str</span><span class="s2">) </span><span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">obj</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">make_pyproject_path</span><span class="s2">(</span><span class="s1">unpacked_source_directory</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">unpacked_source_directory</span><span class="s2">, </span><span class="s3">&quot;pyproject.toml&quot;</span><span class="s2">)</span>
+
+
+<span class="s1">BuildSystemDetails </span><span class="s2">= </span><span class="s1">namedtuple</span><span class="s2">(</span>
+    <span class="s3">&quot;BuildSystemDetails&quot;</span><span class="s2">, [</span><span class="s3">&quot;requires&quot;</span><span class="s2">, </span><span class="s3">&quot;backend&quot;</span><span class="s2">, </span><span class="s3">&quot;check&quot;</span><span class="s2">, </span><span class="s3">&quot;backend_path&quot;</span><span class="s2">]</span>
+<span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">load_pyproject_toml</span><span class="s2">(</span>
+    <span class="s1">use_pep517</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">| </span><span class="s0">None</span><span class="s2">, </span><span class="s1">pyproject_toml</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">setup_py</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">req_name</span><span class="s2">: </span><span class="s1">str</span>
+<span class="s2">) </span><span class="s1">-&gt; BuildSystemDetails </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4">&quot;&quot;&quot;Load the pyproject.toml file. 
+ 
+    Parameters: 
+        use_pep517 - Has the user requested PEP 517 processing? None 
+                     means the user hasn't explicitly specified. 
+        pyproject_toml - Location of the project's pyproject.toml file 
+        setup_py - Location of the project's setup.py file 
+        req_name - The name of the requirement we're processing (for 
+                   error reporting) 
+ 
+    Returns: 
+        None if we should use the legacy code path, otherwise a tuple 
+        ( 
+            requirements from pyproject.toml, 
+            name of PEP 517 backend, 
+            requirements we should check are installed after setting 
+                up the build environment 
+            directory paths to import the backend from (backend-path), 
+                relative to the project root. 
+        ) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">has_pyproject </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">isfile</span><span class="s2">(</span><span class="s1">pyproject_toml</span><span class="s2">)</span>
+    <span class="s1">has_setup </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">isfile</span><span class="s2">(</span><span class="s1">setup_py</span><span class="s2">)</span>
+
+    <span class="s0">if not </span><span class="s1">has_pyproject </span><span class="s0">and not </span><span class="s1">has_setup</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">InstallationError</span><span class="s2">(</span>
+            <span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">req_name</span><span class="s0">} </span><span class="s3">does not appear to be a Python project: &quot;</span>
+            <span class="s3">f&quot;neither 'setup.py' nor 'pyproject.toml' found.&quot;</span>
+        <span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">has_pyproject</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">open</span><span class="s2">(</span><span class="s1">pyproject_toml</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">=</span><span class="s3">&quot;utf-8&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">f</span><span class="s2">:</span>
+            <span class="s1">pp_toml </span><span class="s2">= </span><span class="s1">tomllib</span><span class="s2">.</span><span class="s1">loads</span><span class="s2">(</span><span class="s1">f</span><span class="s2">.</span><span class="s1">read</span><span class="s2">())</span>
+        <span class="s1">build_system </span><span class="s2">= </span><span class="s1">pp_toml</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s3">&quot;build-system&quot;</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">build_system </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s5"># The following cases must use PEP 517</span>
+    <span class="s5"># We check for use_pep517 being non-None and falsy because that means</span>
+    <span class="s5"># the user explicitly requested --no-use-pep517.  The value 0 as</span>
+    <span class="s5"># opposed to False can occur when the value is provided via an</span>
+    <span class="s5"># environment variable or config file option (due to the quirk of</span>
+    <span class="s5"># strtobool() returning an integer in pip's configuration code).</span>
+    <span class="s0">if </span><span class="s1">has_pyproject </span><span class="s0">and not </span><span class="s1">has_setup</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">use_pep517 </span><span class="s0">is not None and not </span><span class="s1">use_pep517</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">InstallationError</span><span class="s2">(</span>
+                <span class="s3">&quot;Disabling PEP 517 processing is invalid: &quot;</span>
+                <span class="s3">&quot;project does not have a setup.py&quot;</span>
+            <span class="s2">)</span>
+        <span class="s1">use_pep517 </span><span class="s2">= </span><span class="s0">True</span>
+    <span class="s0">elif </span><span class="s1">build_system </span><span class="s0">and </span><span class="s3">&quot;build-backend&quot; </span><span class="s0">in </span><span class="s1">build_system</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">use_pep517 </span><span class="s0">is not None and not </span><span class="s1">use_pep517</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">InstallationError</span><span class="s2">(</span>
+                <span class="s3">&quot;Disabling PEP 517 processing is invalid: &quot;</span>
+                <span class="s3">&quot;project specifies a build backend of {} &quot;</span>
+                <span class="s3">&quot;in pyproject.toml&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span><span class="s1">build_system</span><span class="s2">[</span><span class="s3">&quot;build-backend&quot;</span><span class="s2">])</span>
+            <span class="s2">)</span>
+        <span class="s1">use_pep517 </span><span class="s2">= </span><span class="s0">True</span>
+
+    <span class="s5"># If we haven't worked out whether to use PEP 517 yet,</span>
+    <span class="s5"># and the user hasn't explicitly stated a preference,</span>
+    <span class="s5"># we do so if the project has a pyproject.toml file</span>
+    <span class="s5"># or if we cannot import setuptools or wheels.</span>
+
+    <span class="s5"># We fallback to PEP 517 when without setuptools or without the wheel package,</span>
+    <span class="s5"># so setuptools can be installed as a default build backend.</span>
+    <span class="s5"># For more info see:</span>
+    <span class="s5"># https://discuss.python.org/t/pip-without-setuptools-could-the-experience-be-improved/11810/9</span>
+    <span class="s5"># https://github.com/pypa/pip/issues/8559</span>
+    <span class="s0">elif </span><span class="s1">use_pep517 </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">use_pep517 </span><span class="s2">= (</span>
+            <span class="s1">has_pyproject</span>
+            <span class="s0">or not </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">util</span><span class="s2">.</span><span class="s1">find_spec</span><span class="s2">(</span><span class="s3">&quot;setuptools&quot;</span><span class="s2">)</span>
+            <span class="s0">or not </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">util</span><span class="s2">.</span><span class="s1">find_spec</span><span class="s2">(</span><span class="s3">&quot;wheel&quot;</span><span class="s2">)</span>
+        <span class="s2">)</span>
+
+    <span class="s5"># At this point, we know whether we're going to use PEP 517.</span>
+    <span class="s0">assert </span><span class="s1">use_pep517 </span><span class="s0">is not None</span>
+
+    <span class="s5"># If we're using the legacy code path, there is nothing further</span>
+    <span class="s5"># for us to do here.</span>
+    <span class="s0">if not </span><span class="s1">use_pep517</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">if </span><span class="s1">build_system </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s5"># Either the user has a pyproject.toml with no build-system</span>
+        <span class="s5"># section, or the user has no pyproject.toml, but has opted in</span>
+        <span class="s5"># explicitly via --use-pep517.</span>
+        <span class="s5"># In the absence of any explicit backend specification, we</span>
+        <span class="s5"># assume the setuptools backend that most closely emulates the</span>
+        <span class="s5"># traditional direct setup.py execution, and require wheel and</span>
+        <span class="s5"># a version of setuptools that supports that backend.</span>
+
+        <span class="s1">build_system </span><span class="s2">= {</span>
+            <span class="s3">&quot;requires&quot;</span><span class="s2">: [</span><span class="s3">&quot;setuptools&gt;=40.8.0&quot;</span><span class="s2">],</span>
+            <span class="s3">&quot;build-backend&quot;</span><span class="s2">: </span><span class="s3">&quot;setuptools.build_meta:__legacy__&quot;</span><span class="s2">,</span>
+        <span class="s2">}</span>
+
+    <span class="s5"># If we're using PEP 517, we have build system information (either</span>
+    <span class="s5"># from pyproject.toml, or defaulted by the code above).</span>
+    <span class="s5"># Note that at this point, we do not know if the user has actually</span>
+    <span class="s5"># specified a backend, though.</span>
+    <span class="s0">assert </span><span class="s1">build_system </span><span class="s0">is not None</span>
+
+    <span class="s5"># Ensure that the build-system section in pyproject.toml conforms</span>
+    <span class="s5"># to PEP 518.</span>
+
+    <span class="s5"># Specifying the build-system table but not the requires key is invalid</span>
+    <span class="s0">if </span><span class="s3">&quot;requires&quot; </span><span class="s0">not in </span><span class="s1">build_system</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">MissingPyProjectBuildRequires</span><span class="s2">(</span><span class="s1">package</span><span class="s2">=</span><span class="s1">req_name</span><span class="s2">)</span>
+
+    <span class="s5"># Error out if requires is not a list of strings</span>
+    <span class="s1">requires </span><span class="s2">= </span><span class="s1">build_system</span><span class="s2">[</span><span class="s3">&quot;requires&quot;</span><span class="s2">]</span>
+    <span class="s0">if not </span><span class="s1">_is_list_of_str</span><span class="s2">(</span><span class="s1">requires</span><span class="s2">):</span>
+        <span class="s0">raise </span><span class="s1">InvalidPyProjectBuildRequires</span><span class="s2">(</span>
+            <span class="s1">package</span><span class="s2">=</span><span class="s1">req_name</span><span class="s2">,</span>
+            <span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;It is not a list of strings.&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s5"># Each requirement must be valid as per PEP 508</span>
+    <span class="s0">for </span><span class="s1">requirement </span><span class="s0">in </span><span class="s1">requires</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">get_requirement</span><span class="s2">(</span><span class="s1">requirement</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">InvalidRequirement </span><span class="s0">as </span><span class="s1">error</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">InvalidPyProjectBuildRequires</span><span class="s2">(</span>
+                <span class="s1">package</span><span class="s2">=</span><span class="s1">req_name</span><span class="s2">,</span>
+                <span class="s1">reason</span><span class="s2">=</span><span class="s3">f&quot;It contains an invalid requirement: </span><span class="s0">{</span><span class="s1">requirement</span><span class="s0">!r}</span><span class="s3">&quot;</span><span class="s2">,</span>
+            <span class="s2">) </span><span class="s0">from </span><span class="s1">error</span>
+
+    <span class="s1">backend </span><span class="s2">= </span><span class="s1">build_system</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s3">&quot;build-backend&quot;</span><span class="s2">)</span>
+    <span class="s1">backend_path </span><span class="s2">= </span><span class="s1">build_system</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s3">&quot;backend-path&quot;</span><span class="s2">, [])</span>
+    <span class="s1">check</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+    <span class="s0">if </span><span class="s1">backend </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s5"># If the user didn't specify a backend, we assume they want to use</span>
+        <span class="s5"># the setuptools backend. But we can't be sure they have included</span>
+        <span class="s5"># a version of setuptools which supplies the backend. So we</span>
+        <span class="s5"># make a note to check that this requirement is present once</span>
+        <span class="s5"># we have set up the environment.</span>
+        <span class="s5"># This is quite a lot of work to check for a very specific case. But</span>
+        <span class="s5"># the problem is, that case is potentially quite common - projects that</span>
+        <span class="s5"># adopted PEP 518 early for the ability to specify requirements to</span>
+        <span class="s5"># execute setup.py, but never considered needing to mention the build</span>
+        <span class="s5"># tools themselves. The original PEP 518 code had a similar check (but</span>
+        <span class="s5"># implemented in a different way).</span>
+        <span class="s1">backend </span><span class="s2">= </span><span class="s3">&quot;setuptools.build_meta:__legacy__&quot;</span>
+        <span class="s1">check </span><span class="s2">= [</span><span class="s3">&quot;setuptools&gt;=40.8.0&quot;</span><span class="s2">]</span>
+
+    <span class="s0">return </span><span class="s1">BuildSystemDetails</span><span class="s2">(</span><span class="s1">requires</span><span class="s2">, </span><span class="s1">backend</span><span class="s2">, </span><span class="s1">check</span><span class="s2">, </span><span class="s1">backend_path</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

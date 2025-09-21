@@ -1,0 +1,96 @@
+<html>
+<head>
+<title>metadata_legacy.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+metadata_legacy.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Metadata generation logic for legacy source distributions.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">build_env </span><span class="s2">import </span><span class="s1">BuildEnvironment</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">cli</span><span class="s3">.</span><span class="s1">spinners </span><span class="s2">import </span><span class="s1">open_spinner</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">InstallationError</span><span class="s3">,</span>
+    <span class="s1">InstallationSubprocessError</span><span class="s3">,</span>
+    <span class="s1">MetadataGenerationFailed</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">setuptools_build </span><span class="s2">import </span><span class="s1">make_setuptools_egg_info_args</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">subprocess </span><span class="s2">import </span><span class="s1">call_subprocess</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">temp_dir </span><span class="s2">import </span><span class="s1">TempDirectory</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_find_egg_info</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Find an .egg-info subdirectory in `directory`.&quot;&quot;&quot;</span>
+    <span class="s1">filenames </span><span class="s3">= [</span><span class="s1">f </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">listdir</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">) </span><span class="s2">if </span><span class="s1">f</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;.egg-info&quot;</span><span class="s3">)]</span>
+
+    <span class="s2">if not </span><span class="s1">filenames</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s4">f&quot;No .egg-info directory found in </span><span class="s2">{</span><span class="s1">directory</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">filenames</span><span class="s3">) &gt; </span><span class="s5">1</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span>
+            <span class="s4">f&quot;More than one .egg-info directory found in </span><span class="s2">{</span><span class="s1">directory</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">, </span><span class="s1">filenames</span><span class="s3">[</span><span class="s5">0</span><span class="s3">])</span>
+
+
+<span class="s2">def </span><span class="s1">generate_metadata</span><span class="s3">(</span>
+    <span class="s1">build_env</span><span class="s3">: </span><span class="s1">BuildEnvironment</span><span class="s3">,</span>
+    <span class="s1">setup_py_path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">source_dir</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">isolated</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">,</span>
+    <span class="s1">details</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Generate metadata using setup.py-based defacto mechanisms. 
+ 
+    Returns the generated metadata directory. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span>
+        <span class="s4">&quot;Running setup.py (path:%s) egg_info for package %s&quot;</span><span class="s3">,</span>
+        <span class="s1">setup_py_path</span><span class="s3">,</span>
+        <span class="s1">details</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+    <span class="s1">egg_info_dir </span><span class="s3">= </span><span class="s1">TempDirectory</span><span class="s3">(</span><span class="s1">kind</span><span class="s3">=</span><span class="s4">&quot;pip-egg-info&quot;</span><span class="s3">, </span><span class="s1">globally_managed</span><span class="s3">=</span><span class="s2">True</span><span class="s3">).</span><span class="s1">path</span>
+
+    <span class="s1">args </span><span class="s3">= </span><span class="s1">make_setuptools_egg_info_args</span><span class="s3">(</span>
+        <span class="s1">setup_py_path</span><span class="s3">,</span>
+        <span class="s1">egg_info_dir</span><span class="s3">=</span><span class="s1">egg_info_dir</span><span class="s3">,</span>
+        <span class="s1">no_user_config</span><span class="s3">=</span><span class="s1">isolated</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+    <span class="s2">with </span><span class="s1">build_env</span><span class="s3">:</span>
+        <span class="s2">with </span><span class="s1">open_spinner</span><span class="s3">(</span><span class="s4">&quot;Preparing metadata (setup.py)&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">spinner</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">call_subprocess</span><span class="s3">(</span>
+                    <span class="s1">args</span><span class="s3">,</span>
+                    <span class="s1">cwd</span><span class="s3">=</span><span class="s1">source_dir</span><span class="s3">,</span>
+                    <span class="s1">command_desc</span><span class="s3">=</span><span class="s4">&quot;python setup.py egg_info&quot;</span><span class="s3">,</span>
+                    <span class="s1">spinner</span><span class="s3">=</span><span class="s1">spinner</span><span class="s3">,</span>
+                <span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">InstallationSubprocessError </span><span class="s2">as </span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">MetadataGenerationFailed</span><span class="s3">(</span><span class="s1">package_details</span><span class="s3">=</span><span class="s1">details</span><span class="s3">) </span><span class="s2">from </span><span class="s1">error</span>
+
+    <span class="s6"># Return the .egg-info directory.</span>
+    <span class="s2">return </span><span class="s1">_find_egg_info</span><span class="s3">(</span><span class="s1">egg_info_dir</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

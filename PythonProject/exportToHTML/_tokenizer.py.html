@@ -1,0 +1,216 @@
+<html>
+<head>
+<title>_tokenizer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_tokenizer.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">dataclasses </span><span class="s0">import </span><span class="s1">dataclass</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Iterator</span><span class="s2">, </span><span class="s1">NoReturn</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">specifiers </span><span class="s0">import </span><span class="s1">Specifier</span>
+
+
+<span class="s2">@</span><span class="s1">dataclass</span>
+<span class="s0">class </span><span class="s1">Token</span><span class="s2">:</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">text</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">position</span><span class="s2">: </span><span class="s1">int</span>
+
+
+<span class="s0">class </span><span class="s1">ParserSyntaxError</span><span class="s2">(</span><span class="s1">Exception</span><span class="s2">):</span>
+    <span class="s3">&quot;&quot;&quot;The provided source text could not be parsed correctly.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">message</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s2">*,</span>
+        <span class="s1">source</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">span</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">span </span><span class="s2">= </span><span class="s1">span</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">message </span><span class="s2">= </span><span class="s1">message</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">source </span><span class="s2">= </span><span class="s1">source</span>
+
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__str__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">marker </span><span class="s2">= </span><span class="s4">&quot; &quot; </span><span class="s2">* </span><span class="s1">self</span><span class="s2">.</span><span class="s1">span</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] + </span><span class="s4">&quot;~&quot; </span><span class="s2">* (</span><span class="s1">self</span><span class="s2">.</span><span class="s1">span</span><span class="s2">[</span><span class="s5">1</span><span class="s2">] - </span><span class="s1">self</span><span class="s2">.</span><span class="s1">span</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]) + </span><span class="s4">&quot;^&quot;</span>
+        <span class="s0">return </span><span class="s4">&quot;</span><span class="s0">\n    </span><span class="s4">&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">([</span><span class="s1">self</span><span class="s2">.</span><span class="s1">message</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">source</span><span class="s2">, </span><span class="s1">marker</span><span class="s2">])</span>
+
+
+<span class="s1">DEFAULT_RULES</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s1">re</span><span class="s2">.</span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]] = {</span>
+    <span class="s4">&quot;LEFT_PARENTHESIS&quot;</span><span class="s2">: </span><span class="s4">r&quot;\(&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;RIGHT_PARENTHESIS&quot;</span><span class="s2">: </span><span class="s4">r&quot;\)&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;LEFT_BRACKET&quot;</span><span class="s2">: </span><span class="s4">r&quot;\[&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;RIGHT_BRACKET&quot;</span><span class="s2">: </span><span class="s4">r&quot;\]&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;SEMICOLON&quot;</span><span class="s2">: </span><span class="s4">r&quot;;&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;COMMA&quot;</span><span class="s2">: </span><span class="s4">r&quot;,&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;QUOTED_STRING&quot;</span><span class="s2">: </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span>
+        <span class="s4">r&quot;&quot;&quot; 
+            ( 
+                ('[^']*') 
+                | 
+                (&quot;[^&quot;]*&quot;) 
+            ) 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">re</span><span class="s2">.</span><span class="s1">VERBOSE</span><span class="s2">,</span>
+    <span class="s2">),</span>
+    <span class="s4">&quot;OP&quot;</span><span class="s2">: </span><span class="s4">r&quot;(===|==|~=|!=|&lt;=|&gt;=|&lt;|&gt;)&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;BOOLOP&quot;</span><span class="s2">: </span><span class="s4">r&quot;\b(or|and)\b&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;IN&quot;</span><span class="s2">: </span><span class="s4">r&quot;\bin\b&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;NOT&quot;</span><span class="s2">: </span><span class="s4">r&quot;\bnot\b&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;VARIABLE&quot;</span><span class="s2">: </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span>
+        <span class="s4">r&quot;&quot;&quot; 
+            \b( 
+                python_version 
+                |python_full_version 
+                |os[._]name 
+                |sys[._]platform 
+                |platform_(release|system) 
+                |platform[._](version|machine|python_implementation) 
+                |python_implementation 
+                |implementation_(name|version) 
+                |extra 
+            )\b 
+        &quot;&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">re</span><span class="s2">.</span><span class="s1">VERBOSE</span><span class="s2">,</span>
+    <span class="s2">),</span>
+    <span class="s4">&quot;SPECIFIER&quot;</span><span class="s2">: </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span>
+        <span class="s1">Specifier</span><span class="s2">.</span><span class="s1">_operator_regex_str </span><span class="s2">+ </span><span class="s1">Specifier</span><span class="s2">.</span><span class="s1">_version_regex_str</span><span class="s2">,</span>
+        <span class="s1">re</span><span class="s2">.</span><span class="s1">VERBOSE </span><span class="s2">| </span><span class="s1">re</span><span class="s2">.</span><span class="s1">IGNORECASE</span><span class="s2">,</span>
+    <span class="s2">),</span>
+    <span class="s4">&quot;AT&quot;</span><span class="s2">: </span><span class="s4">r&quot;\@&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;URL&quot;</span><span class="s2">: </span><span class="s4">r&quot;[^ \t]+&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;IDENTIFIER&quot;</span><span class="s2">: </span><span class="s4">r&quot;\b[a-zA-Z0-9][a-zA-Z0-9._-]*\b&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;VERSION_PREFIX_TRAIL&quot;</span><span class="s2">: </span><span class="s4">r&quot;\.\*&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;VERSION_LOCAL_LABEL_TRAIL&quot;</span><span class="s2">: </span><span class="s4">r&quot;\+[a-z0-9]+(?:[-_\.][a-z0-9]+)*&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;WS&quot;</span><span class="s2">: </span><span class="s4">r&quot;[ \t]+&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;END&quot;</span><span class="s2">: </span><span class="s4">r&quot;$&quot;</span><span class="s2">,</span>
+<span class="s2">}</span>
+
+
+<span class="s0">class </span><span class="s1">Tokenizer</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot;Context-sensitive token parsing. 
+ 
+    Provides methods to examine the input stream to check whether the next token 
+    matches. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">source</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s2">*,</span>
+        <span class="s1">rules</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s1">re</span><span class="s2">.</span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]],</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">source </span><span class="s2">= </span><span class="s1">source</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">rules</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">re</span><span class="s2">.</span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]] = {</span>
+            <span class="s1">name</span><span class="s2">: </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">pattern</span><span class="s2">) </span><span class="s0">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">pattern </span><span class="s0">in </span><span class="s1">rules</span><span class="s2">.</span><span class="s1">items</span><span class="s2">()</span>
+        <span class="s2">}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">next_token</span><span class="s2">: </span><span class="s1">Token </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">position </span><span class="s2">= </span><span class="s5">0</span>
+
+    <span class="s0">def </span><span class="s1">consume</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot;Move beyond provided token name, if at current position.&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">read</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">check</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, *, </span><span class="s1">peek</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot;Check whether the next token has the provided name. 
+ 
+        By default, if the check succeeds, the token *must* be read before 
+        another check. If `peek` is set to `True`, the token is not loaded and 
+        would need to be checked again. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s2">(</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">next_token </span><span class="s0">is None</span>
+        <span class="s2">), </span><span class="s4">f&quot;Cannot check for </span><span class="s0">{</span><span class="s1">name</span><span class="s0">!r}</span><span class="s4">, already have </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">next_token</span><span class="s0">!r}</span><span class="s4">&quot;</span>
+        <span class="s0">assert </span><span class="s1">name </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">rules</span><span class="s2">, </span><span class="s4">f&quot;Unknown token name: </span><span class="s0">{</span><span class="s1">name</span><span class="s0">!r}</span><span class="s4">&quot;</span>
+
+        <span class="s1">expression </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">rules</span><span class="s2">[</span><span class="s1">name</span><span class="s2">]</span>
+
+        <span class="s1">match </span><span class="s2">= </span><span class="s1">expression</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">source</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">position</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">match </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+        <span class="s0">if not </span><span class="s1">peek</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">next_token </span><span class="s2">= </span><span class="s1">Token</span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">match</span><span class="s2">[</span><span class="s5">0</span><span class="s2">], </span><span class="s1">self</span><span class="s2">.</span><span class="s1">position</span><span class="s2">)</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">def </span><span class="s1">expect</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, *, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Token</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot;Expect a certain token name next, failing with a syntax error otherwise. 
+ 
+        The token is *not* read. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">self</span><span class="s2">.</span><span class="s1">raise_syntax_error</span><span class="s2">(</span><span class="s4">f&quot;Expected </span><span class="s0">{</span><span class="s1">expected</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">read</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">read</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Token</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot;Consume the next token and return it.&quot;&quot;&quot;</span>
+        <span class="s1">token </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">next_token</span>
+        <span class="s0">assert </span><span class="s1">token </span><span class="s0">is not None</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">position </span><span class="s2">+= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">token</span><span class="s2">.</span><span class="s1">text</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">next_token </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s0">return </span><span class="s1">token</span>
+
+    <span class="s0">def </span><span class="s1">raise_syntax_error</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">message</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s2">*,</span>
+        <span class="s1">span_start</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">span_end</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot;Raise ParserSyntaxError at the given position.&quot;&quot;&quot;</span>
+        <span class="s1">span </span><span class="s2">= (</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">position </span><span class="s0">if </span><span class="s1">span_start </span><span class="s0">is None else </span><span class="s1">span_start</span><span class="s2">,</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">position </span><span class="s0">if </span><span class="s1">span_end </span><span class="s0">is None else </span><span class="s1">span_end</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">raise </span><span class="s1">ParserSyntaxError</span><span class="s2">(</span>
+            <span class="s1">message</span><span class="s2">,</span>
+            <span class="s1">source</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">source</span><span class="s2">,</span>
+            <span class="s1">span</span><span class="s2">=</span><span class="s1">span</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+    <span class="s0">def </span><span class="s1">enclosing_tokens</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">open_token</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">close_token</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, *, </span><span class="s1">around</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s2">) </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">open_token</span><span class="s2">):</span>
+            <span class="s1">open_position </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">position</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">read</span><span class="s2">()</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">open_position </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s0">yield</span>
+
+        <span class="s0">if </span><span class="s1">open_position </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return</span>
+
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">close_token</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">raise_syntax_error</span><span class="s2">(</span>
+                <span class="s4">f&quot;Expected matching </span><span class="s0">{</span><span class="s1">close_token</span><span class="s0">} </span><span class="s4">for </span><span class="s0">{</span><span class="s1">open_token</span><span class="s0">}</span><span class="s4">, after </span><span class="s0">{</span><span class="s1">around</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">,</span>
+                <span class="s1">span_start</span><span class="s2">=</span><span class="s1">open_position</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">read</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

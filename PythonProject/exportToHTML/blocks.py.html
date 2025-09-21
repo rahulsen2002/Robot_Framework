@@ -1,0 +1,609 @@
+<html>
+<head>
+<title>blocks.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+blocks.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#  Copyright 2008-2015 Nokia Networks</span>
+<span class="s0">#  Copyright 2016-     Robot Framework Foundation</span>
+<span class="s0">#</span>
+<span class="s0">#  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0">#  you may not use this file except in compliance with the License.</span>
+<span class="s0">#  You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#      http://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0">#  Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0">#  distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0">#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0">#  See the License for the specific language governing permissions and</span>
+<span class="s0">#  limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">from </span><span class="s1">abc </span><span class="s2">import </span><span class="s1">ABC</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">pathlib </span><span class="s2">import </span><span class="s1">Path</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">cast</span><span class="s3">, </span><span class="s1">Iterator</span><span class="s3">, </span><span class="s1">Sequence</span><span class="s3">, </span><span class="s1">TextIO</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s1">file_writer</span><span class="s3">, </span><span class="s1">test_or_task</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">lexer </span><span class="s2">import </span><span class="s1">Token</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">statements </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">Break</span><span class="s3">, </span><span class="s1">Continue</span><span class="s3">, </span><span class="s1">ElseHeader</span><span class="s3">, </span><span class="s1">ElseIfHeader</span><span class="s3">, </span><span class="s1">End</span><span class="s3">, </span><span class="s1">Error</span><span class="s3">, </span><span class="s1">ExceptHeader</span><span class="s3">, </span><span class="s1">FinallyHeader</span><span class="s3">,</span>
+    <span class="s1">ForHeader</span><span class="s3">, </span><span class="s1">GroupHeader</span><span class="s3">, </span><span class="s1">IfHeader</span><span class="s3">, </span><span class="s1">KeywordCall</span><span class="s3">, </span><span class="s1">KeywordName</span><span class="s3">, </span><span class="s1">Node</span><span class="s3">, </span><span class="s1">ReturnSetting</span><span class="s3">,</span>
+    <span class="s1">ReturnStatement</span><span class="s3">, </span><span class="s1">SectionHeader</span><span class="s3">, </span><span class="s1">Statement</span><span class="s3">, </span><span class="s1">TemplateArguments</span><span class="s3">, </span><span class="s1">TestCaseName</span><span class="s3">,</span>
+    <span class="s1">TryHeader</span><span class="s3">, </span><span class="s1">Var</span><span class="s3">, </span><span class="s1">WhileHeader</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">visitor </span><span class="s2">import </span><span class="s1">ModelVisitor</span>
+
+<span class="s1">Body </span><span class="s3">= </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Statement</span><span class="s3">, </span><span class="s4">&quot;Block&quot;</span><span class="s3">]]</span>
+<span class="s1">Errors </span><span class="s3">= </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">Container</span><span class="s3">(</span><span class="s1">Node</span><span class="s3">, </span><span class="s1">ABC</span><span class="s3">):</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">lineno</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s1">statement </span><span class="s3">= </span><span class="s1">FirstStatementFinder</span><span class="s3">.</span><span class="s1">find_from</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">statement</span><span class="s3">.</span><span class="s1">lineno </span><span class="s2">if </span><span class="s1">statement </span><span class="s2">else </span><span class="s3">-</span><span class="s5">1</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">col_offset</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s1">statement </span><span class="s3">= </span><span class="s1">FirstStatementFinder</span><span class="s3">.</span><span class="s1">find_from</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">statement</span><span class="s3">.</span><span class="s1">col_offset </span><span class="s2">if </span><span class="s1">statement </span><span class="s2">else </span><span class="s3">-</span><span class="s5">1</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">end_lineno</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s1">statement </span><span class="s3">= </span><span class="s1">LastStatementFinder</span><span class="s3">.</span><span class="s1">find_from</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">statement</span><span class="s3">.</span><span class="s1">end_lineno </span><span class="s2">if </span><span class="s1">statement </span><span class="s2">else </span><span class="s3">-</span><span class="s5">1</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">end_col_offset</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s1">statement </span><span class="s3">= </span><span class="s1">LastStatementFinder</span><span class="s3">.</span><span class="s1">find_from</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">statement</span><span class="s3">.</span><span class="s1">end_col_offset </span><span class="s2">if </span><span class="s1">statement </span><span class="s2">else </span><span class="s3">-</span><span class="s5">1</span>
+
+    <span class="s2">def </span><span class="s1">validate_model</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">ModelValidator</span><span class="s3">().</span><span class="s1">visit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">File</span><span class="s3">(</span><span class="s1">Container</span><span class="s3">):</span>
+    <span class="s1">_fields </span><span class="s3">= (</span><span class="s4">&quot;sections&quot;</span><span class="s3">,)</span>
+    <span class="s1">_attributes </span><span class="s3">= (</span><span class="s4">&quot;source&quot;</span><span class="s3">, </span><span class="s4">&quot;languages&quot;</span><span class="s3">, *</span><span class="s1">Container</span><span class="s3">.</span><span class="s1">_attributes</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">sections</span><span class="s3">: </span><span class="s4">&quot;Sequence[Section]&quot; </span><span class="s3">= (),</span>
+        <span class="s1">source</span><span class="s3">: </span><span class="s4">&quot;Path|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">languages</span><span class="s3">: </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = (),</span>
+    <span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sections </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">sections</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">source </span><span class="s3">= </span><span class="s1">source</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">languages </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">languages</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">save</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">output</span><span class="s3">: </span><span class="s4">&quot;Path|str|TextIO|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Save model to the given ``output`` or to the original source file. 
+ 
+        The ``output`` can be a path to a file or an already opened file 
+        object. If ``output`` is not given, the original source file will 
+        be overwritten. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">output </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">source</span>
+        <span class="s2">if </span><span class="s1">output </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span>
+                <span class="s4">&quot;Saving model requires explicit output when original source &quot;</span>
+                <span class="s4">&quot;is not path.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s1">ModelWriter</span><span class="s3">(</span><span class="s1">output</span><span class="s3">).</span><span class="s1">write</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Block</span><span class="s3">(</span><span class="s1">Container</span><span class="s3">, </span><span class="s1">ABC</span><span class="s3">):</span>
+    <span class="s1">_fields </span><span class="s3">= (</span><span class="s4">&quot;header&quot;</span><span class="s3">, </span><span class="s4">&quot;body&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">header</span><span class="s3">: </span><span class="s4">&quot;Statement|None&quot;</span><span class="s3">,</span>
+        <span class="s1">body</span><span class="s3">: </span><span class="s1">Body </span><span class="s3">= (),</span>
+        <span class="s1">errors</span><span class="s3">: </span><span class="s1">Errors </span><span class="s3">= (),</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">header </span><span class="s3">= </span><span class="s1">header</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">body </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">body</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">= </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_body_is_empty</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0"># This works with tests, keywords, and blocks inside them, not with sections.</span>
+        <span class="s1">valid </span><span class="s3">= (</span>
+            <span class="s1">KeywordCall</span><span class="s3">,</span>
+            <span class="s1">TemplateArguments</span><span class="s3">,</span>
+            <span class="s1">Var</span><span class="s3">,</span>
+            <span class="s1">Continue</span><span class="s3">,</span>
+            <span class="s1">Break</span><span class="s3">,</span>
+            <span class="s1">ReturnSetting</span><span class="s3">,</span>
+            <span class="s1">Group</span><span class="s3">,</span>
+            <span class="s1">ReturnStatement</span><span class="s3">,</span>
+            <span class="s1">NestedBlock</span><span class="s3">,</span>
+            <span class="s1">Error</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">return not </span><span class="s1">any</span><span class="s3">(</span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">node</span><span class="s3">, </span><span class="s1">valid</span><span class="s3">) </span><span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">body</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Section</span><span class="s3">(</span><span class="s1">Block</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s4">&quot;SectionHeader|None&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">SettingSection</span><span class="s3">(</span><span class="s1">Section</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">SectionHeader</span>
+
+
+<span class="s2">class </span><span class="s1">VariableSection</span><span class="s3">(</span><span class="s1">Section</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">SectionHeader</span>
+
+
+<span class="s0"># TODO: should there be a separate TaskSection?</span>
+<span class="s2">class </span><span class="s1">TestCaseSection</span><span class="s3">(</span><span class="s1">Section</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">SectionHeader</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">tasks</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">TASK_HEADER</span>
+
+
+<span class="s2">class </span><span class="s1">KeywordSection</span><span class="s3">(</span><span class="s1">Section</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">SectionHeader</span>
+
+
+<span class="s2">class </span><span class="s1">CommentSection</span><span class="s3">(</span><span class="s1">Section</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s4">&quot;SectionHeader|None&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">ImplicitCommentSection</span><span class="s3">(</span><span class="s1">CommentSection</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">header</span><span class="s3">: </span><span class="s4">&quot;Statement|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">body</span><span class="s3">: </span><span class="s1">Body </span><span class="s3">= (),</span>
+        <span class="s1">errors</span><span class="s3">: </span><span class="s1">Errors </span><span class="s3">= (),</span>
+    <span class="s3">):</span>
+        <span class="s1">body </span><span class="s3">= ([</span><span class="s1">header</span><span class="s3">] </span><span class="s2">if </span><span class="s1">header </span><span class="s2">is not None else </span><span class="s3">[]) + </span><span class="s1">list</span><span class="s3">(</span><span class="s1">body</span><span class="s3">)</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">InvalidSection</span><span class="s3">(</span><span class="s1">Section</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">TestCase</span><span class="s3">(</span><span class="s1">Block</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">TestCaseName</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s1">test_or_task</span><span class="s3">(</span><span class="s4">&quot;{Test} cannot be empty.&quot;</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">tasks</span><span class="s3">),)</span>
+
+
+<span class="s2">class </span><span class="s1">Keyword</span><span class="s3">(</span><span class="s1">Block</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">KeywordName</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;User keyword cannot be empty.&quot;</span><span class="s3">,)</span>
+
+
+<span class="s2">class </span><span class="s1">NestedBlock</span><span class="s3">(</span><span class="s1">Block</span><span class="s3">):</span>
+    <span class="s1">_fields </span><span class="s3">= (</span><span class="s4">&quot;header&quot;</span><span class="s3">, </span><span class="s4">&quot;body&quot;</span><span class="s3">, </span><span class="s4">&quot;end&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">header</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">,</span>
+        <span class="s1">body</span><span class="s3">: </span><span class="s1">Body </span><span class="s3">= (),</span>
+        <span class="s1">end</span><span class="s3">: </span><span class="s4">&quot;End|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">errors</span><span class="s3">: </span><span class="s1">Errors </span><span class="s3">= (),</span>
+    <span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">header</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">end </span><span class="s3">= </span><span class="s1">end</span>
+
+
+<span class="s2">class </span><span class="s1">If</span><span class="s3">(</span><span class="s1">NestedBlock</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Represents IF structures in the model. 
+ 
+    Used with IF, Inline IF, ELSE IF and ELSE nodes. The :attr:`type` attribute 
+    specifies the type. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_fields </span><span class="s3">= (</span><span class="s4">&quot;header&quot;</span><span class="s3">, </span><span class="s4">&quot;body&quot;</span><span class="s3">, </span><span class="s4">&quot;orelse&quot;</span><span class="s3">, </span><span class="s4">&quot;end&quot;</span><span class="s3">)</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s4">&quot;IfHeader|ElseIfHeader|ElseHeader&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">header</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">,</span>
+        <span class="s1">body</span><span class="s3">: </span><span class="s1">Body </span><span class="s3">= (),</span>
+        <span class="s1">orelse</span><span class="s3">: </span><span class="s4">&quot;If|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">end</span><span class="s3">: </span><span class="s4">&quot;End|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">errors</span><span class="s3">: </span><span class="s1">Errors </span><span class="s3">= (),</span>
+    <span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">header</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">end</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">orelse </span><span class="s3">= </span><span class="s1">orelse</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">type</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">type</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">condition</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">condition</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">assign</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;tuple[str, ...]&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">assign</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_body</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">IF</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_structure</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_end</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">INLINE_IF</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_structure</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_inline_if</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_validate_body</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">type </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s3">!= </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">INLINE_IF </span><span class="s2">else </span><span class="s4">&quot;IF&quot;</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">type</span><span class="s2">} </span><span class="s4">branch cannot be empty.&quot;</span><span class="s3">,)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_structure</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">orelse </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">orelse</span>
+        <span class="s1">else_seen </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">while </span><span class="s1">orelse</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">else_seen</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">orelse</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">ELSE</span><span class="s3">:</span>
+                    <span class="s1">error </span><span class="s3">= </span><span class="s4">&quot;Only one ELSE allowed.&quot;</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">error </span><span class="s3">= </span><span class="s4">&quot;ELSE IF not allowed after ELSE.&quot;</span>
+                <span class="s2">if </span><span class="s1">error </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">errors</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s1">error</span><span class="s3">,)</span>
+            <span class="s1">else_seen </span><span class="s3">= </span><span class="s1">else_seen </span><span class="s2">or </span><span class="s1">orelse</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">ELSE</span>
+            <span class="s1">orelse </span><span class="s3">= </span><span class="s1">orelse</span><span class="s3">.</span><span class="s1">orelse</span>
+
+    <span class="s2">def </span><span class="s1">_validate_end</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">end</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;IF must have closing END.&quot;</span><span class="s3">,)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_inline_if</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">branch </span><span class="s3">= </span><span class="s1">self</span>
+        <span class="s1">assign </span><span class="s3">= </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">assign</span>
+        <span class="s2">while </span><span class="s1">branch</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">body</span><span class="s3">:</span>
+                <span class="s1">item </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Statement</span><span class="s3">, </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">body</span><span class="s3">[</span><span class="s5">0</span><span class="s3">])</span>
+                <span class="s2">if </span><span class="s1">assign </span><span class="s2">and </span><span class="s1">item</span><span class="s3">.</span><span class="s1">type </span><span class="s3">!= </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">KEYWORD</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span>
+                        <span class="s4">&quot;Inline IF with assignment can only contain keyword calls.&quot;</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">item</span><span class="s3">, </span><span class="s4">&quot;assign&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;Inline IF branches cannot contain assignments.&quot;</span><span class="s3">,)</span>
+                <span class="s2">if </span><span class="s1">item</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">INLINE_IF</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;Inline IF cannot be nested.&quot;</span><span class="s3">,)</span>
+            <span class="s1">branch </span><span class="s3">= </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">orelse</span>
+
+
+<span class="s2">class </span><span class="s1">For</span><span class="s3">(</span><span class="s1">NestedBlock</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">ForHeader</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">assign</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;tuple[str, ...]&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">assign</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">variables</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;tuple[str, ...]&quot;</span><span class="s3">:  </span><span class="s0"># TODO: Remove in RF 8.0.</span>
+        <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+            <span class="s4">&quot;'For.variables' is deprecated and will be removed in &quot;</span>
+            <span class="s4">&quot;Robot Framework 8.0. Use 'For.assign' instead.&quot;</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">assign</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">values</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;tuple[str, ...]&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">values</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">flavor</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">flavor</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">start</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">start</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">mode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">mode</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">fill</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">fill</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;FOR loop cannot be empty.&quot;</span><span class="s3">,)</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">end</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;FOR loop must have closing END.&quot;</span><span class="s3">,)</span>
+
+
+<span class="s2">class </span><span class="s1">Try</span><span class="s3">(</span><span class="s1">NestedBlock</span><span class="s3">):</span>
+    <span class="s1">_fields </span><span class="s3">= (</span><span class="s4">&quot;header&quot;</span><span class="s3">, </span><span class="s4">&quot;body&quot;</span><span class="s3">, </span><span class="s4">&quot;next&quot;</span><span class="s3">, </span><span class="s4">&quot;end&quot;</span><span class="s3">)</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s4">&quot;TryHeader|ExceptHeader|ElseHeader|FinallyHeader&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">header</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">,</span>
+        <span class="s1">body</span><span class="s3">: </span><span class="s1">Body </span><span class="s3">= (),</span>
+        <span class="s1">next</span><span class="s3">: </span><span class="s4">&quot;Try|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">end</span><span class="s3">: </span><span class="s4">&quot;End|None&quot; </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">errors</span><span class="s3">: </span><span class="s1">Errors </span><span class="s3">= (),</span>
+    <span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">header</span><span class="s3">, </span><span class="s1">body</span><span class="s3">, </span><span class="s1">end</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">next </span><span class="s3">= </span><span class="s1">next</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">type</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">type</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">patterns</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;tuple[str, ...]&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">, </span><span class="s4">&quot;patterns&quot;</span><span class="s3">, ())</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">pattern_type</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">, </span><span class="s4">&quot;pattern_type&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">assign</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">, </span><span class="s4">&quot;assign&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">variable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:  </span><span class="s0"># TODO: Remove in RF 8.0.</span>
+        <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+            <span class="s4">&quot;'Try.variable' is deprecated and will be removed in &quot;</span>
+            <span class="s4">&quot;Robot Framework 8.0. Use 'Try.assign' instead.&quot;</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">assign</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_body</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">TRY</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_structure</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_end</span><span class="s3">()</span>
+            <span class="s1">TemplatesNotAllowed</span><span class="s3">(</span><span class="s4">&quot;TRY&quot;</span><span class="s3">).</span><span class="s1">check</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_body</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">type</span><span class="s2">} </span><span class="s4">branch cannot be empty.&quot;</span><span class="s3">,)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_structure</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">else_count </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">finally_count </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">except_count </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">empty_except_count </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">branch </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">next</span>
+        <span class="s2">while </span><span class="s1">branch</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">EXCEPT</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">else_count</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;EXCEPT not allowed after ELSE.&quot;</span><span class="s3">,)</span>
+                <span class="s2">if </span><span class="s1">finally_count</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;EXCEPT not allowed after FINALLY.&quot;</span><span class="s3">,)</span>
+                <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">patterns </span><span class="s2">and </span><span class="s1">empty_except_count</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;EXCEPT without patterns must be last.&quot;</span><span class="s3">,)</span>
+                <span class="s2">if not </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">patterns</span><span class="s3">:</span>
+                    <span class="s1">empty_except_count </span><span class="s3">+= </span><span class="s5">1</span>
+                <span class="s1">except_count </span><span class="s3">+= </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">ELSE</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">finally_count</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;ELSE not allowed after FINALLY.&quot;</span><span class="s3">,)</span>
+                <span class="s1">else_count </span><span class="s3">+= </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">FINALLY</span><span class="s3">:</span>
+                <span class="s1">finally_count </span><span class="s3">+= </span><span class="s5">1</span>
+            <span class="s1">branch </span><span class="s3">= </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">next</span>
+        <span class="s2">if </span><span class="s1">finally_count </span><span class="s3">&gt; </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;Only one FINALLY allowed.&quot;</span><span class="s3">,)</span>
+        <span class="s2">if </span><span class="s1">else_count </span><span class="s3">&gt; </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;Only one ELSE allowed.&quot;</span><span class="s3">,)</span>
+        <span class="s2">if </span><span class="s1">empty_except_count </span><span class="s3">&gt; </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;Only one EXCEPT without patterns allowed.&quot;</span><span class="s3">,)</span>
+        <span class="s2">if not </span><span class="s3">(</span><span class="s1">except_count </span><span class="s2">or </span><span class="s1">finally_count</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;TRY structure must have EXCEPT or FINALLY branch.&quot;</span><span class="s3">,)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_end</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">end</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;TRY must have closing END.&quot;</span><span class="s3">,)</span>
+
+
+<span class="s2">class </span><span class="s1">While</span><span class="s3">(</span><span class="s1">NestedBlock</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">WhileHeader</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">condition</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">condition</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">limit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">limit</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">on_limit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">on_limit</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">on_limit_message</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;str|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">on_limit_message</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;WHILE loop cannot be empty.&quot;</span><span class="s3">,)</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">end</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;WHILE loop must have closing END.&quot;</span><span class="s3">,)</span>
+        <span class="s1">TemplatesNotAllowed</span><span class="s3">(</span><span class="s4">&quot;WHILE&quot;</span><span class="s3">).</span><span class="s1">check</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Group</span><span class="s3">(</span><span class="s1">NestedBlock</span><span class="s3">):</span>
+    <span class="s1">header</span><span class="s3">: </span><span class="s1">GroupHeader</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">: </span><span class="s4">&quot;ValidationContext&quot;</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_body_is_empty</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;GROUP cannot be empty.&quot;</span><span class="s3">,)</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">end</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">&quot;GROUP must have closing END.&quot;</span><span class="s3">,)</span>
+
+
+<span class="s2">class </span><span class="s1">ModelWriter</span><span class="s3">(</span><span class="s1">ModelVisitor</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">output</span><span class="s3">: </span><span class="s4">&quot;Path|str|TextIO&quot;</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">output</span><span class="s3">, (</span><span class="s1">Path</span><span class="s3">, </span><span class="s1">str</span><span class="s3">)):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">writer </span><span class="s3">= </span><span class="s1">file_writer</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">close_writer </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">writer </span><span class="s3">= </span><span class="s1">output</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">close_writer </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">write</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">model</span><span class="s3">: </span><span class="s1">Node</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">visit</span><span class="s3">(</span><span class="s1">model</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">close_writer</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">writer</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">visit_Statement</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">statement</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">token </span><span class="s2">in </span><span class="s1">statement</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">writer</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">token</span><span class="s3">.</span><span class="s1">value</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ModelValidator</span><span class="s3">(</span><span class="s1">ModelVisitor</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ctx </span><span class="s3">= </span><span class="s1">ValidationContext</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">visit_Block</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">: </span><span class="s1">Block</span><span class="s3">):</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">block</span><span class="s3">(</span><span class="s1">node</span><span class="s3">):</span>
+            <span class="s1">node</span><span class="s3">.</span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">ctx</span><span class="s3">)</span>
+            <span class="s1">super</span><span class="s3">().</span><span class="s1">generic_visit</span><span class="s3">(</span><span class="s1">node</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Statement</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">):</span>
+        <span class="s1">node</span><span class="s3">.</span><span class="s1">validate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">ctx</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ValidationContext</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">blocks </span><span class="s3">= []</span>
+
+    <span class="s3">@</span><span class="s1">contextmanager</span>
+    <span class="s2">def </span><span class="s1">block</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">: </span><span class="s1">Block</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">blocks</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">node</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">yield</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">blocks</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">parent_block</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;Block|None&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">blocks</span><span class="s3">[-</span><span class="s5">1</span><span class="s3">] </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">blocks </span><span class="s2">else None</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">tasks</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">parent </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">blocks</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">, </span><span class="s1">TestCaseSection</span><span class="s3">):</span>
+                <span class="s2">return </span><span class="s1">parent</span><span class="s3">.</span><span class="s1">tasks</span>
+        <span class="s2">return False</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">in_keyword</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">any</span><span class="s3">(</span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">b</span><span class="s3">, </span><span class="s1">Keyword</span><span class="s3">) </span><span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">blocks</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">in_loop</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">any</span><span class="s3">(</span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">b</span><span class="s3">, (</span><span class="s1">For</span><span class="s3">, </span><span class="s1">While</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">blocks</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">in_finally</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s1">parent </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">parent_block</span>
+        <span class="s2">return </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">, </span><span class="s1">Try</span><span class="s3">) </span><span class="s2">and </span><span class="s1">parent</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">type </span><span class="s3">== </span><span class="s1">Token</span><span class="s3">.</span><span class="s1">FINALLY</span>
+
+
+<span class="s2">class </span><span class="s1">FirstStatementFinder</span><span class="s3">(</span><span class="s1">ModelVisitor</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">statement</span><span class="s3">: </span><span class="s4">&quot;Statement|None&quot; </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">find_from</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">model</span><span class="s3">: </span><span class="s1">Node</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;Statement|None&quot;</span><span class="s3">:</span>
+        <span class="s1">finder </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">()</span>
+        <span class="s1">finder</span><span class="s3">.</span><span class="s1">visit</span><span class="s3">(</span><span class="s1">model</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">finder</span><span class="s3">.</span><span class="s1">statement</span>
+
+    <span class="s2">def </span><span class="s1">visit_Statement</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">statement</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">statement </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">statement </span><span class="s3">= </span><span class="s1">statement</span>
+
+    <span class="s2">def </span><span class="s1">generic_visit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">: </span><span class="s1">Node</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">statement </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">super</span><span class="s3">().</span><span class="s1">generic_visit</span><span class="s3">(</span><span class="s1">node</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">LastStatementFinder</span><span class="s3">(</span><span class="s1">ModelVisitor</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">statement</span><span class="s3">: </span><span class="s4">&quot;Statement|None&quot; </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">find_from</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">model</span><span class="s3">: </span><span class="s1">Node</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;Statement|None&quot;</span><span class="s3">:</span>
+        <span class="s1">finder </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">()</span>
+        <span class="s1">finder</span><span class="s3">.</span><span class="s1">visit</span><span class="s3">(</span><span class="s1">model</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">finder</span><span class="s3">.</span><span class="s1">statement</span>
+
+    <span class="s2">def </span><span class="s1">visit_Statement</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">statement</span><span class="s3">: </span><span class="s1">Statement</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">statement </span><span class="s3">= </span><span class="s1">statement</span>
+
+
+<span class="s2">class </span><span class="s1">TemplatesNotAllowed</span><span class="s3">(</span><span class="s1">ModelVisitor</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">kind</span><span class="s3">: </span><span class="s1">str</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">kind </span><span class="s3">= </span><span class="s1">kind</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">found </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">check</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">model</span><span class="s3">: </span><span class="s1">Node</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">found </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">visit</span><span class="s3">(</span><span class="s1">model</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">found</span><span class="s3">:</span>
+            <span class="s1">model</span><span class="s3">.</span><span class="s1">errors </span><span class="s3">+= (</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">kind</span><span class="s2">} </span><span class="s4">does not support templates.&quot;</span><span class="s3">,)</span>
+
+    <span class="s2">def </span><span class="s1">visit_TemplateArguments</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">node</span><span class="s3">: </span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">found </span><span class="s3">= </span><span class="s2">True</span>
+</pre>
+</body>
+</html>

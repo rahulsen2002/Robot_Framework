@@ -1,0 +1,211 @@
+<html>
+<head>
+<title>_socket.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #2aacb8;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_socket.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">selectors</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Union</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_exceptions </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">WebSocketConnectionClosedException</span><span class="s2">,</span>
+    <span class="s1">WebSocketTimeoutException</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_ssl_compat </span><span class="s0">import </span><span class="s1">SSLError</span><span class="s2">, </span><span class="s1">SSLWantReadError</span><span class="s2">, </span><span class="s1">SSLWantWriteError</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_utils </span><span class="s0">import </span><span class="s1">extract_error_code</span><span class="s2">, </span><span class="s1">extract_err_message</span>
+
+<span class="s3">&quot;&quot;&quot; 
+_socket.py 
+websocket - WebSocket client library for Python 
+ 
+Copyright 2024 engn33r 
+ 
+Licensed under the Apache License, Version 2.0 (the &quot;License&quot;); 
+you may not use this file except in compliance with the License. 
+You may obtain a copy of the License at 
+ 
+    http://www.apache.org/licenses/LICENSE-2.0 
+ 
+Unless required by applicable law or agreed to in writing, software 
+distributed under the License is distributed on an &quot;AS IS&quot; BASIS, 
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
+See the License for the specific language governing permissions and 
+limitations under the License. 
+&quot;&quot;&quot;</span>
+
+<span class="s1">DEFAULT_SOCKET_OPTION </span><span class="s2">= [(</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_TCP</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">TCP_NODELAY</span><span class="s2">, </span><span class="s4">1</span><span class="s2">)]</span>
+<span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">, </span><span class="s3">&quot;SO_KEEPALIVE&quot;</span><span class="s2">):</span>
+    <span class="s1">DEFAULT_SOCKET_OPTION</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_SOCKET</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SO_KEEPALIVE</span><span class="s2">, </span><span class="s4">1</span><span class="s2">))</span>
+<span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">, </span><span class="s3">&quot;TCP_KEEPIDLE&quot;</span><span class="s2">):</span>
+    <span class="s1">DEFAULT_SOCKET_OPTION</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_TCP</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">TCP_KEEPIDLE</span><span class="s2">, </span><span class="s4">30</span><span class="s2">))</span>
+<span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">, </span><span class="s3">&quot;TCP_KEEPINTVL&quot;</span><span class="s2">):</span>
+    <span class="s1">DEFAULT_SOCKET_OPTION</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_TCP</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">TCP_KEEPINTVL</span><span class="s2">, </span><span class="s4">10</span><span class="s2">))</span>
+<span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">, </span><span class="s3">&quot;TCP_KEEPCNT&quot;</span><span class="s2">):</span>
+    <span class="s1">DEFAULT_SOCKET_OPTION</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_TCP</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">TCP_KEEPCNT</span><span class="s2">, </span><span class="s4">3</span><span class="s2">))</span>
+
+<span class="s1">_default_timeout </span><span class="s2">= </span><span class="s0">None</span>
+
+<span class="s1">__all__ </span><span class="s2">= [</span>
+    <span class="s3">&quot;DEFAULT_SOCKET_OPTION&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;sock_opt&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;setdefaulttimeout&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;getdefaulttimeout&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;recv&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;recv_line&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;send&quot;</span><span class="s2">,</span>
+<span class="s2">]</span>
+
+
+<span class="s0">class </span><span class="s1">sock_opt</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sockopt</span><span class="s2">: </span><span class="s1">list</span><span class="s2">, </span><span class="s1">sslopt</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">sockopt </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">sockopt </span><span class="s2">= []</span>
+        <span class="s0">if </span><span class="s1">sslopt </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">sslopt </span><span class="s2">= {}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">sockopt </span><span class="s2">= </span><span class="s1">sockopt</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">sslopt </span><span class="s2">= </span><span class="s1">sslopt</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">timeout </span><span class="s2">= </span><span class="s0">None</span>
+
+
+<span class="s0">def </span><span class="s1">setdefaulttimeout</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Set the global timeout setting to connect. 
+ 
+    Parameters 
+    ---------- 
+    timeout: int or float 
+        default socket timeout time (in seconds) 
+    &quot;&quot;&quot;</span>
+    <span class="s0">global </span><span class="s1">_default_timeout</span>
+    <span class="s1">_default_timeout </span><span class="s2">= </span><span class="s1">timeout</span>
+
+
+<span class="s0">def </span><span class="s1">getdefaulttimeout</span><span class="s2">() </span><span class="s1">-&gt; Union</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Get default timeout 
+ 
+    Returns 
+    ---------- 
+    _default_timeout: int or float 
+        Return the global timeout setting (in seconds) to connect. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">_default_timeout</span>
+
+
+<span class="s0">def </span><span class="s1">recv</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s1">bufsize</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+    <span class="s0">if not </span><span class="s1">sock</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">WebSocketConnectionClosedException</span><span class="s2">(</span><span class="s3">&quot;socket is already closed.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_recv</span><span class="s2">():</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s1">bufsize</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">SSLWantReadError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">except </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">error </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+            <span class="s1">error_code </span><span class="s2">= </span><span class="s1">extract_error_code</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">error_code </span><span class="s0">not in </span><span class="s2">[</span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EAGAIN</span><span class="s2">, </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EWOULDBLOCK</span><span class="s2">]:</span>
+                <span class="s0">raise</span>
+
+        <span class="s1">sel </span><span class="s2">= </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">DefaultSelector</span><span class="s2">()</span>
+        <span class="s1">sel</span><span class="s2">.</span><span class="s1">register</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">EVENT_READ</span><span class="s2">)</span>
+
+        <span class="s1">r </span><span class="s2">= </span><span class="s1">sel</span><span class="s2">.</span><span class="s1">select</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">gettimeout</span><span class="s2">())</span>
+        <span class="s1">sel</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+        <span class="s0">if </span><span class="s1">r</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s1">bufsize</span><span class="s2">)</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">gettimeout</span><span class="s2">() == </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s1">bytes_ </span><span class="s2">= </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s1">bufsize</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">bytes_ </span><span class="s2">= </span><span class="s1">_recv</span><span class="s2">()</span>
+    <span class="s0">except </span><span class="s1">TimeoutError</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">WebSocketTimeoutException</span><span class="s2">(</span><span class="s3">&quot;Connection timed out&quot;</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">timeout </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+        <span class="s1">message </span><span class="s2">= </span><span class="s1">extract_err_message</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+        <span class="s0">raise </span><span class="s1">WebSocketTimeoutException</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">SSLError </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+        <span class="s1">message </span><span class="s2">= </span><span class="s1">extract_err_message</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">message</span><span class="s2">, </span><span class="s1">str</span><span class="s2">) </span><span class="s0">and </span><span class="s3">&quot;timed out&quot; </span><span class="s0">in </span><span class="s1">message</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketTimeoutException</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">raise</span>
+
+    <span class="s0">if not </span><span class="s1">bytes_</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">WebSocketConnectionClosedException</span><span class="s2">(</span><span class="s3">&quot;Connection to remote host was lost.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">bytes_</span>
+
+
+<span class="s0">def </span><span class="s1">recv_line</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+    <span class="s1">line </span><span class="s2">= []</span>
+    <span class="s0">while True</span><span class="s2">:</span>
+        <span class="s1">c </span><span class="s2">= </span><span class="s1">recv</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s4">1</span><span class="s2">)</span>
+        <span class="s1">line</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">c</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">c </span><span class="s2">== </span><span class="s6">b&quot;</span><span class="s0">\n</span><span class="s6">&quot;</span><span class="s2">:</span>
+            <span class="s0">break</span>
+    <span class="s0">return </span><span class="s6">b&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">line</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">send</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s1">data</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">data</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+        <span class="s1">data </span><span class="s2">= </span><span class="s1">data</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s3">&quot;utf-8&quot;</span><span class="s2">)</span>
+
+    <span class="s0">if not </span><span class="s1">sock</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">WebSocketConnectionClosedException</span><span class="s2">(</span><span class="s3">&quot;socket is already closed.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_send</span><span class="s2">():</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">data</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">SSLWantWriteError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">except </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">error </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+            <span class="s1">error_code </span><span class="s2">= </span><span class="s1">extract_error_code</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">error_code </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">raise</span>
+            <span class="s0">if </span><span class="s1">error_code </span><span class="s0">not in </span><span class="s2">[</span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EAGAIN</span><span class="s2">, </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EWOULDBLOCK</span><span class="s2">]:</span>
+                <span class="s0">raise</span>
+
+        <span class="s1">sel </span><span class="s2">= </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">DefaultSelector</span><span class="s2">()</span>
+        <span class="s1">sel</span><span class="s2">.</span><span class="s1">register</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">EVENT_WRITE</span><span class="s2">)</span>
+
+        <span class="s1">w </span><span class="s2">= </span><span class="s1">sel</span><span class="s2">.</span><span class="s1">select</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">gettimeout</span><span class="s2">())</span>
+        <span class="s1">sel</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+        <span class="s0">if </span><span class="s1">w</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">data</span><span class="s2">)</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">gettimeout</span><span class="s2">() == </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">data</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">_send</span><span class="s2">()</span>
+    <span class="s0">except </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">timeout </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+        <span class="s1">message </span><span class="s2">= </span><span class="s1">extract_err_message</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+        <span class="s0">raise </span><span class="s1">WebSocketTimeoutException</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">Exception </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+        <span class="s1">message </span><span class="s2">= </span><span class="s1">extract_err_message</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">message</span><span class="s2">, </span><span class="s1">str</span><span class="s2">) </span><span class="s0">and </span><span class="s3">&quot;timed out&quot; </span><span class="s0">in </span><span class="s1">message</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketTimeoutException</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">raise</span>
+</pre>
+</body>
+</html>

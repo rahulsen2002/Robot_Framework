@@ -1,0 +1,176 @@
+<html>
+<head>
+<title>websocket_connection.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+websocket_connection.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Licensed to the Software Freedom Conservancy (SFC) under one</span>
+<span class="s0"># or more contributor license agreements.  See the NOTICE file</span>
+<span class="s0"># distributed with this work for additional information</span>
+<span class="s0"># regarding copyright ownership.  The SFC licenses this file</span>
+<span class="s0"># to you under the Apache License, Version 2.0 (the</span>
+<span class="s0"># &quot;License&quot;); you may not use this file except in compliance</span>
+<span class="s0"># with the License.  You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#   http://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing,</span>
+<span class="s0"># software distributed under the License is distributed on an</span>
+<span class="s0"># &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY</span>
+<span class="s0"># KIND, either express or implied.  See the License for the</span>
+<span class="s0"># specific language governing permissions and limitations</span>
+<span class="s0"># under the License.</span>
+<span class="s2">import </span><span class="s1">json</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">from </span><span class="s1">ssl </span><span class="s2">import </span><span class="s1">CERT_NONE</span>
+<span class="s2">from </span><span class="s1">threading </span><span class="s2">import </span><span class="s1">Thread</span>
+<span class="s2">from </span><span class="s1">time </span><span class="s2">import </span><span class="s1">sleep</span>
+
+<span class="s2">from </span><span class="s1">websocket </span><span class="s2">import </span><span class="s1">WebSocketApp  </span><span class="s0"># type: ignore</span>
+
+<span class="s2">from </span><span class="s1">selenium</span><span class="s3">.</span><span class="s1">common </span><span class="s2">import </span><span class="s1">WebDriverException</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">WebSocketConnection</span><span class="s3">:</span>
+    <span class="s1">_response_wait_timeout </span><span class="s3">= </span><span class="s4">30</span>
+    <span class="s1">_response_wait_interval </span><span class="s3">= </span><span class="s4">0.1</span>
+
+    <span class="s1">_max_log_message_size </span><span class="s3">= </span><span class="s4">9999</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks </span><span class="s3">= {}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">session_id </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">url </span><span class="s3">= </span><span class="s1">url</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_id </span><span class="s3">= </span><span class="s4">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_messages </span><span class="s3">= {}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_started </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_start_ws</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_wait_until</span><span class="s3">(</span><span class="s2">lambda</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_started</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws_thread</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_response_wait_timeout</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_started </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">execute</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">command</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_id </span><span class="s3">+= </span><span class="s4">1</span>
+        <span class="s1">payload </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_serialize_command</span><span class="s3">(</span><span class="s1">command</span><span class="s3">)</span>
+        <span class="s1">payload</span><span class="s3">[</span><span class="s5">&quot;id&quot;</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_id</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">session_id</span><span class="s3">:</span>
+            <span class="s1">payload</span><span class="s3">[</span><span class="s5">&quot;sessionId&quot;</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">session_id</span>
+
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">dumps</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">)</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">f&quot;-&gt; </span><span class="s2">{</span><span class="s1">data</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">[: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_max_log_message_size</span><span class="s3">])</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+        <span class="s1">current_id </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_id</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_wait_until</span><span class="s3">(</span><span class="s2">lambda</span><span class="s3">: </span><span class="s1">current_id </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_messages</span><span class="s3">)</span>
+        <span class="s1">response </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_messages</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">current_id</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s5">&quot;error&quot; </span><span class="s2">in </span><span class="s1">response</span><span class="s3">:</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s1">response</span><span class="s3">[</span><span class="s5">&quot;error&quot;</span><span class="s3">]</span>
+            <span class="s2">if </span><span class="s5">&quot;message&quot; </span><span class="s2">in </span><span class="s1">response</span><span class="s3">:</span>
+                <span class="s1">error_msg </span><span class="s3">= </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">error</span><span class="s2">}</span><span class="s5">: </span><span class="s2">{</span><span class="s1">response</span><span class="s3">[</span><span class="s5">'message'</span><span class="s3">]</span><span class="s2">}</span><span class="s5">&quot;</span>
+                <span class="s2">raise </span><span class="s1">WebDriverException</span><span class="s3">(</span><span class="s1">error_msg</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">WebDriverException</span><span class="s3">(</span><span class="s1">error</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s1">response</span><span class="s3">[</span><span class="s5">&quot;result&quot;</span><span class="s3">]</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_deserialize_result</span><span class="s3">(</span><span class="s1">result</span><span class="s3">, </span><span class="s1">command</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">add_callback</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">):</span>
+        <span class="s1">event_name </span><span class="s3">= </span><span class="s1">event</span><span class="s3">.</span><span class="s1">event_class</span>
+        <span class="s2">if </span><span class="s1">event_name </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">[</span><span class="s1">event_name</span><span class="s3">] = []</span>
+
+        <span class="s2">def </span><span class="s1">_callback</span><span class="s3">(</span><span class="s1">params</span><span class="s3">):</span>
+            <span class="s1">callback</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">params</span><span class="s3">))</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">[</span><span class="s1">event_name</span><span class="s3">].</span><span class="s1">append</span><span class="s3">(</span><span class="s1">_callback</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">id</span><span class="s3">(</span><span class="s1">_callback</span><span class="s3">)</span>
+
+    <span class="s1">on </span><span class="s3">= </span><span class="s1">add_callback</span>
+
+    <span class="s2">def </span><span class="s1">remove_callback</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">):</span>
+        <span class="s1">event_name </span><span class="s3">= </span><span class="s1">event</span><span class="s3">.</span><span class="s1">event_class</span>
+        <span class="s2">if </span><span class="s1">event_name </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">callback </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">[</span><span class="s1">event_name</span><span class="s3">]:</span>
+                <span class="s2">if </span><span class="s1">id</span><span class="s3">(</span><span class="s1">callback</span><span class="s3">) == </span><span class="s1">callback_id</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">[</span><span class="s1">event_name</span><span class="s3">].</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">callback</span><span class="s3">)</span>
+                    <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">_serialize_command</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">command</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">next</span><span class="s3">(</span><span class="s1">command</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_deserialize_result</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">command</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">_ </span><span class="s3">= </span><span class="s1">command</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">WebDriverException</span><span class="s3">(</span><span class="s5">&quot;The command's generator function did not exit when expected!&quot;</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">StopIteration </span><span class="s2">as </span><span class="s1">exit</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">exit</span><span class="s3">.</span><span class="s1">value</span>
+
+    <span class="s2">def </span><span class="s1">_start_ws</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">def </span><span class="s1">on_open</span><span class="s3">(</span><span class="s1">ws</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_started </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s2">def </span><span class="s1">on_message</span><span class="s3">(</span><span class="s1">ws</span><span class="s3">, </span><span class="s1">message</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_message</span><span class="s3">(</span><span class="s1">message</span><span class="s3">)</span>
+
+        <span class="s2">def </span><span class="s1">on_error</span><span class="s3">(</span><span class="s1">ws</span><span class="s3">, </span><span class="s1">error</span><span class="s3">):</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">f&quot;error: </span><span class="s2">{</span><span class="s1">error</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+            <span class="s1">ws</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+        <span class="s2">def </span><span class="s1">run_socket</span><span class="s3">():</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">url</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;wss://&quot;</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws</span><span class="s3">.</span><span class="s1">run_forever</span><span class="s3">(</span><span class="s1">sslopt</span><span class="s3">={</span><span class="s5">&quot;cert_reqs&quot;</span><span class="s3">: </span><span class="s1">CERT_NONE</span><span class="s3">}, </span><span class="s1">suppress_origin</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws</span><span class="s3">.</span><span class="s1">run_forever</span><span class="s3">(</span><span class="s1">suppress_origin</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws </span><span class="s3">= </span><span class="s1">WebSocketApp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">url</span><span class="s3">, </span><span class="s1">on_open</span><span class="s3">=</span><span class="s1">on_open</span><span class="s3">, </span><span class="s1">on_message</span><span class="s3">=</span><span class="s1">on_message</span><span class="s3">, </span><span class="s1">on_error</span><span class="s3">=</span><span class="s1">on_error</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws_thread </span><span class="s3">= </span><span class="s1">Thread</span><span class="s3">(</span><span class="s1">target</span><span class="s3">=</span><span class="s1">run_socket</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ws_thread</span><span class="s3">.</span><span class="s1">start</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_process_message</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">message</span><span class="s3">):</span>
+        <span class="s1">message </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">loads</span><span class="s3">(</span><span class="s1">message</span><span class="s3">)</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">f&quot;&lt;- </span><span class="s2">{</span><span class="s1">message</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">[: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_max_log_message_size</span><span class="s3">])</span>
+
+        <span class="s2">if </span><span class="s5">&quot;id&quot; </span><span class="s2">in </span><span class="s1">message</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_messages</span><span class="s3">[</span><span class="s1">message</span><span class="s3">[</span><span class="s5">&quot;id&quot;</span><span class="s3">]] = </span><span class="s1">message</span>
+
+        <span class="s2">if </span><span class="s5">&quot;method&quot; </span><span class="s2">in </span><span class="s1">message</span><span class="s3">:</span>
+            <span class="s1">params </span><span class="s3">= </span><span class="s1">message</span><span class="s3">[</span><span class="s5">&quot;params&quot;</span><span class="s3">]</span>
+            <span class="s2">for </span><span class="s1">callback </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">callbacks</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">message</span><span class="s3">[</span><span class="s5">&quot;method&quot;</span><span class="s3">], []):</span>
+                <span class="s1">Thread</span><span class="s3">(</span><span class="s1">target</span><span class="s3">=</span><span class="s1">callback</span><span class="s3">, </span><span class="s1">args</span><span class="s3">=(</span><span class="s1">params</span><span class="s3">,)).</span><span class="s1">start</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_wait_until</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">condition</span><span class="s3">):</span>
+        <span class="s1">timeout </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_response_wait_timeout</span>
+        <span class="s1">interval </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_response_wait_interval</span>
+
+        <span class="s2">while </span><span class="s1">timeout </span><span class="s3">&gt; </span><span class="s4">0</span><span class="s3">:</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s1">condition</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">result</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">result</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">timeout </span><span class="s3">-= </span><span class="s1">interval</span>
+                <span class="s1">sleep</span><span class="s3">(</span><span class="s1">interval</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

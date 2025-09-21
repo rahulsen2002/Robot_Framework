@@ -1,0 +1,1066 @@
+<html>
+<head>
+<title>_io_windows.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #a5c261;}
+.s7 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_io_windows.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">enum</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Literal</span><span class="s2">,</span>
+    <span class="s1">Protocol</span><span class="s2">,</span>
+    <span class="s1">TypeVar</span><span class="s2">,</span>
+    <span class="s1">cast</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+<span class="s0">from </span><span class="s1">outcome </span><span class="s0">import </span><span class="s1">Value</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_io_common </span><span class="s0">import </span><span class="s1">wake_all</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_run </span><span class="s0">import </span><span class="s1">_public</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_windows_cffi </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">INVALID_HANDLE_VALUE</span><span class="s2">,</span>
+    <span class="s1">AFDPollFlags</span><span class="s2">,</span>
+    <span class="s1">CData</span><span class="s2">,</span>
+    <span class="s1">CompletionModes</span><span class="s2">,</span>
+    <span class="s1">CType</span><span class="s2">,</span>
+    <span class="s1">ErrorCodes</span><span class="s2">,</span>
+    <span class="s1">FileFlags</span><span class="s2">,</span>
+    <span class="s1">Handle</span><span class="s2">,</span>
+    <span class="s1">IoControlCodes</span><span class="s2">,</span>
+    <span class="s1">WSAIoctls</span><span class="s2">,</span>
+    <span class="s1">_handle</span><span class="s2">,</span>
+    <span class="s1">_Overlapped</span><span class="s2">,</span>
+    <span class="s1">ffi</span><span class="s2">,</span>
+    <span class="s1">kernel32</span><span class="s2">,</span>
+    <span class="s1">ntdll</span><span class="s2">,</span>
+    <span class="s1">raise_winerror</span><span class="s2">,</span>
+    <span class="s1">ws2_32</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Iterator</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Buffer</span><span class="s2">, </span><span class="s1">TypeAlias</span>
+
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_file_io </span><span class="s0">import </span><span class="s1">_HasFileNo</span>
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">_traps </span><span class="s0">import </span><span class="s1">Abort</span><span class="s2">, </span><span class="s1">RaiseCancelT</span>
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">_unbounded_queue </span><span class="s0">import </span><span class="s1">UnboundedQueue</span>
+
+<span class="s1">EventResult</span><span class="s2">: </span><span class="s1">TypeAlias </span><span class="s2">= </span><span class="s1">int</span>
+<span class="s1">T </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;T&quot;</span><span class="s2">)</span>
+
+<span class="s4"># There's a lot to be said about the overall design of a Windows event</span>
+<span class="s4"># loop. See</span>
+<span class="s4">#</span>
+<span class="s4">#    https://github.com/python-trio/trio/issues/52</span>
+<span class="s4">#</span>
+<span class="s4"># for discussion. This now just has some lower-level notes:</span>
+<span class="s4">#</span>
+<span class="s4"># How IOCP fits together:</span>
+<span class="s4">#</span>
+<span class="s4"># The general model is that you call some function like ReadFile or WriteFile</span>
+<span class="s4"># to tell the kernel that you want it to perform some operation, and the</span>
+<span class="s4"># kernel goes off and does that in the background, then at some point later it</span>
+<span class="s4"># sends you a notification that the operation is complete. There are some more</span>
+<span class="s4"># exotic APIs that don't quite fit this pattern, but most APIs do.</span>
+<span class="s4">#</span>
+<span class="s4"># Each background operation is tracked using an OVERLAPPED struct, that</span>
+<span class="s4"># uniquely identifies that particular operation.</span>
+<span class="s4">#</span>
+<span class="s4"># An &quot;IOCP&quot; (or &quot;I/O completion port&quot;) is an object that lets the kernel send</span>
+<span class="s4"># us these notifications -- basically it's just a kernel-&gt;userspace queue.</span>
+<span class="s4">#</span>
+<span class="s4"># Each IOCP notification is represented by an OVERLAPPED_ENTRY struct, which</span>
+<span class="s4"># contains 3 fields:</span>
+<span class="s4"># - The &quot;completion key&quot;. This is an opaque integer that we pick, and use</span>
+<span class="s4">#   however is convenient.</span>
+<span class="s4"># - pointer to the OVERLAPPED struct for the completed operation.</span>
+<span class="s4"># - dwNumberOfBytesTransferred (an integer).</span>
+<span class="s4">#</span>
+<span class="s4"># And in addition, for regular I/O, the OVERLAPPED structure gets filled in</span>
+<span class="s4"># with:</span>
+<span class="s4"># - result code (named &quot;Internal&quot;)</span>
+<span class="s4"># - number of bytes transferred (named &quot;InternalHigh&quot;); usually redundant</span>
+<span class="s4">#   with dwNumberOfBytesTransferred.</span>
+<span class="s4">#</span>
+<span class="s4"># There are also some other entries in OVERLAPPED which only matter on input:</span>
+<span class="s4"># - Offset and OffsetHigh which are inputs to {Read,Write}File and</span>
+<span class="s4">#   otherwise always zero</span>
+<span class="s4"># - hEvent which is for if you aren't using IOCP; we always set it to zero.</span>
+<span class="s4">#</span>
+<span class="s4"># That describes the usual pattern for operations and the usual meaning of</span>
+<span class="s4"># these struct fields, but really these are just some arbitrary chunks of</span>
+<span class="s4"># bytes that get passed back and forth, so some operations like to overload</span>
+<span class="s4"># them to mean something else.</span>
+<span class="s4">#</span>
+<span class="s4"># You can also directly queue an OVERLAPPED_ENTRY object to an IOCP by calling</span>
+<span class="s4"># PostQueuedCompletionStatus. When you use this you get to set all the</span>
+<span class="s4"># OVERLAPPED_ENTRY fields to arbitrary values.</span>
+<span class="s4">#</span>
+<span class="s4"># You can request to cancel any operation if you know which handle it was</span>
+<span class="s4"># issued on + the OVERLAPPED struct that identifies it (via CancelIoEx). This</span>
+<span class="s4"># request might fail because the operation has already completed, or it might</span>
+<span class="s4"># be queued to happen in the background, so you only find out whether it</span>
+<span class="s4"># succeeded or failed later, when we get back the notification for the</span>
+<span class="s4"># operation being complete.</span>
+<span class="s4">#</span>
+<span class="s4"># There are three types of operations that we support:</span>
+<span class="s4">#</span>
+<span class="s4"># == Regular I/O operations on handles (e.g. files or named pipes) ==</span>
+<span class="s4">#</span>
+<span class="s4"># Implemented by: register_with_iocp, wait_overlapped</span>
+<span class="s4">#</span>
+<span class="s4"># To use these, you have to register the handle with your IOCP first. Once</span>
+<span class="s4"># it's registered, any operations on that handle will automatically send</span>
+<span class="s4"># completion events to that IOCP, with a completion key that you specify *when</span>
+<span class="s4"># the handle is registered* (so you can't use different completion keys for</span>
+<span class="s4"># different operations).</span>
+<span class="s4">#</span>
+<span class="s4"># We give these two dedicated completion keys: CKeys.WAIT_OVERLAPPED for</span>
+<span class="s4"># regular operations, and CKeys.LATE_CANCEL that's used to make</span>
+<span class="s4"># wait_overlapped cancellable even if the user forgot to call</span>
+<span class="s4"># register_with_iocp. The problem here is that after we request the cancel,</span>
+<span class="s4"># wait_overlapped keeps blocking until it sees the completion notification...</span>
+<span class="s4"># but if the user forgot to register_with_iocp, then the completion will never</span>
+<span class="s4"># come, so the cancellation will never resolve. To avoid this, whenever we try</span>
+<span class="s4"># to cancel an I/O operation and the cancellation fails, we use</span>
+<span class="s4"># PostQueuedCompletionStatus to send a CKeys.LATE_CANCEL notification. If this</span>
+<span class="s4"># arrives before the real completion, we assume the user forgot to call</span>
+<span class="s4"># register_with_iocp on their handle, and raise an error accordingly.</span>
+<span class="s4">#</span>
+<span class="s4"># == Socket state notifications ==</span>
+<span class="s4">#</span>
+<span class="s4"># Implemented by: wait_readable, wait_writable</span>
+<span class="s4">#</span>
+<span class="s4"># The public APIs that windows provides for this are all really awkward and</span>
+<span class="s4"># don't integrate with IOCP. So we drop down to a lower level, and talk</span>
+<span class="s4"># directly to the socket device driver in the kernel, which is called &quot;AFD&quot;.</span>
+<span class="s4"># Unfortunately, this is a totally undocumented internal API. Fortunately</span>
+<span class="s4"># libuv also does this, so we can be pretty confident that MS won't break it</span>
+<span class="s4"># on us, and there is a *little* bit of information out there if you go</span>
+<span class="s4"># digging.</span>
+<span class="s4">#</span>
+<span class="s4"># Basically: we open a magic file that refers to the AFD driver, register the</span>
+<span class="s4"># magic file with our IOCP, and then we can issue regular overlapped I/O</span>
+<span class="s4"># operations on that handle. Specifically, the operation we use is called</span>
+<span class="s4"># IOCTL_AFD_POLL, which lets us pass in a buffer describing which events we're</span>
+<span class="s4"># interested in on a given socket (readable, writable, etc.). Later, when the</span>
+<span class="s4"># operation completes, the kernel rewrites the buffer we passed in to record</span>
+<span class="s4"># which events happened, and uses IOCP as normal to notify us that this</span>
+<span class="s4"># operation has completed.</span>
+<span class="s4">#</span>
+<span class="s4"># Unfortunately, the Windows kernel seems to have bugs if you try to issue</span>
+<span class="s4"># multiple simultaneous IOCTL_AFD_POLL operations on the same socket (see</span>
+<span class="s4"># https://github.com/python-trio/trio/wiki/notes-to-self#afd-labpy).</span>
+<span class="s4"># So if a user calls wait_readable and</span>
+<span class="s4"># wait_writable at the same time, we have to combine those into a single</span>
+<span class="s4"># IOCTL_AFD_POLL. This means we can't just use the wait_overlapped machinery.</span>
+<span class="s4"># Instead we have some dedicated code to handle these operations, and a</span>
+<span class="s4"># dedicated completion key CKeys.AFD_POLL.</span>
+<span class="s4">#</span>
+<span class="s4"># Sources of information:</span>
+<span class="s4"># - https://github.com/python-trio/trio/issues/52</span>
+<span class="s4"># - Wepoll: https://github.com/piscisaureus/wepoll/</span>
+<span class="s4"># - libuv: https://github.com/libuv/libuv/</span>
+<span class="s4"># - ReactOS: https://github.com/reactos/reactos/</span>
+<span class="s4"># - Ancient leaked copies of the Windows NT and Winsock source code:</span>
+<span class="s4">#   https://github.com/pustladi/Windows-2000/blob/661d000d50637ed6fab2329d30e31775046588a9/private/net/sockets/winsock2/wsp/msafd/select.c#L59-L655</span>
+<span class="s4">#   https://github.com/metoo10987/WinNT4/blob/f5c14e6b42c8f45c20fe88d14c61f9d6e0386b8e/private/ntos/afd/poll.c#L68-L707</span>
+<span class="s4"># - The WSAEventSelect docs (this exposes a finer-grained set of events than</span>
+<span class="s4">#   select(), so if you squint you can treat it as a source of information on</span>
+<span class="s4">#   the fine-grained AFD poll types)</span>
+<span class="s4">#</span>
+<span class="s4">#</span>
+<span class="s4"># == Everything else ==</span>
+<span class="s4">#</span>
+<span class="s4"># There are also some weirder APIs for interacting with IOCP. For example, the</span>
+<span class="s4"># &quot;Job&quot; API lets you specify an IOCP handle and &quot;completion key&quot;, and then in</span>
+<span class="s4"># the future whenever certain events happen it sends uses IOCP to send a</span>
+<span class="s4"># notification. These notifications don't correspond to any particular</span>
+<span class="s4"># operation; they're just spontaneous messages you get. The</span>
+<span class="s4"># &quot;dwNumberOfBytesTransferred&quot; field gets repurposed to carry an identifier</span>
+<span class="s4"># for the message type (e.g. JOB_OBJECT_MSG_EXIT_PROCESS), and the</span>
+<span class="s4"># &quot;lpOverlapped&quot; field gets repurposed to carry some arbitrary data that</span>
+<span class="s4"># depends on the message type (e.g. the pid of the process that exited).</span>
+<span class="s4">#</span>
+<span class="s4"># To handle these, we have monitor_completion_key, where we hand out an</span>
+<span class="s4"># unassigned completion key, let users set it up however they want, and then</span>
+<span class="s4"># get any events that arrive on that key.</span>
+<span class="s4">#</span>
+<span class="s4"># (Note: monitor_completion_key is not documented or fully baked; expect it to</span>
+<span class="s4"># change in the future.)</span>
+
+
+<span class="s4"># Our completion keys</span>
+<span class="s0">class </span><span class="s1">CKeys</span><span class="s2">(</span><span class="s1">enum</span><span class="s2">.</span><span class="s1">IntEnum</span><span class="s2">):</span>
+    <span class="s1">AFD_POLL </span><span class="s2">= </span><span class="s5">0</span>
+    <span class="s1">WAIT_OVERLAPPED </span><span class="s2">= </span><span class="s5">1</span>
+    <span class="s1">LATE_CANCEL </span><span class="s2">= </span><span class="s5">2</span>
+    <span class="s1">FORCE_WAKEUP </span><span class="s2">= </span><span class="s5">3</span>
+    <span class="s1">USER_DEFINED </span><span class="s2">= </span><span class="s5">4  </span><span class="s4"># and above</span>
+
+
+<span class="s4"># AFD_POLL has a finer-grained set of events than other APIs. We collapse them</span>
+<span class="s4"># down into Unix-style &quot;readable&quot; and &quot;writable&quot;.</span>
+<span class="s4">#</span>
+<span class="s4"># Note: AFD_POLL_LOCAL_CLOSE isn't a reliable substitute for notify_closing(),</span>
+<span class="s4"># because even if the user closes the socket *handle*, the socket *object*</span>
+<span class="s4"># could still remain open, e.g. if the socket was dup'ed (possibly into</span>
+<span class="s4"># another process). Explicitly calling notify_closing() guarantees that</span>
+<span class="s4"># everyone waiting on the *handle* wakes up, which is what you'd expect.</span>
+<span class="s4">#</span>
+<span class="s4"># However, we can't avoid getting LOCAL_CLOSE notifications -- the kernel</span>
+<span class="s4"># delivers them whether we ask for them or not -- so better to include them</span>
+<span class="s4"># here for documentation, and so that when we check (delivered &amp; requested) we</span>
+<span class="s4"># get a match.</span>
+
+<span class="s1">READABLE_FLAGS </span><span class="s2">= (</span>
+    <span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_RECEIVE</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_ACCEPT</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_DISCONNECT  </span><span class="s4"># other side sent an EOF</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_ABORT</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_LOCAL_CLOSE</span>
+<span class="s2">)</span>
+
+<span class="s1">WRITABLE_FLAGS </span><span class="s2">= (</span>
+    <span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_SEND</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_CONNECT_FAIL</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_ABORT</span>
+    <span class="s2">| </span><span class="s1">AFDPollFlags</span><span class="s2">.</span><span class="s1">AFD_POLL_LOCAL_CLOSE</span>
+<span class="s2">)</span>
+
+
+<span class="s4"># Annoyingly, while the API makes it *seem* like you can happily issue as many</span>
+<span class="s4"># independent AFD_POLL operations as you want without them interfering with</span>
+<span class="s4"># each other, in fact if you issue two AFD_POLL operations for the same socket</span>
+<span class="s4"># at the same time with notification going to the same IOCP port, then Windows</span>
+<span class="s4"># gets super confused. For example, if we issue one operation from</span>
+<span class="s4"># wait_readable, and another independent operation from wait_writable, then</span>
+<span class="s4"># Windows may complete the wait_writable operation when the socket becomes</span>
+<span class="s4"># readable.</span>
+<span class="s4">#</span>
+<span class="s4"># To avoid this, we have to coalesce all the operations on a single socket</span>
+<span class="s4"># into one, and when the set of waiters changes we have to throw away the old</span>
+<span class="s4"># operation and start a new one.</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">AFDWaiters</span><span class="s2">:</span>
+    <span class="s1">read_task</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Task </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">write_task</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Task </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">current_op</span><span class="s2">: </span><span class="s1">AFDPollOp </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+
+<span class="s4"># Just used for internal type checking.</span>
+<span class="s0">class </span><span class="s1">_AFDHandle</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+    <span class="s1">Handle</span><span class="s2">: </span><span class="s1">Handle</span>
+    <span class="s1">Status</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">Events</span><span class="s2">: </span><span class="s1">int</span>
+
+
+<span class="s4"># Just used for internal type checking.</span>
+<span class="s0">class </span><span class="s1">_AFDPollInfo</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+    <span class="s1">Timeout</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">NumberOfHandles</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">Exclusive</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">Handles</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">_AFDHandle</span><span class="s2">]</span>
+
+
+<span class="s4"># We also need to bundle up all the info for a single op into a standalone</span>
+<span class="s4"># object, because we need to keep all these objects alive until the operation</span>
+<span class="s4"># finishes, even if we're throwing it away.</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">frozen</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">AFDPollOp</span><span class="s2">:</span>
+    <span class="s1">lpOverlapped</span><span class="s2">: </span><span class="s1">CData</span>
+    <span class="s1">poll_info</span><span class="s2">: </span><span class="s1">_AFDPollInfo</span>
+    <span class="s1">waiters</span><span class="s2">: </span><span class="s1">AFDWaiters</span>
+    <span class="s1">afd_group</span><span class="s2">: </span><span class="s1">AFDGroup</span>
+
+
+<span class="s4"># The Windows kernel has a weird issue when using AFD handles. If you have N</span>
+<span class="s4"># instances of wait_readable/wait_writable registered with a single AFD handle,</span>
+<span class="s4"># then cancelling any one of them takes something like O(N**2) time. So if we</span>
+<span class="s4"># used just a single AFD handle, then cancellation would quickly become very</span>
+<span class="s4"># expensive, e.g. a program with N active sockets would take something like</span>
+<span class="s4"># O(N**3) time to unwind after control-C. The solution is to spread our sockets</span>
+<span class="s4"># out over multiple AFD handles, so that N doesn't grow too large for any</span>
+<span class="s4"># individual handle.</span>
+<span class="s1">MAX_AFD_GROUP_SIZE </span><span class="s2">= </span><span class="s5">500  </span><span class="s4"># at 1000, the cubic scaling is just starting to bite</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">AFDGroup</span><span class="s2">:</span>
+    <span class="s1">size</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">handle</span><span class="s2">: </span><span class="s1">Handle</span>
+
+
+<span class="s0">assert not </span><span class="s1">TYPE_CHECKING </span><span class="s0">or </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;win32&quot;</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">frozen</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">_WindowsStatistics</span><span class="s2">:</span>
+    <span class="s1">tasks_waiting_read</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">tasks_waiting_write</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">tasks_waiting_overlapped</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">completion_key_monitors</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">backend</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s3">&quot;windows&quot;</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">field</span><span class="s2">(</span><span class="s1">init</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">default</span><span class="s2">=</span><span class="s3">&quot;windows&quot;</span><span class="s2">)</span>
+
+
+<span class="s4"># Maximum number of events to dequeue from the completion port on each pass</span>
+<span class="s4"># through the run loop. Somewhat arbitrary. Should be large enough to collect</span>
+<span class="s4"># a good set of tasks on each loop, but not so large to waste tons of memory.</span>
+<span class="s4"># (Each WindowsIOManager holds a buffer whose size is ~32x this number.)</span>
+<span class="s1">MAX_EVENTS </span><span class="s2">= </span><span class="s5">1000</span>
+
+
+<span class="s0">def </span><span class="s1">_check</span><span class="s2">(</span><span class="s1">success</span><span class="s2">: </span><span class="s1">T</span><span class="s2">) </span><span class="s1">-&gt; T</span><span class="s2">:</span>
+    <span class="s0">if not </span><span class="s1">success</span><span class="s2">:</span>
+        <span class="s1">raise_winerror</span><span class="s2">()</span>
+    <span class="s0">return </span><span class="s1">success</span>
+
+
+<span class="s0">def </span><span class="s1">_get_underlying_socket</span><span class="s2">(</span>
+    <span class="s1">sock</span><span class="s2">: </span><span class="s1">_HasFileNo </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">Handle</span><span class="s2">,</span>
+    <span class="s2">*,</span>
+    <span class="s1">which</span><span class="s2">: </span><span class="s1">WSAIoctls </span><span class="s2">= </span><span class="s1">WSAIoctls</span><span class="s2">.</span><span class="s1">SIO_BASE_HANDLE</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; Handle</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s3">&quot;fileno&quot;</span><span class="s2">):</span>
+        <span class="s1">sock </span><span class="s2">= </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span>
+    <span class="s1">base_ptr </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;HANDLE *&quot;</span><span class="s2">)</span>
+    <span class="s1">out_size </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;DWORD *&quot;</span><span class="s2">)</span>
+    <span class="s1">failed </span><span class="s2">= </span><span class="s1">ws2_32</span><span class="s2">.</span><span class="s1">WSAIoctl</span><span class="s2">(</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;SOCKET&quot;</span><span class="s2">, </span><span class="s1">sock</span><span class="s2">),</span>
+        <span class="s1">which</span><span class="s2">,</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+        <span class="s5">0</span><span class="s2">,</span>
+        <span class="s1">base_ptr</span><span class="s2">,</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">sizeof</span><span class="s2">(</span><span class="s3">&quot;HANDLE&quot;</span><span class="s2">),</span>
+        <span class="s1">out_size</span><span class="s2">,</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">failed</span><span class="s2">:</span>
+        <span class="s1">code </span><span class="s2">= </span><span class="s1">ws2_32</span><span class="s2">.</span><span class="s1">WSAGetLastError</span><span class="s2">()</span>
+        <span class="s1">raise_winerror</span><span class="s2">(</span><span class="s1">code</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">Handle</span><span class="s2">(</span><span class="s1">base_ptr</span><span class="s2">[</span><span class="s5">0</span><span class="s2">])</span>
+
+
+<span class="s0">def </span><span class="s1">_get_base_socket</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">_HasFileNo </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">Handle</span><span class="s2">) </span><span class="s1">-&gt; Handle</span><span class="s2">:</span>
+    <span class="s4"># There is a development kit for LSPs called Komodia Redirector.</span>
+    <span class="s4"># It does some unusual (some might say evil) things like intercepting</span>
+    <span class="s4"># SIO_BASE_HANDLE (fails) and SIO_BSP_HANDLE_SELECT (returns the same</span>
+    <span class="s4"># socket) in a misguided attempt to prevent bypassing it. It's been used</span>
+    <span class="s4"># in malware including the infamous Lenovo Superfish incident from 2015,</span>
+    <span class="s4"># but unfortunately is also used in some legitimate products such as</span>
+    <span class="s4"># parental control tools and Astrill VPN. Komodia happens to not</span>
+    <span class="s4"># block SIO_BSP_HANDLE_POLL, so we'll try SIO_BASE_HANDLE and fall back</span>
+    <span class="s4"># to SIO_BSP_HANDLE_POLL if it doesn't work.</span>
+    <span class="s4"># References:</span>
+    <span class="s4"># - https://github.com/piscisaureus/wepoll/blob/0598a791bf9cbbf480793d778930fc635b044980/wepoll.c#L2223</span>
+    <span class="s4"># - https://github.com/tokio-rs/mio/issues/1314</span>
+
+    <span class="s0">while True</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s4"># If this is not a Komodia-intercepted socket, we can just use</span>
+            <span class="s4"># SIO_BASE_HANDLE.</span>
+            <span class="s0">return </span><span class="s1">_get_underlying_socket</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">ex</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">ex</span><span class="s2">.</span><span class="s1">winerror </span><span class="s2">== </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">ERROR_NOT_SOCKET</span><span class="s2">:</span>
+                <span class="s4"># SIO_BASE_HANDLE might fail even without LSP intervention,</span>
+                <span class="s4"># if we get something that's not a socket.</span>
+                <span class="s0">raise</span>
+            <span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s3">&quot;fileno&quot;</span><span class="s2">):</span>
+                <span class="s1">sock </span><span class="s2">= </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span>
+            <span class="s1">sock </span><span class="s2">= </span><span class="s1">_handle</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+            <span class="s1">next_sock </span><span class="s2">= </span><span class="s1">_get_underlying_socket</span><span class="s2">(</span>
+                <span class="s1">sock</span><span class="s2">,</span>
+                <span class="s1">which</span><span class="s2">=</span><span class="s1">WSAIoctls</span><span class="s2">.</span><span class="s1">SIO_BSP_HANDLE_POLL</span><span class="s2">,</span>
+            <span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">next_sock </span><span class="s2">== </span><span class="s1">sock</span><span class="s2">:</span>
+                <span class="s4"># If BSP_HANDLE_POLL returns the same socket we already had,</span>
+                <span class="s4"># then there's no layering going on and we need to fail</span>
+                <span class="s4"># to prevent an infinite loop.</span>
+                <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                    <span class="s3">&quot;Unexpected network configuration detected: &quot;</span>
+                    <span class="s3">&quot;SIO_BASE_HANDLE failed and SIO_BSP_HANDLE_POLL didn't &quot;</span>
+                    <span class="s3">&quot;return a different socket. Please file a bug at &quot;</span>
+                    <span class="s3">&quot;https://github.com/python-trio/trio/issues/new, &quot;</span>
+                    <span class="s3">&quot;and include the output of running: &quot;</span>
+                    <span class="s3">&quot;netsh winsock show catalog&quot;</span><span class="s2">,</span>
+                <span class="s2">) </span><span class="s0">from </span><span class="s1">ex</span>
+            <span class="s4"># Otherwise we've gotten at least one layer deeper, so</span>
+            <span class="s4"># loop back around to keep digging.</span>
+            <span class="s1">sock </span><span class="s2">= </span><span class="s1">next_sock</span>
+
+
+<span class="s0">def </span><span class="s1">_afd_helper_handle</span><span class="s2">() </span><span class="s1">-&gt; Handle</span><span class="s2">:</span>
+    <span class="s4"># The &quot;AFD&quot; driver is exposed at the NT path &quot;\Device\Afd&quot;. We're using</span>
+    <span class="s4"># the Win32 CreateFile, though, so we have to pass a Win32 path. \\.\ is</span>
+    <span class="s4"># how Win32 refers to the NT \GLOBAL??\ directory, and GLOBALROOT is a</span>
+    <span class="s4"># symlink inside that directory that points to the root of the NT path</span>
+    <span class="s4"># system. So by sticking that in front of the NT path, we get a Win32</span>
+    <span class="s4"># path. Alternatively, we could use NtCreateFile directly, since it takes</span>
+    <span class="s4"># an NT path. But we already wrap CreateFileW so this was easier.</span>
+    <span class="s4"># References:</span>
+    <span class="s4">#   https://blogs.msdn.microsoft.com/jeremykuhne/2016/05/02/dos-to-nt-a-paths-journey/</span>
+    <span class="s4">#   https://stackoverflow.com/a/21704022</span>
+    <span class="s4">#</span>
+    <span class="s4"># I'm actually not sure what the \Trio part at the end of the path does.</span>
+    <span class="s4"># Wepoll uses \Device\Afd\Wepoll, so I just copied them. (I'm guessing it</span>
+    <span class="s4"># might be visible in some debug tools, and is otherwise arbitrary?)</span>
+    <span class="s1">rawname </span><span class="s2">= </span><span class="s3">r&quot;\\.\GLOBALROOT\Device\Afd\Trio&quot;</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s3">&quot;utf-16le&quot;</span><span class="s2">) + </span><span class="s6">b&quot;</span><span class="s0">\0\0</span><span class="s6">&quot;</span>
+    <span class="s1">rawname_buf </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">from_buffer</span><span class="s2">(</span><span class="s1">rawname</span><span class="s2">)</span>
+
+    <span class="s1">handle </span><span class="s2">= </span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CreateFileW</span><span class="s2">(</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;LPCWSTR&quot;</span><span class="s2">, </span><span class="s1">rawname_buf</span><span class="s2">),</span>
+        <span class="s1">FileFlags</span><span class="s2">.</span><span class="s1">SYNCHRONIZE</span><span class="s2">,</span>
+        <span class="s1">FileFlags</span><span class="s2">.</span><span class="s1">FILE_SHARE_READ </span><span class="s2">| </span><span class="s1">FileFlags</span><span class="s2">.</span><span class="s1">FILE_SHARE_WRITE</span><span class="s2">,</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,  </span><span class="s4"># no security attributes</span>
+        <span class="s1">FileFlags</span><span class="s2">.</span><span class="s1">OPEN_EXISTING</span><span class="s2">,</span>
+        <span class="s1">FileFlags</span><span class="s2">.</span><span class="s1">FILE_FLAG_OVERLAPPED</span><span class="s2">,</span>
+        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,  </span><span class="s4"># no template file</span>
+    <span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">handle </span><span class="s2">== </span><span class="s1">INVALID_HANDLE_VALUE</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s1">raise_winerror</span><span class="s2">()</span>
+    <span class="s0">return </span><span class="s1">handle</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">frozen</span><span class="s2">(</span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">CompletionKeyEventInfo</span><span class="s2">:</span>
+    <span class="s1">lpOverlapped</span><span class="s2">: </span><span class="s1">CData</span>
+    <span class="s1">dwNumberOfBytesTransferred</span><span class="s2">: </span><span class="s1">int</span>
+
+
+<span class="s0">class </span><span class="s1">WindowsIOManager</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># If this method raises an exception, then __del__ could run on a</span>
+        <span class="s4"># half-initialized object. So we initialize everything that __del__</span>
+        <span class="s4"># touches to safe values up front, before we do anything that can</span>
+        <span class="s4"># fail.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_all_afd_handles</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">Handle</span><span class="s2">] = []</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s2">= </span><span class="s1">_check</span><span class="s2">(</span>
+            <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CreateIoCompletionPort</span><span class="s2">(</span><span class="s1">INVALID_HANDLE_VALUE</span><span class="s2">, </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_events </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;OVERLAPPED_ENTRY[]&quot;</span><span class="s2">, </span><span class="s1">MAX_EVENTS</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_vacant_afd_groups</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">AFDGroup</span><span class="s2">] = </span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s4"># {lpOverlapped: AFDPollOp}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_ops</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">CData</span><span class="s2">, </span><span class="s1">AFDPollOp</span><span class="s2">] = {}</span>
+        <span class="s4"># {socket handle: AFDWaiters}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">Handle</span><span class="s2">, </span><span class="s1">AFDWaiters</span><span class="s2">] = {}</span>
+
+        <span class="s4"># {lpOverlapped: task}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_overlapped_waiters</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">CData</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Task</span><span class="s2">] = {}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_posted_too_late_to_cancel</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">CData</span><span class="s2">] = </span><span class="s1">set</span><span class="s2">()</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_queues</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">UnboundedQueue</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]] = {}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_counter </span><span class="s2">= </span><span class="s1">itertools</span><span class="s2">.</span><span class="s1">count</span><span class="s2">(</span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">USER_DEFINED</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">() </span><span class="s0">as </span><span class="s1">s</span><span class="s2">:</span>
+            <span class="s4"># We assume we're not working with any LSP that changes</span>
+            <span class="s4"># how select() is supposed to work. Validate this by</span>
+            <span class="s4"># ensuring that the result of SIO_BSP_HANDLE_SELECT (the</span>
+            <span class="s4"># LSP-hookable mechanism for &quot;what should I use for</span>
+            <span class="s4"># select()?&quot;) matches that of SIO_BASE_HANDLE (&quot;what is</span>
+            <span class="s4"># the real non-hooked underlying socket here?&quot;).</span>
+            <span class="s4">#</span>
+            <span class="s4"># This doesn't work for Komodia-based LSPs; see the comments</span>
+            <span class="s4"># in _get_base_socket() for details. But we have special</span>
+            <span class="s4"># logic for those, so we just skip this check if</span>
+            <span class="s4"># SIO_BASE_HANDLE fails.</span>
+
+            <span class="s4"># LSPs can in theory override this, but we believe that it never</span>
+            <span class="s4"># actually happens in the wild (except Komodia)</span>
+            <span class="s1">select_handle </span><span class="s2">= </span><span class="s1">_get_underlying_socket</span><span class="s2">(</span>
+                <span class="s1">s</span><span class="s2">,</span>
+                <span class="s1">which</span><span class="s2">=</span><span class="s1">WSAIoctls</span><span class="s2">.</span><span class="s1">SIO_BSP_HANDLE_SELECT</span><span class="s2">,</span>
+            <span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s4"># LSPs shouldn't override this...</span>
+                <span class="s1">base_handle </span><span class="s2">= </span><span class="s1">_get_underlying_socket</span><span class="s2">(</span><span class="s1">s</span><span class="s2">, </span><span class="s1">which</span><span class="s2">=</span><span class="s1">WSAIoctls</span><span class="s2">.</span><span class="s1">SIO_BASE_HANDLE</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+                <span class="s4"># But Komodia-based LSPs do anyway, in a way that causes</span>
+                <span class="s4"># a failure with WSAEFAULT. We have special handling for</span>
+                <span class="s4"># them in _get_base_socket(). Make sure it works.</span>
+                <span class="s1">_get_base_socket</span><span class="s2">(</span><span class="s1">s</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">base_handle </span><span class="s2">!= </span><span class="s1">select_handle</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                        <span class="s3">&quot;Unexpected network configuration detected: &quot;</span>
+                        <span class="s3">&quot;SIO_BASE_HANDLE and SIO_BSP_HANDLE_SELECT differ. &quot;</span>
+                        <span class="s3">&quot;Please file a bug at &quot;</span>
+                        <span class="s3">&quot;https://github.com/python-trio/trio/issues/new, &quot;</span>
+                        <span class="s3">&quot;and include the output of running: &quot;</span>
+                        <span class="s3">&quot;netsh winsock show catalog&quot;</span><span class="s2">,</span>
+                    <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s1">iocp </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s2">= </span><span class="s0">None</span>
+                <span class="s1">_check</span><span class="s2">(</span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CloseHandle</span><span class="s2">(</span><span class="s1">iocp</span><span class="s2">))</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">while </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_all_afd_handles</span><span class="s2">:</span>
+                <span class="s1">afd_handle </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_all_afd_handles</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">()</span>
+                <span class="s1">_check</span><span class="s2">(</span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CloseHandle</span><span class="s2">(</span><span class="s1">afd_handle</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">__del__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">statistics</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; _WindowsStatistics</span><span class="s2">:</span>
+        <span class="s1">tasks_waiting_read </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s1">tasks_waiting_write </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">waiter </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">.</span><span class="s1">values</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">waiter</span><span class="s2">.</span><span class="s1">read_task </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s1">tasks_waiting_read </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s0">if </span><span class="s1">waiter</span><span class="s2">.</span><span class="s1">write_task </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s1">tasks_waiting_write </span><span class="s2">+= </span><span class="s5">1</span>
+        <span class="s0">return </span><span class="s1">_WindowsStatistics</span><span class="s2">(</span>
+            <span class="s1">tasks_waiting_read</span><span class="s2">=</span><span class="s1">tasks_waiting_read</span><span class="s2">,</span>
+            <span class="s1">tasks_waiting_write</span><span class="s2">=</span><span class="s1">tasks_waiting_write</span><span class="s2">,</span>
+            <span class="s1">tasks_waiting_overlapped</span><span class="s2">=</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_overlapped_waiters</span><span class="s2">),</span>
+            <span class="s1">completion_key_monitors</span><span class="s2">=</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_queues</span><span class="s2">),</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">force_wakeup</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s0">is not None</span>
+        <span class="s1">_check</span><span class="s2">(</span>
+            <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">PostQueuedCompletionStatus</span><span class="s2">(</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp</span><span class="s2">,</span>
+                <span class="s5">0</span><span class="s2">,</span>
+                <span class="s1">CKeys</span><span class="s2">.</span><span class="s1">FORCE_WAKEUP</span><span class="s2">,</span>
+                <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">get_events</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; EventResult</span><span class="s2">:</span>
+        <span class="s1">received </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;PULONG&quot;</span><span class="s2">)</span>
+        <span class="s1">milliseconds </span><span class="s2">= </span><span class="s1">round</span><span class="s2">(</span><span class="s5">1000 </span><span class="s2">* </span><span class="s1">timeout</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">timeout </span><span class="s2">&gt; </span><span class="s5">0 </span><span class="s0">and </span><span class="s1">milliseconds </span><span class="s2">== </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s1">milliseconds </span><span class="s2">= </span><span class="s5">1</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s0">is not None</span>
+            <span class="s1">_check</span><span class="s2">(</span>
+                <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">GetQueuedCompletionStatusEx</span><span class="s2">(</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp</span><span class="s2">,</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_events</span><span class="s2">,</span>
+                    <span class="s1">MAX_EVENTS</span><span class="s2">,</span>
+                    <span class="s1">received</span><span class="s2">,</span>
+                    <span class="s1">milliseconds</span><span class="s2">,</span>
+                    <span class="s5">0</span><span class="s2">,</span>
+                <span class="s2">),</span>
+            <span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">winerror </span><span class="s2">!= </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">WAIT_TIMEOUT</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+                <span class="s0">raise</span>
+            <span class="s0">return </span><span class="s5">0</span>
+        <span class="s1">result </span><span class="s2">= </span><span class="s1">received</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">result</span><span class="s2">, </span><span class="s1">int</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">process_events</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">received</span><span class="s2">: </span><span class="s1">EventResult</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">received</span><span class="s2">):</span>
+            <span class="s1">entry </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_events</span><span class="s2">[</span><span class="s1">i</span><span class="s2">]</span>
+            <span class="s0">if </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpCompletionKey </span><span class="s2">== </span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">AFD_POLL</span><span class="s2">:</span>
+                <span class="s1">lpo </span><span class="s2">= </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpOverlapped</span>
+                <span class="s1">op </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_ops</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">(</span><span class="s1">lpo</span><span class="s2">)</span>
+                <span class="s1">waiters </span><span class="s2">= </span><span class="s1">op</span><span class="s2">.</span><span class="s1">waiters</span>
+                <span class="s0">if </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op </span><span class="s0">is not </span><span class="s1">op</span><span class="s2">:</span>
+                    <span class="s4"># Stale op, nothing to do</span>
+                    <span class="s0">pass</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op </span><span class="s2">= </span><span class="s0">None</span>
+                    <span class="s4"># I don't think this can happen, so if it does let's crash</span>
+                    <span class="s4"># and get a debug trace.</span>
+                    <span class="s0">if </span><span class="s1">lpo</span><span class="s2">.</span><span class="s1">Internal </span><span class="s2">!= </span><span class="s5">0</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+                        <span class="s1">code </span><span class="s2">= </span><span class="s1">ntdll</span><span class="s2">.</span><span class="s1">RtlNtStatusToDosError</span><span class="s2">(</span><span class="s1">lpo</span><span class="s2">.</span><span class="s1">Internal</span><span class="s2">)</span>
+                        <span class="s1">raise_winerror</span><span class="s2">(</span><span class="s1">code</span><span class="s2">)</span>
+                    <span class="s1">flags </span><span class="s2">= </span><span class="s1">op</span><span class="s2">.</span><span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Handles</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">Events</span>
+                    <span class="s0">if </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">read_task </span><span class="s0">and </span><span class="s1">flags </span><span class="s2">&amp; </span><span class="s1">READABLE_FLAGS</span><span class="s2">:</span>
+                        <span class="s1">_core</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">read_task</span><span class="s2">)</span>
+                        <span class="s1">waiters</span><span class="s2">.</span><span class="s1">read_task </span><span class="s2">= </span><span class="s0">None</span>
+                    <span class="s0">if </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">write_task </span><span class="s0">and </span><span class="s1">flags </span><span class="s2">&amp; </span><span class="s1">WRITABLE_FLAGS</span><span class="s2">:</span>
+                        <span class="s1">_core</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">write_task</span><span class="s2">)</span>
+                        <span class="s1">waiters</span><span class="s2">.</span><span class="s1">write_task </span><span class="s2">= </span><span class="s0">None</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_refresh_afd</span><span class="s2">(</span><span class="s1">op</span><span class="s2">.</span><span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Handles</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">Handle</span><span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpCompletionKey </span><span class="s2">== </span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">WAIT_OVERLAPPED</span><span class="s2">:</span>
+                <span class="s4"># Regular I/O event, dispatch on lpOverlapped</span>
+                <span class="s1">waiter </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_overlapped_waiters</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">(</span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+                <span class="s1">overlapped </span><span class="s2">= </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpOverlapped</span>
+                <span class="s1">transferred </span><span class="s2">= </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">dwNumberOfBytesTransferred</span>
+                <span class="s1">info </span><span class="s2">= </span><span class="s1">CompletionKeyEventInfo</span><span class="s2">(</span>
+                    <span class="s1">lpOverlapped</span><span class="s2">=</span><span class="s1">overlapped</span><span class="s2">,</span>
+                    <span class="s1">dwNumberOfBytesTransferred</span><span class="s2">=</span><span class="s1">transferred</span><span class="s2">,</span>
+                <span class="s2">)</span>
+                <span class="s1">_core</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">waiter</span><span class="s2">, </span><span class="s1">Value</span><span class="s2">(</span><span class="s1">info</span><span class="s2">))</span>
+            <span class="s0">elif </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpCompletionKey </span><span class="s2">== </span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">LATE_CANCEL</span><span class="s2">:</span>
+                <span class="s4"># Post made by a regular I/O event's abort_fn</span>
+                <span class="s4"># after it failed to cancel the I/O. If we still</span>
+                <span class="s4"># have a waiter with this lpOverlapped, we didn't</span>
+                <span class="s4"># get the regular I/O completion and almost</span>
+                <span class="s4"># certainly the user forgot to call</span>
+                <span class="s4"># register_with_iocp.</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_posted_too_late_to_cancel</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">waiter </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_overlapped_waiters</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">(</span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+                    <span class="s4"># Looks like the actual completion got here before this</span>
+                    <span class="s4"># fallback post did -- we're in the &quot;expected&quot; case of</span>
+                    <span class="s4"># too-late-to-cancel, where the user did nothing wrong.</span>
+                    <span class="s4"># Nothing more to do.</span>
+                    <span class="s0">pass</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s1">exc </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioInternalError</span><span class="s2">(</span>
+                        <span class="s3">f&quot;Failed to cancel overlapped I/O in </span><span class="s0">{</span><span class="s1">waiter</span><span class="s2">.</span><span class="s1">name</span><span class="s0">} </span><span class="s3">and didn't &quot;</span>
+                        <span class="s3">&quot;receive the completion either. Did you forget to &quot;</span>
+                        <span class="s3">&quot;call register_with_iocp()?&quot;</span><span class="s2">,</span>
+                    <span class="s2">)</span>
+                    <span class="s4"># Raising this out of handle_io ensures that</span>
+                    <span class="s4"># the user will see our message even if some</span>
+                    <span class="s4"># other task is in an uncancellable wait due</span>
+                    <span class="s4"># to the same underlying forgot-to-register</span>
+                    <span class="s4"># issue (if their CancelIoEx succeeds, we</span>
+                    <span class="s4"># have no way of noticing that their completion</span>
+                    <span class="s4"># won't arrive). Unfortunately it loses the</span>
+                    <span class="s4"># task traceback. If you're debugging this</span>
+                    <span class="s4"># error and can't tell where it's coming from,</span>
+                    <span class="s4"># try changing this line to</span>
+                    <span class="s4"># _core.reschedule(waiter, outcome.Error(exc))</span>
+                    <span class="s0">raise </span><span class="s1">exc</span>
+            <span class="s0">elif </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpCompletionKey </span><span class="s2">== </span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">FORCE_WAKEUP</span><span class="s2">:</span>
+                <span class="s0">pass</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s4"># dispatch on lpCompletionKey</span>
+                <span class="s1">queue </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_queues</span><span class="s2">[</span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpCompletionKey</span><span class="s2">]</span>
+                <span class="s1">overlapped </span><span class="s2">= </span><span class="s1">int</span><span class="s2">(</span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;uintptr_t&quot;</span><span class="s2">, </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">lpOverlapped</span><span class="s2">))</span>
+                <span class="s1">transferred </span><span class="s2">= </span><span class="s1">entry</span><span class="s2">.</span><span class="s1">dwNumberOfBytesTransferred</span>
+                <span class="s1">info </span><span class="s2">= </span><span class="s1">CompletionKeyEventInfo</span><span class="s2">(</span>
+                    <span class="s1">lpOverlapped</span><span class="s2">=</span><span class="s1">overlapped</span><span class="s2">,</span>
+                    <span class="s1">dwNumberOfBytesTransferred</span><span class="s2">=</span><span class="s1">transferred</span><span class="s2">,</span>
+                <span class="s2">)</span>
+                <span class="s1">queue</span><span class="s2">.</span><span class="s1">put_nowait</span><span class="s2">(</span><span class="s1">info</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_register_with_iocp</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">handle_</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">, </span><span class="s1">completion_key</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">handle </span><span class="s2">= </span><span class="s1">_handle</span><span class="s2">(</span><span class="s1">handle_</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s0">is not None</span>
+        <span class="s1">_check</span><span class="s2">(</span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CreateIoCompletionPort</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp</span><span class="s2">, </span><span class="s1">completion_key</span><span class="s2">, </span><span class="s5">0</span><span class="s2">))</span>
+        <span class="s4"># Supposedly this makes things slightly faster, by disabling the</span>
+        <span class="s4"># ability to do WaitForSingleObject(handle). We would never want to do</span>
+        <span class="s4"># that anyway, so might as well get the extra speed (if any).</span>
+        <span class="s4"># Ref: http://www.lenholgate.com/blog/2009/09/interesting-blog-posts-on-high-performance-servers.html</span>
+        <span class="s1">_check</span><span class="s2">(</span>
+            <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">SetFileCompletionNotificationModes</span><span class="s2">(</span>
+                <span class="s1">handle</span><span class="s2">,</span>
+                <span class="s1">CompletionModes</span><span class="s2">.</span><span class="s1">FILE_SKIP_SET_EVENT_ON_HANDLE</span><span class="s2">,</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+
+    <span class="s4">################################################################</span>
+    <span class="s4"># AFD stuff</span>
+    <span class="s4">################################################################</span>
+
+    <span class="s0">def </span><span class="s1">_refresh_afd</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">base_handle</span><span class="s2">: </span><span class="s1">Handle</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">waiters </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">[</span><span class="s1">base_handle</span><span class="s2">]</span>
+        <span class="s0">if </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">afd_group </span><span class="s2">= </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op</span><span class="s2">.</span><span class="s1">afd_group</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">_check</span><span class="s2">(</span>
+                    <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CancelIoEx</span><span class="s2">(</span>
+                        <span class="s1">afd_group</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">,</span>
+                        <span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op</span><span class="s2">.</span><span class="s1">lpOverlapped</span><span class="s2">,</span>
+                    <span class="s2">),</span>
+                <span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">winerror </span><span class="s2">!= </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">ERROR_NOT_FOUND</span><span class="s2">:</span>
+                    <span class="s4"># I don't think this is possible, so if it happens let's</span>
+                    <span class="s4"># crash noisily.</span>
+                    <span class="s0">raise  </span><span class="s4"># pragma: no cover</span>
+            <span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op </span><span class="s2">= </span><span class="s0">None</span>
+            <span class="s1">afd_group</span><span class="s2">.</span><span class="s1">size </span><span class="s2">-= </span><span class="s5">1</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_vacant_afd_groups</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">afd_group</span><span class="s2">)</span>
+
+        <span class="s1">flags </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s0">if </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">read_task </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">flags </span><span class="s2">|= </span><span class="s1">READABLE_FLAGS</span>
+        <span class="s0">if </span><span class="s1">waiters</span><span class="s2">.</span><span class="s1">write_task </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">flags </span><span class="s2">|= </span><span class="s1">WRITABLE_FLAGS</span>
+
+        <span class="s0">if not </span><span class="s1">flags</span><span class="s2">:</span>
+            <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">[</span><span class="s1">base_handle</span><span class="s2">]</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">afd_group </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_vacant_afd_groups</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">()</span>
+            <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+                <span class="s1">afd_group </span><span class="s2">= </span><span class="s1">AFDGroup</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">_afd_helper_handle</span><span class="s2">())</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_register_with_iocp</span><span class="s2">(</span><span class="s1">afd_group</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">AFD_POLL</span><span class="s2">)</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_all_afd_handles</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">afd_group</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_vacant_afd_groups</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">afd_group</span><span class="s2">)</span>
+
+            <span class="s1">lpOverlapped </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;LPOVERLAPPED&quot;</span><span class="s2">)</span>
+
+            <span class="s1">poll_info </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;_AFDPollInfo&quot;</span><span class="s2">, </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;AFD_POLL_INFO *&quot;</span><span class="s2">))</span>
+            <span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Timeout </span><span class="s2">= </span><span class="s5">2</span><span class="s2">**</span><span class="s5">63 </span><span class="s2">- </span><span class="s5">1  </span><span class="s4"># INT64_MAX</span>
+            <span class="s1">poll_info</span><span class="s2">.</span><span class="s1">NumberOfHandles </span><span class="s2">= </span><span class="s5">1</span>
+            <span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Exclusive </span><span class="s2">= </span><span class="s5">0</span>
+            <span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Handles</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">Handle </span><span class="s2">= </span><span class="s1">base_handle</span>
+            <span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Handles</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">Status </span><span class="s2">= </span><span class="s5">0</span>
+            <span class="s1">poll_info</span><span class="s2">.</span><span class="s1">Handles</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">Events </span><span class="s2">= </span><span class="s1">flags</span>
+
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">_check</span><span class="s2">(</span>
+                    <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">DeviceIoControl</span><span class="s2">(</span>
+                        <span class="s1">afd_group</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">,</span>
+                        <span class="s1">IoControlCodes</span><span class="s2">.</span><span class="s1">IOCTL_AFD_POLL</span><span class="s2">,</span>
+                        <span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;CType&quot;</span><span class="s2">, </span><span class="s1">poll_info</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">sizeof</span><span class="s2">(</span><span class="s3">&quot;AFD_POLL_INFO&quot;</span><span class="s2">),</span>
+                        <span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;CType&quot;</span><span class="s2">, </span><span class="s1">poll_info</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">sizeof</span><span class="s2">(</span><span class="s3">&quot;AFD_POLL_INFO&quot;</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+                        <span class="s1">lpOverlapped</span><span class="s2">,</span>
+                    <span class="s2">),</span>
+                <span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">winerror </span><span class="s2">!= </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">ERROR_IO_PENDING</span><span class="s2">:</span>
+                    <span class="s4"># This could happen if the socket handle got closed behind</span>
+                    <span class="s4"># our back while a wait_* call was pending, and we tried</span>
+                    <span class="s4"># to re-issue the call. Clear our state and wake up any</span>
+                    <span class="s4"># pending calls.</span>
+                    <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">[</span><span class="s1">base_handle</span><span class="s2">]</span>
+                    <span class="s4"># Do this last, because it could raise.</span>
+                    <span class="s1">wake_all</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">, </span><span class="s1">exc</span><span class="s2">)</span>
+                    <span class="s0">return</span>
+            <span class="s1">op </span><span class="s2">= </span><span class="s1">AFDPollOp</span><span class="s2">(</span><span class="s1">lpOverlapped</span><span class="s2">, </span><span class="s1">poll_info</span><span class="s2">, </span><span class="s1">waiters</span><span class="s2">, </span><span class="s1">afd_group</span><span class="s2">)</span>
+            <span class="s1">waiters</span><span class="s2">.</span><span class="s1">current_op </span><span class="s2">= </span><span class="s1">op</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_ops</span><span class="s2">[</span><span class="s1">lpOverlapped</span><span class="s2">] = </span><span class="s1">op</span>
+            <span class="s1">afd_group</span><span class="s2">.</span><span class="s1">size </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s0">if </span><span class="s1">afd_group</span><span class="s2">.</span><span class="s1">size </span><span class="s2">&gt;= </span><span class="s1">MAX_AFD_GROUP_SIZE</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_vacant_afd_groups</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">afd_group</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">_afd_poll</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sock</span><span class="s2">: </span><span class="s1">_HasFileNo </span><span class="s2">| </span><span class="s1">int</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">base_handle </span><span class="s2">= </span><span class="s1">_get_base_socket</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+        <span class="s1">waiters </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">base_handle</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">waiters </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">waiters </span><span class="s2">= </span><span class="s1">AFDWaiters</span><span class="s2">()</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">[</span><span class="s1">base_handle</span><span class="s2">] = </span><span class="s1">waiters</span>
+        <span class="s0">if </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">) </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BusyResourceError</span>
+        <span class="s1">setattr</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">())</span>
+        <span class="s4"># Could potentially raise if the handle is somehow invalid; that's OK,</span>
+        <span class="s4"># we let it escape.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_refresh_afd</span><span class="s2">(</span><span class="s1">base_handle</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">abort_fn</span><span class="s2">(</span><span class="s1">_</span><span class="s2">: </span><span class="s1">RaiseCancelT</span><span class="s2">) </span><span class="s1">-&gt; Abort</span><span class="s2">:</span>
+            <span class="s1">setattr</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_refresh_afd</span><span class="s2">(</span><span class="s1">base_handle</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">SUCCEEDED</span>
+
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s1">abort_fn</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">async def </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sock</span><span class="s2">: </span><span class="s1">_HasFileNo </span><span class="s2">| </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;Block until the kernel reports that the given object is readable. 
+ 
+        On Unix systems, ``sock`` must either be an integer file descriptor, 
+        or else an object with a ``.fileno()`` method which returns an 
+        integer file descriptor. Any kind of file descriptor can be passed, 
+        though the exact semantics will depend on your kernel. For example, 
+        this probably won't do anything useful for on-disk files. 
+ 
+        On Windows systems, ``sock`` must either be an integer ``SOCKET`` 
+        handle, or else an object with a ``.fileno()`` method which returns 
+        an integer ``SOCKET`` handle. File descriptors aren't supported, 
+        and neither are handles that refer to anything besides a 
+        ``SOCKET``. 
+ 
+        :raises trio.BusyResourceError: 
+            if another task is already waiting for the given socket to 
+            become readable. 
+        :raises trio.ClosedResourceError: 
+            if another task calls :func:`notify_closing` while this 
+            function is still working. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_poll</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s3">&quot;read_task&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">async def </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sock</span><span class="s2">: </span><span class="s1">_HasFileNo </span><span class="s2">| </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;Block until the kernel reports that the given object is writable. 
+ 
+        See `wait_readable` for the definition of ``sock``. 
+ 
+        :raises trio.BusyResourceError: 
+            if another task is already waiting for the given socket to 
+            become writable. 
+        :raises trio.ClosedResourceError: 
+            if another task calls :func:`notify_closing` while this 
+            function is still working. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_poll</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s3">&quot;write_task&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">def </span><span class="s1">notify_closing</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">handle</span><span class="s2">: </span><span class="s1">Handle </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">_HasFileNo</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;Notify waiters of the given object that it will be closed. 
+ 
+        Call this before closing a file descriptor (on Unix) or socket (on 
+        Windows). This will cause any `wait_readable` or `wait_writable` 
+        calls on the given object to immediately wake up and raise 
+        `~trio.ClosedResourceError`. 
+ 
+        This doesn't actually close the object – you still have to do that 
+        yourself afterwards. Also, you want to be careful to make sure no 
+        new tasks start waiting on the object in between when you call this 
+        and when it's actually closed. So to close something properly, you 
+        usually want to do these steps in order: 
+ 
+        1. Explicitly mark the object as closed, so that any new attempts 
+           to use it will abort before they start. 
+        2. Call `notify_closing` to wake up any already-existing users. 
+        3. Actually close the object. 
+ 
+        It's also possible to do them in a different order if that's more 
+        convenient, *but only if* you make sure not to have any checkpoints in 
+        between the steps. This way they all happen in a single atomic 
+        step, so other tasks won't be able to tell what order they happened 
+        in anyway. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">handle </span><span class="s2">= </span><span class="s1">_get_base_socket</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">)</span>
+        <span class="s1">waiters </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_afd_waiters</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">waiters </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">wake_all</span><span class="s2">(</span><span class="s1">waiters</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">())</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_refresh_afd</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">)</span>
+
+    <span class="s4">################################################################</span>
+    <span class="s4"># Regular overlapped operations</span>
+    <span class="s4">################################################################</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">def </span><span class="s1">register_with_iocp</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">handle</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;TODO: these are implemented, but are currently more of a sketch than 
+        anything real. See `#26 
+        &lt;https://github.com/python-trio/trio/issues/26&gt;`__ and `#52 
+        &lt;https://github.com/python-trio/trio/issues/52&gt;`__. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_register_with_iocp</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">CKeys</span><span class="s2">.</span><span class="s1">WAIT_OVERLAPPED</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">async def </span><span class="s1">wait_overlapped</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">handle_</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">,</span>
+        <span class="s1">lpOverlapped</span><span class="s2">: </span><span class="s1">CData </span><span class="s2">| </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; object</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;TODO: these are implemented, but are currently more of a sketch than 
+        anything real. See `#26 
+        &lt;https://github.com/python-trio/trio/issues/26&gt;`__ and `#52 
+        &lt;https://github.com/python-trio/trio/issues/52&gt;`__. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">handle </span><span class="s2">= </span><span class="s1">_handle</span><span class="s2">(</span><span class="s1">handle_</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">lpOverlapped</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):  </span><span class="s4"># TODO: test this line</span>
+            <span class="s1">lpOverlapped </span><span class="s2">= </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;LPOVERLAPPED&quot;</span><span class="s2">, </span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">lpOverlapped </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_overlapped_waiters</span><span class="s2">:  </span><span class="s4"># TODO: test this line</span>
+            <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BusyResourceError</span><span class="s2">(</span>
+                <span class="s3">&quot;another task is already waiting on that lpOverlapped&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s1">task </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_overlapped_waiters</span><span class="s2">[</span><span class="s1">lpOverlapped</span><span class="s2">] = </span><span class="s1">task</span>
+        <span class="s1">raise_cancel </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s0">def </span><span class="s1">abort</span><span class="s2">(</span><span class="s1">raise_cancel_</span><span class="s2">: </span><span class="s1">RaiseCancelT</span><span class="s2">) </span><span class="s1">-&gt; Abort</span><span class="s2">:</span>
+            <span class="s0">nonlocal </span><span class="s1">raise_cancel</span>
+            <span class="s1">raise_cancel </span><span class="s2">= </span><span class="s1">raise_cancel_</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">_check</span><span class="s2">(</span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CancelIoEx</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">lpOverlapped</span><span class="s2">))</span>
+            <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">winerror </span><span class="s2">== </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">ERROR_NOT_FOUND</span><span class="s2">:</span>
+                    <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s0">is not None</span>
+                    <span class="s4"># Too late to cancel. If this happens because the</span>
+                    <span class="s4"># operation is already completed, we don't need to do</span>
+                    <span class="s4"># anything; we'll get a notification of that completion</span>
+                    <span class="s4"># soon. But another possibility is that the operation was</span>
+                    <span class="s4"># performed on a handle that wasn't registered with our</span>
+                    <span class="s4"># IOCP (ie, the user forgot to call register_with_iocp),</span>
+                    <span class="s4"># in which case we're just never going to see the</span>
+                    <span class="s4"># completion. To avoid an uncancellable infinite sleep in</span>
+                    <span class="s4"># the latter case, we'll PostQueuedCompletionStatus here,</span>
+                    <span class="s4"># and if our post arrives before the original completion</span>
+                    <span class="s4"># does, we'll assume the handle wasn't registered.</span>
+                    <span class="s1">_check</span><span class="s2">(</span>
+                        <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">PostQueuedCompletionStatus</span><span class="s2">(</span>
+                            <span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp</span><span class="s2">,</span>
+                            <span class="s5">0</span><span class="s2">,</span>
+                            <span class="s1">CKeys</span><span class="s2">.</span><span class="s1">LATE_CANCEL</span><span class="s2">,</span>
+                            <span class="s1">lpOverlapped</span><span class="s2">,</span>
+                        <span class="s2">),</span>
+                    <span class="s2">)</span>
+                    <span class="s4"># Keep the lpOverlapped referenced so its address</span>
+                    <span class="s4"># doesn't get reused until our posted completion</span>
+                    <span class="s4"># status has been processed. Otherwise, we can</span>
+                    <span class="s4"># get confused about which completion goes with</span>
+                    <span class="s4"># which I/O.</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_posted_too_late_to_cancel</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+                <span class="s0">else</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+                    <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioInternalError</span><span class="s2">(</span>
+                        <span class="s3">&quot;CancelIoEx failed with unexpected error&quot;</span><span class="s2">,</span>
+                    <span class="s2">) </span><span class="s0">from </span><span class="s1">exc</span>
+            <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">FAILED</span>
+
+        <span class="s4"># TODO: what type does this return?</span>
+        <span class="s1">info </span><span class="s2">= </span><span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s1">abort</span><span class="s2">)</span>
+        <span class="s1">lpOverlappedTyped </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;_Overlapped&quot;</span><span class="s2">, </span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">lpOverlappedTyped</span><span class="s2">.</span><span class="s1">Internal </span><span class="s2">!= </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s4"># the lpOverlapped reports the error as an NT status code,</span>
+            <span class="s4"># which we must convert back to a Win32 error code before</span>
+            <span class="s4"># it will produce the right sorts of exceptions</span>
+            <span class="s1">code </span><span class="s2">= </span><span class="s1">ntdll</span><span class="s2">.</span><span class="s1">RtlNtStatusToDosError</span><span class="s2">(</span><span class="s1">lpOverlappedTyped</span><span class="s2">.</span><span class="s1">Internal</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">code </span><span class="s2">== </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">ERROR_OPERATION_ABORTED</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">raise_cancel </span><span class="s0">is not None</span><span class="s2">:</span>
+                    <span class="s1">raise_cancel</span><span class="s2">()</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s4"># We didn't request this cancellation, so assume</span>
+                    <span class="s4"># it happened due to the underlying handle being</span>
+                    <span class="s4"># closed before the operation could complete.</span>
+                    <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span><span class="s3">&quot;another task closed this resource&quot;</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">raise_winerror</span><span class="s2">(</span><span class="s1">code</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">info</span>
+
+    <span class="s0">async def </span><span class="s1">_perform_overlapped</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">handle</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">,</span>
+        <span class="s1">submit_fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_Overlapped</span><span class="s2">], </span><span class="s0">None</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; _Overlapped</span><span class="s2">:</span>
+        <span class="s4"># submit_fn(lpOverlapped) submits some I/O</span>
+        <span class="s4"># it may raise an OSError with ERROR_IO_PENDING</span>
+        <span class="s4"># the handle must already be registered using</span>
+        <span class="s4"># register_with_iocp(handle)</span>
+        <span class="s4"># This always does a schedule point, but it's possible that the</span>
+        <span class="s4"># operation will not be cancellable, depending on how Windows is</span>
+        <span class="s4"># feeling today. So we need to check for cancellation manually.</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint_if_cancelled</span><span class="s2">()</span>
+        <span class="s1">lpOverlapped </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;_Overlapped&quot;</span><span class="s2">, </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;LPOVERLAPPED&quot;</span><span class="s2">))</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">submit_fn</span><span class="s2">(</span><span class="s1">lpOverlapped</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">winerror </span><span class="s2">!= </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">ERROR_IO_PENDING</span><span class="s2">:</span>
+                <span class="s0">raise</span>
+        <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">wait_overlapped</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;CData&quot;</span><span class="s2">, </span><span class="s1">lpOverlapped</span><span class="s2">))</span>
+        <span class="s0">return </span><span class="s1">lpOverlapped</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">async def </span><span class="s1">write_overlapped</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">handle</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">,</span>
+        <span class="s1">data</span><span class="s2">: </span><span class="s1">Buffer</span><span class="s2">,</span>
+        <span class="s1">file_offset</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;TODO: these are implemented, but are currently more of a sketch than 
+        anything real. See `#26 
+        &lt;https://github.com/python-trio/trio/issues/26&gt;`__ and `#52 
+        &lt;https://github.com/python-trio/trio/issues/52&gt;`__. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">with </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">from_buffer</span><span class="s2">(</span><span class="s1">data</span><span class="s2">) </span><span class="s0">as </span><span class="s1">cbuf</span><span class="s2">:</span>
+
+            <span class="s0">def </span><span class="s1">submit_write</span><span class="s2">(</span><span class="s1">lpOverlapped</span><span class="s2">: </span><span class="s1">_Overlapped</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+                <span class="s4"># yes, these are the real documented names</span>
+                <span class="s1">offset_fields </span><span class="s2">= </span><span class="s1">lpOverlapped</span><span class="s2">.</span><span class="s1">DUMMYUNIONNAME</span><span class="s2">.</span><span class="s1">DUMMYSTRUCTNAME</span>
+                <span class="s1">offset_fields</span><span class="s2">.</span><span class="s1">Offset </span><span class="s2">= </span><span class="s1">file_offset </span><span class="s2">&amp; </span><span class="s5">0xFFFFFFFF</span>
+                <span class="s1">offset_fields</span><span class="s2">.</span><span class="s1">OffsetHigh </span><span class="s2">= </span><span class="s1">file_offset </span><span class="s2">&gt;&gt; </span><span class="s5">32</span>
+                <span class="s1">_check</span><span class="s2">(</span>
+                    <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">WriteFile</span><span class="s2">(</span>
+                        <span class="s1">_handle</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;LPCVOID&quot;</span><span class="s2">, </span><span class="s1">cbuf</span><span class="s2">),</span>
+                        <span class="s1">len</span><span class="s2">(</span><span class="s1">cbuf</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+                        <span class="s1">lpOverlapped</span><span class="s2">,</span>
+                    <span class="s2">),</span>
+                <span class="s2">)</span>
+
+            <span class="s1">lpOverlapped </span><span class="s2">= </span><span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_perform_overlapped</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">submit_write</span><span class="s2">)</span>
+            <span class="s4"># this is &quot;number of bytes transferred&quot;</span>
+            <span class="s0">return </span><span class="s1">lpOverlapped</span><span class="s2">.</span><span class="s1">InternalHigh</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">async def </span><span class="s1">readinto_overlapped</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">handle</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">,</span>
+        <span class="s1">buffer</span><span class="s2">: </span><span class="s1">Buffer</span><span class="s2">,</span>
+        <span class="s1">file_offset</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;TODO: these are implemented, but are currently more of a sketch than 
+        anything real. See `#26 
+        &lt;https://github.com/python-trio/trio/issues/26&gt;`__ and `#52 
+        &lt;https://github.com/python-trio/trio/issues/52&gt;`__. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">with </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">from_buffer</span><span class="s2">(</span><span class="s1">buffer</span><span class="s2">, </span><span class="s1">require_writable</span><span class="s2">=</span><span class="s0">True</span><span class="s2">) </span><span class="s0">as </span><span class="s1">cbuf</span><span class="s2">:</span>
+
+            <span class="s0">def </span><span class="s1">submit_read</span><span class="s2">(</span><span class="s1">lpOverlapped</span><span class="s2">: </span><span class="s1">_Overlapped</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+                <span class="s1">offset_fields </span><span class="s2">= </span><span class="s1">lpOverlapped</span><span class="s2">.</span><span class="s1">DUMMYUNIONNAME</span><span class="s2">.</span><span class="s1">DUMMYSTRUCTNAME</span>
+                <span class="s1">offset_fields</span><span class="s2">.</span><span class="s1">Offset </span><span class="s2">= </span><span class="s1">file_offset </span><span class="s2">&amp; </span><span class="s5">0xFFFFFFFF</span>
+                <span class="s1">offset_fields</span><span class="s2">.</span><span class="s1">OffsetHigh </span><span class="s2">= </span><span class="s1">file_offset </span><span class="s2">&gt;&gt; </span><span class="s5">32</span>
+                <span class="s1">_check</span><span class="s2">(</span>
+                    <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">ReadFile</span><span class="s2">(</span>
+                        <span class="s1">_handle</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;LPVOID&quot;</span><span class="s2">, </span><span class="s1">cbuf</span><span class="s2">),</span>
+                        <span class="s1">len</span><span class="s2">(</span><span class="s1">cbuf</span><span class="s2">),</span>
+                        <span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">,</span>
+                        <span class="s1">lpOverlapped</span><span class="s2">,</span>
+                    <span class="s2">),</span>
+                <span class="s2">)</span>
+
+            <span class="s1">lpOverlapped </span><span class="s2">= </span><span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_perform_overlapped</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">submit_read</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">lpOverlapped</span><span class="s2">.</span><span class="s1">InternalHigh</span>
+
+    <span class="s4">################################################################</span>
+    <span class="s4"># Raw IOCP operations</span>
+    <span class="s4">################################################################</span>
+
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">def </span><span class="s1">current_iocp</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s7">&quot;&quot;&quot;TODO: these are implemented, but are currently more of a sketch than 
+        anything real. See `#26 
+        &lt;https://github.com/python-trio/trio/issues/26&gt;`__ and `#52 
+        &lt;https://github.com/python-trio/trio/issues/52&gt;`__. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp </span><span class="s0">is not None</span>
+        <span class="s0">return </span><span class="s1">int</span><span class="s2">(</span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;uintptr_t&quot;</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_iocp</span><span class="s2">))</span>
+
+    <span class="s2">@</span><span class="s1">contextmanager</span>
+    <span class="s2">@</span><span class="s1">_public</span>
+    <span class="s0">def </span><span class="s1">monitor_completion_key</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">UnboundedQueue</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]]]:</span>
+        <span class="s7">&quot;&quot;&quot;TODO: these are implemented, but are currently more of a sketch than 
+        anything real. See `#26 
+        &lt;https://github.com/python-trio/trio/issues/26&gt;`__ and `#52 
+        &lt;https://github.com/python-trio/trio/issues/52&gt;`__. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">key </span><span class="s2">= </span><span class="s1">next</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_counter</span><span class="s2">)</span>
+        <span class="s1">queue </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">UnboundedQueue</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_queues</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">queue</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield </span><span class="s2">(</span><span class="s1">key</span><span class="s2">, </span><span class="s1">queue</span><span class="s2">)</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_completion_key_queues</span><span class="s2">[</span><span class="s1">key</span><span class="s2">]</span>
+</pre>
+</body>
+</html>

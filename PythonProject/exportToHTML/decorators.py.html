@@ -1,0 +1,574 @@
+<html>
+<head>
+<title>decorators.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+decorators.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">update_wrapper</span>
+<span class="s0">from </span><span class="s1">gettext </span><span class="s0">import </span><span class="s1">gettext </span><span class="s0">as </span><span class="s1">_</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Argument</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Command</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Context</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Group</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Option</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Parameter</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">globals </span><span class="s0">import </span><span class="s1">get_current_context</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">utils </span><span class="s0">import </span><span class="s1">echo</span>
+
+<span class="s0">if </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">import </span><span class="s1">typing_extensions </span><span class="s0">as </span><span class="s1">te</span>
+
+    <span class="s1">P </span><span class="s2">= </span><span class="s1">te</span><span class="s2">.</span><span class="s1">ParamSpec</span><span class="s2">(</span><span class="s3">&quot;P&quot;</span><span class="s2">)</span>
+
+<span class="s1">R </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;R&quot;</span><span class="s2">)</span>
+<span class="s1">T </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;T&quot;</span><span class="s2">)</span>
+<span class="s1">_AnyCallable </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">]</span>
+<span class="s1">FC </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;FC&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s3">&quot;_AnyCallable | Command&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">pass_context</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">te</span><span class="s2">.</span><span class="s1">Concatenate</span><span class="s2">[</span><span class="s1">Context</span><span class="s2">, </span><span class="s1">P</span><span class="s2">], </span><span class="s1">R</span><span class="s2">]) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">R</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Marks a callback as wanting to receive the current context 
+    object as first argument. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">new_func</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">kwargs</span><span class="s2">) </span><span class="s1">-&gt; R</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">f</span><span class="s2">(</span><span class="s1">get_current_context</span><span class="s2">(), *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">update_wrapper</span><span class="s2">(</span><span class="s1">new_func</span><span class="s2">, </span><span class="s1">f</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">pass_obj</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">te</span><span class="s2">.</span><span class="s1">Concatenate</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s1">P</span><span class="s2">], </span><span class="s1">R</span><span class="s2">]) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">R</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Similar to :func:`pass_context`, but only pass the object on the 
+    context onwards (:attr:`Context.obj`).  This is useful if that object 
+    represents the state of a nested system. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">new_func</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">kwargs</span><span class="s2">) </span><span class="s1">-&gt; R</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">f</span><span class="s2">(</span><span class="s1">get_current_context</span><span class="s2">().</span><span class="s1">obj</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">update_wrapper</span><span class="s2">(</span><span class="s1">new_func</span><span class="s2">, </span><span class="s1">f</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">make_pass_decorator</span><span class="s2">(</span>
+    <span class="s1">object_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">T</span><span class="s2">], </span><span class="s1">ensure</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">te</span><span class="s2">.</span><span class="s1">Concatenate</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s1">P</span><span class="s2">], </span><span class="s1">R</span><span class="s2">]], </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">R</span><span class="s2">]]:</span>
+    <span class="s4">&quot;&quot;&quot;Given an object type this creates a decorator that will work 
+    similar to :func:`pass_obj` but instead of passing the object of the 
+    current context, it will find the innermost context of type 
+    :func:`object_type`. 
+ 
+    This generates a decorator that works roughly like this:: 
+ 
+        from functools import update_wrapper 
+ 
+        def decorator(f): 
+            @pass_context 
+            def new_func(ctx, *args, **kwargs): 
+                obj = ctx.find_object(object_type) 
+                return ctx.invoke(f, obj, *args, **kwargs) 
+            return update_wrapper(new_func, f) 
+        return decorator 
+ 
+    :param object_type: the type of the object to pass. 
+    :param ensure: if set to `True`, a new object will be created and 
+                   remembered on the context if it's not there yet. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">decorator</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">te</span><span class="s2">.</span><span class="s1">Concatenate</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s1">P</span><span class="s2">], </span><span class="s1">R</span><span class="s2">]) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">R</span><span class="s2">]:</span>
+        <span class="s0">def </span><span class="s1">new_func</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">kwargs</span><span class="s2">) </span><span class="s1">-&gt; R</span><span class="s2">:</span>
+            <span class="s1">ctx </span><span class="s2">= </span><span class="s1">get_current_context</span><span class="s2">()</span>
+
+            <span class="s1">obj</span><span class="s2">: </span><span class="s1">T </span><span class="s2">| </span><span class="s0">None</span>
+            <span class="s0">if </span><span class="s1">ensure</span><span class="s2">:</span>
+                <span class="s1">obj </span><span class="s2">= </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">ensure_object</span><span class="s2">(</span><span class="s1">object_type</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">obj </span><span class="s2">= </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">find_object</span><span class="s2">(</span><span class="s1">object_type</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">obj </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                    <span class="s3">&quot;Managed to invoke callback without a context&quot;</span>
+                    <span class="s3">f&quot; object of type </span><span class="s0">{</span><span class="s1">object_type</span><span class="s2">.</span><span class="s1">__name__</span><span class="s0">!r}</span><span class="s3">&quot;</span>
+                    <span class="s3">&quot; existing.&quot;</span>
+                <span class="s2">)</span>
+
+            <span class="s0">return </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">invoke</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">update_wrapper</span><span class="s2">(</span><span class="s1">new_func</span><span class="s2">, </span><span class="s1">f</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">decorator</span>
+
+
+<span class="s0">def </span><span class="s1">pass_meta_key</span><span class="s2">(</span>
+    <span class="s1">key</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, *, </span><span class="s1">doc_description</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">te</span><span class="s2">.</span><span class="s1">Concatenate</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s1">P</span><span class="s2">], </span><span class="s1">R</span><span class="s2">]], </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">R</span><span class="s2">]]:</span>
+    <span class="s4">&quot;&quot;&quot;Create a decorator that passes a key from 
+    :attr:`click.Context.meta` as the first argument to the decorated 
+    function. 
+ 
+    :param key: Key in ``Context.meta`` to pass. 
+    :param doc_description: Description of the object being passed, 
+        inserted into the decorator's docstring. Defaults to &quot;the 'key' 
+        key from Context.meta&quot;. 
+ 
+    .. versionadded:: 8.0 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">decorator</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">te</span><span class="s2">.</span><span class="s1">Concatenate</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s1">P</span><span class="s2">], </span><span class="s1">R</span><span class="s2">]) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">R</span><span class="s2">]:</span>
+        <span class="s0">def </span><span class="s1">new_func</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">kwargs</span><span class="s2">) </span><span class="s1">-&gt; R</span><span class="s2">:</span>
+            <span class="s1">ctx </span><span class="s2">= </span><span class="s1">get_current_context</span><span class="s2">()</span>
+            <span class="s1">obj </span><span class="s2">= </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">meta</span><span class="s2">[</span><span class="s1">key</span><span class="s2">]</span>
+            <span class="s0">return </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">invoke</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">update_wrapper</span><span class="s2">(</span><span class="s1">new_func</span><span class="s2">, </span><span class="s1">f</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">doc_description </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">doc_description </span><span class="s2">= </span><span class="s3">f&quot;the </span><span class="s0">{</span><span class="s1">key</span><span class="s0">!r} </span><span class="s3">key from :attr:`click.Context.meta`&quot;</span>
+
+    <span class="s1">decorator</span><span class="s2">.</span><span class="s1">__doc__ </span><span class="s2">= (</span>
+        <span class="s3">f&quot;Decorator that passes </span><span class="s0">{</span><span class="s1">doc_description</span><span class="s0">} </span><span class="s3">as the first argument&quot;</span>
+        <span class="s3">&quot; to the decorated function.&quot;</span>
+    <span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">decorator</span>
+
+
+<span class="s1">CmdType </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;CmdType&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">Command</span><span class="s2">)</span>
+
+
+<span class="s5"># variant: no call, directly as decorator for a function.</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">command</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">_AnyCallable</span><span class="s2">) </span><span class="s1">-&gt; Command</span><span class="s2">: ...</span>
+
+
+<span class="s5"># variant: with positional name and with positional or keyword cls argument:</span>
+<span class="s5"># @command(namearg, CommandCls, ...) or @command(namearg, cls=CommandCls, ...)</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">command</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">CmdType</span><span class="s2">],</span>
+    <span class="s2">**</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">CmdType</span><span class="s2">]: ...</span>
+
+
+<span class="s5"># variant: name omitted, cls _must_ be a keyword argument, @command(cls=CommandCls, ...)</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">command</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">*,</span>
+    <span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">CmdType</span><span class="s2">],</span>
+    <span class="s2">**</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">CmdType</span><span class="s2">]: ...</span>
+
+
+<span class="s5"># variant: with optional string name, no cls argument provided.</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">command</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= ..., </span><span class="s1">cls</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">Command</span><span class="s2">]: ...</span>
+
+
+<span class="s0">def </span><span class="s1">command</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">_AnyCallable </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">CmdType</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; Command </span><span class="s2">| </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">Command </span><span class="s2">| </span><span class="s1">CmdType</span><span class="s2">]:</span>
+    <span class="s4">r&quot;&quot;&quot;Creates a new :class:`Command` and uses the decorated function as 
+    callback.  This will also automatically attach all decorated 
+    :func:`option`\s and :func:`argument`\s as parameters to the command. 
+ 
+    The name of the command defaults to the name of the function, converted to 
+    lowercase, with underscores ``_`` replaced by dashes ``-``, and the suffixes 
+    ``_command``, ``_cmd``, ``_group``, and ``_grp`` are removed. For example, 
+    ``init_data_command`` becomes ``init-data``. 
+ 
+    All keyword arguments are forwarded to the underlying command class. 
+    For the ``params`` argument, any decorated params are appended to 
+    the end of the list. 
+ 
+    Once decorated the function turns into a :class:`Command` instance 
+    that can be invoked as a command line utility or be attached to a 
+    command :class:`Group`. 
+ 
+    :param name: The name of the command. Defaults to modifying the function's 
+        name as described above. 
+    :param cls: The command class to create. Defaults to :class:`Command`. 
+ 
+    .. versionchanged:: 8.2 
+        The suffixes ``_command``, ``_cmd``, ``_group``, and ``_grp`` are 
+        removed when generating the name. 
+ 
+    .. versionchanged:: 8.1 
+        This decorator can be applied without parentheses. 
+ 
+    .. versionchanged:: 8.1 
+        The ``params`` argument can be used. Decorated params are 
+        appended to the end of the list. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">func</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">if </span><span class="s1">callable</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+        <span class="s1">func </span><span class="s2">= </span><span class="s1">name</span>
+        <span class="s1">name </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">assert </span><span class="s1">cls </span><span class="s0">is None</span><span class="s2">, </span><span class="s3">&quot;Use 'command(cls=cls)(callable)' to specify a class.&quot;</span>
+        <span class="s0">assert not </span><span class="s1">attrs</span><span class="s2">, </span><span class="s3">&quot;Use 'command(**kwargs)(callable)' to provide arguments.&quot;</span>
+
+    <span class="s0">if </span><span class="s1">cls </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">cls </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;type[CmdType]&quot;</span><span class="s2">, </span><span class="s1">Command</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">decorator</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">_AnyCallable</span><span class="s2">) </span><span class="s1">-&gt; CmdType</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">Command</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s3">&quot;Attempted to convert a callback into a command twice.&quot;</span><span class="s2">)</span>
+
+        <span class="s1">attr_params </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">(</span><span class="s3">&quot;params&quot;</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+        <span class="s1">params </span><span class="s2">= </span><span class="s1">attr_params </span><span class="s0">if </span><span class="s1">attr_params </span><span class="s0">is not None else </span><span class="s2">[]</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">decorator_params </span><span class="s2">= </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__click_params__  </span><span class="s5"># type: ignore</span>
+        <span class="s0">except </span><span class="s1">AttributeError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">del </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__click_params__  </span><span class="s5"># type: ignore</span>
+            <span class="s1">params</span><span class="s2">.</span><span class="s1">extend</span><span class="s2">(</span><span class="s1">reversed</span><span class="s2">(</span><span class="s1">decorator_params</span><span class="s2">))</span>
+
+        <span class="s0">if </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s3">&quot;help&quot;</span><span class="s2">) </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">attrs</span><span class="s2">[</span><span class="s3">&quot;help&quot;</span><span class="s2">] = </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__doc__</span>
+
+        <span class="s0">if </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">cls </span><span class="s0">is not None</span>
+            <span class="s0">assert not </span><span class="s1">callable</span><span class="s2">(</span><span class="s1">name</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">cmd_name </span><span class="s2">= </span><span class="s1">name</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">cmd_name </span><span class="s2">= </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">().</span><span class="s1">replace</span><span class="s2">(</span><span class="s3">&quot;_&quot;</span><span class="s2">, </span><span class="s3">&quot;-&quot;</span><span class="s2">)</span>
+            <span class="s1">cmd_left</span><span class="s2">, </span><span class="s1">sep</span><span class="s2">, </span><span class="s1">suffix </span><span class="s2">= </span><span class="s1">cmd_name</span><span class="s2">.</span><span class="s1">rpartition</span><span class="s2">(</span><span class="s3">&quot;-&quot;</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">sep </span><span class="s0">and </span><span class="s1">suffix </span><span class="s0">in </span><span class="s2">{</span><span class="s3">&quot;command&quot;</span><span class="s2">, </span><span class="s3">&quot;cmd&quot;</span><span class="s2">, </span><span class="s3">&quot;group&quot;</span><span class="s2">, </span><span class="s3">&quot;grp&quot;</span><span class="s2">}:</span>
+                <span class="s1">cmd_name </span><span class="s2">= </span><span class="s1">cmd_left</span>
+
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">name</span><span class="s2">=</span><span class="s1">cmd_name</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">=</span><span class="s1">f</span><span class="s2">, </span><span class="s1">params</span><span class="s2">=</span><span class="s1">params</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">__doc__ </span><span class="s2">= </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__doc__</span>
+        <span class="s0">return </span><span class="s1">cmd</span>
+
+    <span class="s0">if </span><span class="s1">func </span><span class="s0">is not None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">decorator</span><span class="s2">(</span><span class="s1">func</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">decorator</span>
+
+
+<span class="s1">GrpType </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;GrpType&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">Group</span><span class="s2">)</span>
+
+
+<span class="s5"># variant: no call, directly as decorator for a function.</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">group</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">_AnyCallable</span><span class="s2">) </span><span class="s1">-&gt; Group</span><span class="s2">: ...</span>
+
+
+<span class="s5"># variant: with positional name and with positional or keyword cls argument:</span>
+<span class="s5"># @group(namearg, GroupCls, ...) or @group(namearg, cls=GroupCls, ...)</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">group</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">GrpType</span><span class="s2">],</span>
+    <span class="s2">**</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">GrpType</span><span class="s2">]: ...</span>
+
+
+<span class="s5"># variant: name omitted, cls _must_ be a keyword argument, @group(cmd=GroupCls, ...)</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">group</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">*,</span>
+    <span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">GrpType</span><span class="s2">],</span>
+    <span class="s2">**</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">GrpType</span><span class="s2">]: ...</span>
+
+
+<span class="s5"># variant: with optional string name, no cls argument provided.</span>
+<span class="s2">@</span><span class="s1">t</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">group</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= ..., </span><span class="s1">cls</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">Group</span><span class="s2">]: ...</span>
+
+
+<span class="s0">def </span><span class="s1">group</span><span class="s2">(</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">_AnyCallable </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">GrpType</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; Group </span><span class="s2">| </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_AnyCallable</span><span class="s2">], </span><span class="s1">Group </span><span class="s2">| </span><span class="s1">GrpType</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Creates a new :class:`Group` with a function as callback.  This 
+    works otherwise the same as :func:`command` just that the `cls` 
+    parameter is set to :class:`Group`. 
+ 
+    .. versionchanged:: 8.1 
+        This decorator can be applied without parentheses. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">cls </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">cls </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s3">&quot;type[GrpType]&quot;</span><span class="s2">, </span><span class="s1">Group</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">callable</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+        <span class="s0">return </span><span class="s1">command</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">=</span><span class="s1">cls</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">)(</span><span class="s1">name</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">command</span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">cls</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_param_memo</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">], </span><span class="s1">param</span><span class="s2">: </span><span class="s1">Parameter</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">Command</span><span class="s2">):</span>
+        <span class="s1">f</span><span class="s2">.</span><span class="s1">params</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">param</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s3">&quot;__click_params__&quot;</span><span class="s2">):</span>
+            <span class="s1">f</span><span class="s2">.</span><span class="s1">__click_params__ </span><span class="s2">= []  </span><span class="s5"># type: ignore</span>
+
+        <span class="s1">f</span><span class="s2">.</span><span class="s1">__click_params__</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">param</span><span class="s2">)  </span><span class="s5"># type: ignore</span>
+
+
+<span class="s0">def </span><span class="s1">argument</span><span class="s2">(</span>
+    <span class="s2">*</span><span class="s1">param_decls</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">Argument</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">FC</span><span class="s2">], </span><span class="s1">FC</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Attaches an argument to the command.  All positional arguments are 
+    passed as parameter declarations to :class:`Argument`; all keyword 
+    arguments are forwarded unchanged (except ``cls``). 
+    This is equivalent to creating an :class:`Argument` instance manually 
+    and attaching it to the :attr:`Command.params` list. 
+ 
+    For the default argument class, refer to :class:`Argument` and 
+    :class:`Parameter` for descriptions of parameters. 
+ 
+    :param cls: the argument class to instantiate.  This defaults to 
+                :class:`Argument`. 
+    :param param_decls: Passed as positional arguments to the constructor of 
+        ``cls``. 
+    :param attrs: Passed as keyword arguments to the constructor of ``cls``. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">cls </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">cls </span><span class="s2">= </span><span class="s1">Argument</span>
+
+    <span class="s0">def </span><span class="s1">decorator</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">FC</span><span class="s2">) </span><span class="s1">-&gt; FC</span><span class="s2">:</span>
+        <span class="s1">_param_memo</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">param_decls</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">))</span>
+        <span class="s0">return </span><span class="s1">f</span>
+
+    <span class="s0">return </span><span class="s1">decorator</span>
+
+
+<span class="s0">def </span><span class="s1">option</span><span class="s2">(</span>
+    <span class="s2">*</span><span class="s1">param_decls</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">cls</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">Option</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">FC</span><span class="s2">], </span><span class="s1">FC</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Attaches an option to the command.  All positional arguments are 
+    passed as parameter declarations to :class:`Option`; all keyword 
+    arguments are forwarded unchanged (except ``cls``). 
+    This is equivalent to creating an :class:`Option` instance manually 
+    and attaching it to the :attr:`Command.params` list. 
+ 
+    For the default option class, refer to :class:`Option` and 
+    :class:`Parameter` for descriptions of parameters. 
+ 
+    :param cls: the option class to instantiate.  This defaults to 
+                :class:`Option`. 
+    :param param_decls: Passed as positional arguments to the constructor of 
+        ``cls``. 
+    :param attrs: Passed as keyword arguments to the constructor of ``cls``. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">cls </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">cls </span><span class="s2">= </span><span class="s1">Option</span>
+
+    <span class="s0">def </span><span class="s1">decorator</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">FC</span><span class="s2">) </span><span class="s1">-&gt; FC</span><span class="s2">:</span>
+        <span class="s1">_param_memo</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">param_decls</span><span class="s2">, **</span><span class="s1">attrs</span><span class="s2">))</span>
+        <span class="s0">return </span><span class="s1">f</span>
+
+    <span class="s0">return </span><span class="s1">decorator</span>
+
+
+<span class="s0">def </span><span class="s1">confirmation_option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">FC</span><span class="s2">], </span><span class="s1">FC</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Add a ``--yes`` option which shows a prompt before continuing if 
+    not passed. If the prompt is declined, the program will exit. 
+ 
+    :param param_decls: One or more option names. Defaults to the single 
+        value ``&quot;--yes&quot;``. 
+    :param kwargs: Extra arguments are passed to :func:`option`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">callback</span><span class="s2">(</span><span class="s1">ctx</span><span class="s2">: </span><span class="s1">Context</span><span class="s2">, </span><span class="s1">param</span><span class="s2">: </span><span class="s1">Parameter</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">value</span><span class="s2">:</span>
+            <span class="s1">ctx</span><span class="s2">.</span><span class="s1">abort</span><span class="s2">()</span>
+
+    <span class="s0">if not </span><span class="s1">param_decls</span><span class="s2">:</span>
+        <span class="s1">param_decls </span><span class="s2">= (</span><span class="s3">&quot;--yes&quot;</span><span class="s2">,)</span>
+
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;is_flag&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;callback&quot;</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;expose_value&quot;</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;prompt&quot;</span><span class="s2">, </span><span class="s3">&quot;Do you want to continue?&quot;</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;help&quot;</span><span class="s2">, </span><span class="s3">&quot;Confirm the action without prompting.&quot;</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">password_option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">FC</span><span class="s2">], </span><span class="s1">FC</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Add a ``--password`` option which prompts for a password, hiding 
+    input and asking to enter the value again for confirmation. 
+ 
+    :param param_decls: One or more option names. Defaults to the single 
+        value ``&quot;--password&quot;``. 
+    :param kwargs: Extra arguments are passed to :func:`option`. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">param_decls</span><span class="s2">:</span>
+        <span class="s1">param_decls </span><span class="s2">= (</span><span class="s3">&quot;--password&quot;</span><span class="s2">,)</span>
+
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;prompt&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;confirmation_prompt&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;hide_input&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">version_option</span><span class="s2">(</span>
+    <span class="s1">version</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">*</span><span class="s1">param_decls</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+    <span class="s1">package_name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">prog_name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">message</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">FC</span><span class="s2">], </span><span class="s1">FC</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Add a ``--version`` option which immediately prints the version 
+    number and exits the program. 
+ 
+    If ``version`` is not provided, Click will try to detect it using 
+    :func:`importlib.metadata.version` to get the version for the 
+    ``package_name``. 
+ 
+    If ``package_name`` is not provided, Click will try to detect it by 
+    inspecting the stack frames. This will be used to detect the 
+    version, so it must match the name of the installed package. 
+ 
+    :param version: The version number to show. If not provided, Click 
+        will try to detect it. 
+    :param param_decls: One or more option names. Defaults to the single 
+        value ``&quot;--version&quot;``. 
+    :param package_name: The package name to detect the version from. If 
+        not provided, Click will try to detect it. 
+    :param prog_name: The name of the CLI to show in the message. If not 
+        provided, it will be detected from the command. 
+    :param message: The message to show. The values ``%(prog)s``, 
+        ``%(package)s``, and ``%(version)s`` are available. Defaults to 
+        ``&quot;%(prog)s, version %(version)s&quot;``. 
+    :param kwargs: Extra arguments are passed to :func:`option`. 
+    :raise RuntimeError: ``version`` could not be detected. 
+ 
+    .. versionchanged:: 8.0 
+        Add the ``package_name`` parameter, and the ``%(package)s`` 
+        value for messages. 
+ 
+    .. versionchanged:: 8.0 
+        Use :mod:`importlib.metadata` instead of ``pkg_resources``. The 
+        version is detected based on the package name, not the entry 
+        point name. The Python package name must match the installed 
+        package name, or be passed with ``package_name=``. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">message </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">message </span><span class="s2">= </span><span class="s1">_</span><span class="s2">(</span><span class="s3">&quot;%(prog)s, version %(version)s&quot;</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">version </span><span class="s0">is None and </span><span class="s1">package_name </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">frame </span><span class="s2">= </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">currentframe</span><span class="s2">()</span>
+        <span class="s1">f_back </span><span class="s2">= </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">f_back </span><span class="s0">if </span><span class="s1">frame </span><span class="s0">is not None else None</span>
+        <span class="s1">f_globals </span><span class="s2">= </span><span class="s1">f_back</span><span class="s2">.</span><span class="s1">f_globals </span><span class="s0">if </span><span class="s1">f_back </span><span class="s0">is not None else None</span>
+        <span class="s5"># break reference cycle</span>
+        <span class="s5"># https://docs.python.org/3/library/inspect.html#the-interpreter-stack</span>
+        <span class="s0">del </span><span class="s1">frame</span>
+
+        <span class="s0">if </span><span class="s1">f_globals </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">package_name </span><span class="s2">= </span><span class="s1">f_globals</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s3">&quot;__name__&quot;</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">package_name </span><span class="s2">== </span><span class="s3">&quot;__main__&quot;</span><span class="s2">:</span>
+                <span class="s1">package_name </span><span class="s2">= </span><span class="s1">f_globals</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s3">&quot;__package__&quot;</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">package_name</span><span class="s2">:</span>
+                <span class="s1">package_name </span><span class="s2">= </span><span class="s1">package_name</span><span class="s2">.</span><span class="s1">partition</span><span class="s2">(</span><span class="s3">&quot;.&quot;</span><span class="s2">)[</span><span class="s6">0</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">callback</span><span class="s2">(</span><span class="s1">ctx</span><span class="s2">: </span><span class="s1">Context</span><span class="s2">, </span><span class="s1">param</span><span class="s2">: </span><span class="s1">Parameter</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">value </span><span class="s0">or </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">resilient_parsing</span><span class="s2">:</span>
+            <span class="s0">return</span>
+
+        <span class="s0">nonlocal </span><span class="s1">prog_name</span>
+        <span class="s0">nonlocal </span><span class="s1">version</span>
+
+        <span class="s0">if </span><span class="s1">prog_name </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">prog_name </span><span class="s2">= </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">find_root</span><span class="s2">().</span><span class="s1">info_name</span>
+
+        <span class="s0">if </span><span class="s1">version </span><span class="s0">is None and </span><span class="s1">package_name </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">import </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">metadata</span>
+
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">version </span><span class="s2">= </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version</span><span class="s2">(</span><span class="s1">package_name</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">PackageNotFoundError</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                    <span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">package_name</span><span class="s0">!r} </span><span class="s3">is not installed. Try passing&quot;</span>
+                    <span class="s3">&quot; 'package_name' instead.&quot;</span>
+                <span class="s2">) </span><span class="s0">from None</span>
+
+        <span class="s0">if </span><span class="s1">version </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                <span class="s3">f&quot;Could not determine the version for </span><span class="s0">{</span><span class="s1">package_name</span><span class="s0">!r} </span><span class="s3">automatically.&quot;</span>
+            <span class="s2">)</span>
+
+        <span class="s1">echo</span><span class="s2">(</span>
+            <span class="s1">message </span><span class="s2">% {</span><span class="s3">&quot;prog&quot;</span><span class="s2">: </span><span class="s1">prog_name</span><span class="s2">, </span><span class="s3">&quot;package&quot;</span><span class="s2">: </span><span class="s1">package_name</span><span class="s2">, </span><span class="s3">&quot;version&quot;</span><span class="s2">: </span><span class="s1">version</span><span class="s2">},</span>
+            <span class="s1">color</span><span class="s2">=</span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">color</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">ctx</span><span class="s2">.</span><span class="s1">exit</span><span class="s2">()</span>
+
+    <span class="s0">if not </span><span class="s1">param_decls</span><span class="s2">:</span>
+        <span class="s1">param_decls </span><span class="s2">= (</span><span class="s3">&quot;--version&quot;</span><span class="s2">,)</span>
+
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;is_flag&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;expose_value&quot;</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;is_eager&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;help&quot;</span><span class="s2">, </span><span class="s1">_</span><span class="s2">(</span><span class="s3">&quot;Show the version and exit.&quot;</span><span class="s2">))</span>
+    <span class="s1">kwargs</span><span class="s2">[</span><span class="s3">&quot;callback&quot;</span><span class="s2">] = </span><span class="s1">callback</span>
+    <span class="s0">return </span><span class="s1">option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">help_option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">FC</span><span class="s2">], </span><span class="s1">FC</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Pre-configured ``--help`` option which immediately prints the help page 
+    and exits the program. 
+ 
+    :param param_decls: One or more option names. Defaults to the single 
+        value ``&quot;--help&quot;``. 
+    :param kwargs: Extra arguments are passed to :func:`option`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">show_help</span><span class="s2">(</span><span class="s1">ctx</span><span class="s2">: </span><span class="s1">Context</span><span class="s2">, </span><span class="s1">param</span><span class="s2">: </span><span class="s1">Parameter</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot;Callback that print the help page on ``&lt;stdout&gt;`` and exits.&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">value </span><span class="s0">and not </span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">resilient_parsing</span><span class="s2">:</span>
+            <span class="s1">echo</span><span class="s2">(</span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">get_help</span><span class="s2">(), </span><span class="s1">color</span><span class="s2">=</span><span class="s1">ctx</span><span class="s2">.</span><span class="s1">color</span><span class="s2">)</span>
+            <span class="s1">ctx</span><span class="s2">.</span><span class="s1">exit</span><span class="s2">()</span>
+
+    <span class="s0">if not </span><span class="s1">param_decls</span><span class="s2">:</span>
+        <span class="s1">param_decls </span><span class="s2">= (</span><span class="s3">&quot;--help&quot;</span><span class="s2">,)</span>
+
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;is_flag&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;expose_value&quot;</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;is_eager&quot;</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;help&quot;</span><span class="s2">, </span><span class="s1">_</span><span class="s2">(</span><span class="s3">&quot;Show this message and exit.&quot;</span><span class="s2">))</span>
+    <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;callback&quot;</span><span class="s2">, </span><span class="s1">show_help</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">option</span><span class="s2">(*</span><span class="s1">param_decls</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

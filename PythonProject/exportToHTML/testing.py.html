@@ -1,0 +1,589 @@
+<html>
+<head>
+<title>testing.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #2aacb8;}
+.s4 { color: #7a7e85;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #6aab73;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+testing.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">as </span><span class="s1">cabc</span>
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">io</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">shlex</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">types </span><span class="s0">import </span><span class="s1">TracebackType</span>
+
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">_compat</span>
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">formatting</span>
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">termui</span>
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">utils</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_compat </span><span class="s0">import </span><span class="s1">_find_binary_reader</span>
+
+<span class="s0">if </span><span class="s1">t</span><span class="s2">.</span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">_typeshed </span><span class="s0">import </span><span class="s1">ReadableBuffer</span>
+
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Command</span>
+
+
+<span class="s0">class </span><span class="s1">EchoingStdin</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">input</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s1">output</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">BinaryIO</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_input </span><span class="s2">= </span><span class="s1">input</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_output </span><span class="s2">= </span><span class="s1">output</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_paused </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">__getattr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">x</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">, </span><span class="s1">x</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_echo</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">rv</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_paused</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_output</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">rv</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s0">def </span><span class="s1">read</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_echo</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">n</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">read1</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_echo</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">.</span><span class="s1">read1</span><span class="s2">(</span><span class="s1">n</span><span class="s2">))  </span><span class="s4"># type: ignore</span>
+
+    <span class="s0">def </span><span class="s1">readline</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">n</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_echo</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">.</span><span class="s1">readline</span><span class="s2">(</span><span class="s1">n</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">readlines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_echo</span><span class="s2">(</span><span class="s1">x</span><span class="s2">) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">.</span><span class="s1">readlines</span><span class="s2">()]</span>
+
+    <span class="s0">def </span><span class="s1">__iter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; cabc</span><span class="s2">.</span><span class="s1">Iterator</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">iter</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_echo</span><span class="s2">(</span><span class="s1">x</span><span class="s2">) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_input</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">_pause_echo</span><span class="s2">(</span><span class="s1">stream</span><span class="s2">: </span><span class="s1">EchoingStdin </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; cabc</span><span class="s2">.</span><span class="s1">Iterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">if </span><span class="s1">stream </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">yield</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">stream</span><span class="s2">.</span><span class="s1">_paused </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">yield</span>
+        <span class="s1">stream</span><span class="s2">.</span><span class="s1">_paused </span><span class="s2">= </span><span class="s0">False</span>
+
+
+<span class="s0">class </span><span class="s1">BytesIOCopy</span><span class="s2">(</span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot;Patch ``io.BytesIO`` to let the written stream be copied to another. 
+ 
+    .. versionadded:: 8.2 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">copy_to</span><span class="s2">: </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">copy_to </span><span class="s2">= </span><span class="s1">copy_to</span>
+
+    <span class="s0">def </span><span class="s1">flush</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">flush</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">copy_to</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">write</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">b</span><span class="s2">: </span><span class="s1">ReadableBuffer</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">copy_to</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">b</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">super</span><span class="s2">().</span><span class="s1">write</span><span class="s2">(</span><span class="s1">b</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">StreamMixer</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Mixes `&lt;stdout&gt;` and `&lt;stderr&gt;` streams. 
+ 
+    The result is available in the ``output`` attribute. 
+ 
+    .. versionadded:: 8.2 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">output</span><span class="s2">: </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO </span><span class="s2">= </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">: </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO </span><span class="s2">= </span><span class="s1">BytesIOCopy</span><span class="s2">(</span><span class="s1">copy_to</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">output</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">: </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO </span><span class="s2">= </span><span class="s1">BytesIOCopy</span><span class="s2">(</span><span class="s1">copy_to</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">output</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">_NamedTextIOWrapper</span><span class="s2">(</span><span class="s1">io</span><span class="s2">.</span><span class="s1">TextIOWrapper</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">buffer</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">buffer</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_name </span><span class="s2">= </span><span class="s1">name</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_mode </span><span class="s2">= </span><span class="s1">mode</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_name</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">mode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_mode</span>
+
+    <span class="s0">def </span><span class="s1">__next__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:  </span><span class="s4"># type: ignore</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">line </span><span class="s2">= </span><span class="s1">super</span><span class="s2">().</span><span class="s1">__next__</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">StopIteration </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">EOFError</span><span class="s2">() </span><span class="s0">from </span><span class="s1">e</span>
+        <span class="s0">return </span><span class="s1">line</span>
+
+
+<span class="s0">def </span><span class="s1">make_input_stream</span><span class="s2">(</span>
+    <span class="s1">input</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">t</span><span class="s2">.</span><span class="s1">IO</span><span class="s2">[</span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">: </span><span class="s1">str</span>
+<span class="s2">) </span><span class="s1">-&gt; t</span><span class="s2">.</span><span class="s1">BinaryIO</span><span class="s2">:</span>
+    <span class="s4"># Is already an input stream.</span>
+    <span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">input</span><span class="s2">, </span><span class="s6">&quot;read&quot;</span><span class="s2">):</span>
+        <span class="s1">rv </span><span class="s2">= </span><span class="s1">_find_binary_reader</span><span class="s2">(</span><span class="s1">t</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s6">&quot;t.IO[t.Any]&quot;</span><span class="s2">, </span><span class="s1">input</span><span class="s2">))</span>
+
+        <span class="s0">if </span><span class="s1">rv </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">rv</span>
+
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s6">&quot;Could not find binary reader for input stream.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">input </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">input </span><span class="s2">= </span><span class="s7">b&quot;&quot;</span>
+    <span class="s0">elif </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">input</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+        <span class="s1">input </span><span class="s2">= </span><span class="s1">input</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s1">charset</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">(</span><span class="s1">input</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">Result</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Holds the captured result of an invoked CLI script. 
+ 
+    :param runner: The runner that created the result 
+    :param stdout_bytes: The standard output as bytes. 
+    :param stderr_bytes: The standard error as bytes. 
+    :param output_bytes: A mix of ``stdout_bytes`` and ``stderr_bytes``, as the 
+        user would see  it in its terminal. 
+    :param return_value: The value returned from the invoked command. 
+    :param exit_code: The exit code as integer. 
+    :param exception: The exception that happened if one did. 
+    :param exc_info: Exception information (exception type, exception instance, 
+        traceback type). 
+ 
+    .. versionchanged:: 8.2 
+        ``stderr_bytes`` no longer optional, ``output_bytes`` introduced and 
+        ``mix_stderr`` has been removed. 
+ 
+    .. versionadded:: 8.0 
+        Added ``return_value``. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">runner</span><span class="s2">: </span><span class="s1">CliRunner</span><span class="s2">,</span>
+        <span class="s1">stdout_bytes</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">,</span>
+        <span class="s1">stderr_bytes</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">,</span>
+        <span class="s1">output_bytes</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">,</span>
+        <span class="s1">return_value</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+        <span class="s1">exit_code</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">exc_info</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">], </span><span class="s1">BaseException</span><span class="s2">, </span><span class="s1">TracebackType</span><span class="s2">]</span>
+        <span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">runner </span><span class="s2">= </span><span class="s1">runner</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stdout_bytes </span><span class="s2">= </span><span class="s1">stdout_bytes</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stderr_bytes </span><span class="s2">= </span><span class="s1">stderr_bytes</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">output_bytes </span><span class="s2">= </span><span class="s1">output_bytes</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">return_value </span><span class="s2">= </span><span class="s1">return_value</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">exit_code </span><span class="s2">= </span><span class="s1">exit_code</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">exception </span><span class="s2">= </span><span class="s1">exception</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">exc_info </span><span class="s2">= </span><span class="s1">exc_info</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">output</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;The terminal output as unicode string, as the user would see it. 
+ 
+        .. versionchanged:: 8.2 
+            No longer a proxy for ``self.stdout``. Now has its own independent stream 
+            that is mixing `&lt;stdout&gt;` and `&lt;stderr&gt;`, in the order they were written. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">output_bytes</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">runner</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">, </span><span class="s6">&quot;replace&quot;</span><span class="s2">).</span><span class="s1">replace</span><span class="s2">(</span>
+            <span class="s6">&quot;</span><span class="s0">\r\n</span><span class="s6">&quot;</span><span class="s2">, </span><span class="s6">&quot;</span><span class="s0">\n</span><span class="s6">&quot;</span>
+        <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">stdout</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;The standard output as unicode string.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stdout_bytes</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">runner</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">, </span><span class="s6">&quot;replace&quot;</span><span class="s2">).</span><span class="s1">replace</span><span class="s2">(</span>
+            <span class="s6">&quot;</span><span class="s0">\r\n</span><span class="s6">&quot;</span><span class="s2">, </span><span class="s6">&quot;</span><span class="s0">\n</span><span class="s6">&quot;</span>
+        <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">stderr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;The standard error as unicode string. 
+ 
+        .. versionchanged:: 8.2 
+            No longer raise an exception, always returns the `&lt;stderr&gt;` string. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stderr_bytes</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">runner</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">, </span><span class="s6">&quot;replace&quot;</span><span class="s2">).</span><span class="s1">replace</span><span class="s2">(</span>
+            <span class="s6">&quot;</span><span class="s0">\r\n</span><span class="s6">&quot;</span><span class="s2">, </span><span class="s6">&quot;</span><span class="s0">\n</span><span class="s6">&quot;</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">exc_str </span><span class="s2">= </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">exception</span><span class="s2">) </span><span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">exception </span><span class="s0">else </span><span class="s6">&quot;okay&quot;</span>
+        <span class="s0">return </span><span class="s6">f&quot;&lt;</span><span class="s0">{</span><span class="s1">type</span><span class="s2">(</span><span class="s1">self</span><span class="s2">).</span><span class="s1">__name__</span><span class="s0">} {</span><span class="s1">exc_str</span><span class="s0">}</span><span class="s6">&gt;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">CliRunner</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;The CLI runner provides functionality to invoke a Click command line 
+    script for unittesting purposes in a isolated environment.  This only 
+    works in single-threaded systems without any concurrency as it changes the 
+    global interpreter state. 
+ 
+    :param charset: the character set for the input and output data. 
+    :param env: a dictionary with environment variables for overriding. 
+    :param echo_stdin: if this is set to `True`, then reading from `&lt;stdin&gt;` writes 
+                       to `&lt;stdout&gt;`.  This is useful for showing examples in 
+                       some circumstances.  Note that regular prompts 
+                       will automatically echo the input. 
+    :param catch_exceptions: Whether to catch any exceptions other than 
+                             ``SystemExit`` when running :meth:`~CliRunner.invoke`. 
+ 
+    .. versionchanged:: 8.2 
+        Added the ``catch_exceptions`` parameter. 
+ 
+    .. versionchanged:: 8.2 
+        ``mix_stderr`` parameter has been removed. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">charset</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s6">&quot;utf-8&quot;</span><span class="s2">,</span>
+        <span class="s1">env</span><span class="s2">: </span><span class="s1">cabc</span><span class="s2">.</span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">echo_stdin</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">catch_exceptions</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">charset </span><span class="s2">= </span><span class="s1">charset</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">env</span><span class="s2">: </span><span class="s1">cabc</span><span class="s2">.</span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] = </span><span class="s1">env </span><span class="s0">or </span><span class="s2">{}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">echo_stdin </span><span class="s2">= </span><span class="s1">echo_stdin</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">catch_exceptions </span><span class="s2">= </span><span class="s1">catch_exceptions</span>
+
+    <span class="s0">def </span><span class="s1">get_default_prog_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">cli</span><span class="s2">: </span><span class="s1">Command</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Given a command object it will return the default program name 
+        for it.  The default is the `name` attribute or ``&quot;root&quot;`` if not 
+        set. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">cli</span><span class="s2">.</span><span class="s1">name </span><span class="s0">or </span><span class="s6">&quot;root&quot;</span>
+
+    <span class="s0">def </span><span class="s1">make_env</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">overrides</span><span class="s2">: </span><span class="s1">cabc</span><span class="s2">.</span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s2">) </span><span class="s1">-&gt; cabc</span><span class="s2">.</span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s5">&quot;&quot;&quot;Returns the environment overrides for invoking a script.&quot;&quot;&quot;</span>
+        <span class="s1">rv </span><span class="s2">= </span><span class="s1">dict</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">env</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">overrides</span><span class="s2">:</span>
+            <span class="s1">rv</span><span class="s2">.</span><span class="s1">update</span><span class="s2">(</span><span class="s1">overrides</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+    <span class="s0">def </span><span class="s1">isolation</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">input</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">t</span><span class="s2">.</span><span class="s1">IO</span><span class="s2">[</span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">env</span><span class="s2">: </span><span class="s1">cabc</span><span class="s2">.</span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">color</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; cabc</span><span class="s2">.</span><span class="s1">Iterator</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">, </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">, </span><span class="s1">io</span><span class="s2">.</span><span class="s1">BytesIO</span><span class="s2">]]:</span>
+        <span class="s5">&quot;&quot;&quot;A context manager that sets up the isolation for invoking of a 
+        command line tool.  This sets up `&lt;stdin&gt;` with the given input data 
+        and `os.environ` with the overrides from the given dictionary. 
+        This also rebinds some internals in Click to be mocked (like the 
+        prompt functionality). 
+ 
+        This is automatically done in the :meth:`invoke` method. 
+ 
+        :param input: the input stream to put into `sys.stdin`. 
+        :param env: the environment overrides as dictionary. 
+        :param color: whether the output should contain color codes. The 
+                      application can still override this explicitly. 
+ 
+        .. versionadded:: 8.2 
+            An additional output stream is returned, which is a mix of 
+            `&lt;stdout&gt;` and `&lt;stderr&gt;` streams. 
+ 
+        .. versionchanged:: 8.2 
+            Always returns the `&lt;stderr&gt;` stream. 
+ 
+        .. versionchanged:: 8.0 
+            `&lt;stderr&gt;` is opened with ``errors=&quot;backslashreplace&quot;`` 
+            instead of the default ``&quot;strict&quot;``. 
+ 
+        .. versionchanged:: 4.0 
+            Added the ``color`` parameter. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">bytes_input </span><span class="s2">= </span><span class="s1">make_input_stream</span><span class="s2">(</span><span class="s1">input</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">)</span>
+        <span class="s1">echo_input </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s1">old_stdin </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdin</span>
+        <span class="s1">old_stdout </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span>
+        <span class="s1">old_stderr </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stderr</span>
+        <span class="s1">old_forced_width </span><span class="s2">= </span><span class="s1">formatting</span><span class="s2">.</span><span class="s1">FORCED_WIDTH</span>
+        <span class="s1">formatting</span><span class="s2">.</span><span class="s1">FORCED_WIDTH </span><span class="s2">= </span><span class="s3">80</span>
+
+        <span class="s1">env </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">make_env</span><span class="s2">(</span><span class="s1">env</span><span class="s2">)</span>
+
+        <span class="s1">stream_mixer </span><span class="s2">= </span><span class="s1">StreamMixer</span><span class="s2">()</span>
+
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">echo_stdin</span><span class="s2">:</span>
+            <span class="s1">bytes_input </span><span class="s2">= </span><span class="s1">echo_input </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span>
+                <span class="s1">t</span><span class="s2">.</span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s1">EchoingStdin</span><span class="s2">(</span><span class="s1">bytes_input</span><span class="s2">, </span><span class="s1">stream_mixer</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">)</span>
+            <span class="s2">)</span>
+
+        <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdin </span><span class="s2">= </span><span class="s1">text_input </span><span class="s2">= </span><span class="s1">_NamedTextIOWrapper</span><span class="s2">(</span>
+            <span class="s1">bytes_input</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">, </span><span class="s1">name</span><span class="s2">=</span><span class="s6">&quot;&lt;stdin&gt;&quot;</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">=</span><span class="s6">&quot;r&quot;</span>
+        <span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">echo_stdin</span><span class="s2">:</span>
+            <span class="s4"># Force unbuffered reads, otherwise TextIOWrapper reads a</span>
+            <span class="s4"># large chunk which is echoed early.</span>
+            <span class="s1">text_input</span><span class="s2">.</span><span class="s1">_CHUNK_SIZE </span><span class="s2">= </span><span class="s3">1  </span><span class="s4"># type: ignore</span>
+
+        <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">_NamedTextIOWrapper</span><span class="s2">(</span>
+            <span class="s1">stream_mixer</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">, </span><span class="s1">name</span><span class="s2">=</span><span class="s6">&quot;&lt;stdout&gt;&quot;</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">=</span><span class="s6">&quot;w&quot;</span>
+        <span class="s2">)</span>
+
+        <span class="s1">sys</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">= </span><span class="s1">_NamedTextIOWrapper</span><span class="s2">(</span>
+            <span class="s1">stream_mixer</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">,</span>
+            <span class="s1">encoding</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">charset</span><span class="s2">,</span>
+            <span class="s1">name</span><span class="s2">=</span><span class="s6">&quot;&lt;stderr&gt;&quot;</span><span class="s2">,</span>
+            <span class="s1">mode</span><span class="s2">=</span><span class="s6">&quot;w&quot;</span><span class="s2">,</span>
+            <span class="s1">errors</span><span class="s2">=</span><span class="s6">&quot;backslashreplace&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s2">@</span><span class="s1">_pause_echo</span><span class="s2">(</span><span class="s1">echo_input</span><span class="s2">)  </span><span class="s4"># type: ignore</span>
+        <span class="s0">def </span><span class="s1">visible_input</span><span class="s2">(</span><span class="s1">prompt</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">prompt </span><span class="s0">or </span><span class="s6">&quot;&quot;</span><span class="s2">)</span>
+            <span class="s1">val </span><span class="s2">= </span><span class="s1">next</span><span class="s2">(</span><span class="s1">text_input</span><span class="s2">).</span><span class="s1">rstrip</span><span class="s2">(</span><span class="s6">&quot;</span><span class="s0">\r\n</span><span class="s6">&quot;</span><span class="s2">)</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s6">f&quot;</span><span class="s0">{</span><span class="s1">val</span><span class="s0">}\n</span><span class="s6">&quot;</span><span class="s2">)</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+            <span class="s0">return </span><span class="s1">val</span>
+
+        <span class="s2">@</span><span class="s1">_pause_echo</span><span class="s2">(</span><span class="s1">echo_input</span><span class="s2">)  </span><span class="s4"># type: ignore</span>
+        <span class="s0">def </span><span class="s1">hidden_input</span><span class="s2">(</span><span class="s1">prompt</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s6">f&quot;</span><span class="s0">{</span><span class="s1">prompt </span><span class="s0">or </span><span class="s6">''</span><span class="s0">}\n</span><span class="s6">&quot;</span><span class="s2">)</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+            <span class="s0">return </span><span class="s1">next</span><span class="s2">(</span><span class="s1">text_input</span><span class="s2">).</span><span class="s1">rstrip</span><span class="s2">(</span><span class="s6">&quot;</span><span class="s0">\r\n</span><span class="s6">&quot;</span><span class="s2">)</span>
+
+        <span class="s2">@</span><span class="s1">_pause_echo</span><span class="s2">(</span><span class="s1">echo_input</span><span class="s2">)  </span><span class="s4"># type: ignore</span>
+        <span class="s0">def </span><span class="s1">_getchar</span><span class="s2">(</span><span class="s1">echo</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+            <span class="s1">char </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s3">1</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">echo</span><span class="s2">:</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">char</span><span class="s2">)</span>
+
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+            <span class="s0">return </span><span class="s1">char</span>
+
+        <span class="s1">default_color </span><span class="s2">= </span><span class="s1">color</span>
+
+        <span class="s0">def </span><span class="s1">should_strip_ansi</span><span class="s2">(</span>
+            <span class="s1">stream</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">IO</span><span class="s2">[</span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, </span><span class="s1">color</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">color </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">return not </span><span class="s1">default_color</span>
+            <span class="s0">return not </span><span class="s1">color</span>
+
+        <span class="s1">old_visible_prompt_func </span><span class="s2">= </span><span class="s1">termui</span><span class="s2">.</span><span class="s1">visible_prompt_func</span>
+        <span class="s1">old_hidden_prompt_func </span><span class="s2">= </span><span class="s1">termui</span><span class="s2">.</span><span class="s1">hidden_prompt_func</span>
+        <span class="s1">old__getchar_func </span><span class="s2">= </span><span class="s1">termui</span><span class="s2">.</span><span class="s1">_getchar</span>
+        <span class="s1">old_should_strip_ansi </span><span class="s2">= </span><span class="s1">utils</span><span class="s2">.</span><span class="s1">should_strip_ansi  </span><span class="s4"># type: ignore</span>
+        <span class="s1">old__compat_should_strip_ansi </span><span class="s2">= </span><span class="s1">_compat</span><span class="s2">.</span><span class="s1">should_strip_ansi</span>
+        <span class="s1">termui</span><span class="s2">.</span><span class="s1">visible_prompt_func </span><span class="s2">= </span><span class="s1">visible_input</span>
+        <span class="s1">termui</span><span class="s2">.</span><span class="s1">hidden_prompt_func </span><span class="s2">= </span><span class="s1">hidden_input</span>
+        <span class="s1">termui</span><span class="s2">.</span><span class="s1">_getchar </span><span class="s2">= </span><span class="s1">_getchar</span>
+        <span class="s1">utils</span><span class="s2">.</span><span class="s1">should_strip_ansi </span><span class="s2">= </span><span class="s1">should_strip_ansi  </span><span class="s4"># type: ignore</span>
+        <span class="s1">_compat</span><span class="s2">.</span><span class="s1">should_strip_ansi </span><span class="s2">= </span><span class="s1">should_strip_ansi</span>
+
+        <span class="s1">old_env </span><span class="s2">= {}</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">env</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+                <span class="s1">old_env</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">key</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">value </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s0">try</span><span class="s2">:</span>
+                        <span class="s0">del </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s1">key</span><span class="s2">]</span>
+                    <span class="s0">except </span><span class="s1">Exception</span><span class="s2">:</span>
+                        <span class="s0">pass</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">value</span>
+            <span class="s0">yield </span><span class="s2">(</span><span class="s1">stream_mixer</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stream_mixer</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">, </span><span class="s1">stream_mixer</span><span class="s2">.</span><span class="s1">output</span><span class="s2">)</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">old_env</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+                <span class="s0">if </span><span class="s1">value </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s0">try</span><span class="s2">:</span>
+                        <span class="s0">del </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s1">key</span><span class="s2">]</span>
+                    <span class="s0">except </span><span class="s1">Exception</span><span class="s2">:</span>
+                        <span class="s0">pass</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">value</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">old_stdout</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">= </span><span class="s1">old_stderr</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdin </span><span class="s2">= </span><span class="s1">old_stdin</span>
+            <span class="s1">termui</span><span class="s2">.</span><span class="s1">visible_prompt_func </span><span class="s2">= </span><span class="s1">old_visible_prompt_func</span>
+            <span class="s1">termui</span><span class="s2">.</span><span class="s1">hidden_prompt_func </span><span class="s2">= </span><span class="s1">old_hidden_prompt_func</span>
+            <span class="s1">termui</span><span class="s2">.</span><span class="s1">_getchar </span><span class="s2">= </span><span class="s1">old__getchar_func</span>
+            <span class="s1">utils</span><span class="s2">.</span><span class="s1">should_strip_ansi </span><span class="s2">= </span><span class="s1">old_should_strip_ansi  </span><span class="s4"># type: ignore</span>
+            <span class="s1">_compat</span><span class="s2">.</span><span class="s1">should_strip_ansi </span><span class="s2">= </span><span class="s1">old__compat_should_strip_ansi</span>
+            <span class="s1">formatting</span><span class="s2">.</span><span class="s1">FORCED_WIDTH </span><span class="s2">= </span><span class="s1">old_forced_width</span>
+
+    <span class="s0">def </span><span class="s1">invoke</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">cli</span><span class="s2">: </span><span class="s1">Command</span><span class="s2">,</span>
+        <span class="s1">args</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">cabc</span><span class="s2">.</span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">input</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">t</span><span class="s2">.</span><span class="s1">IO</span><span class="s2">[</span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">env</span><span class="s2">: </span><span class="s1">cabc</span><span class="s2">.</span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">catch_exceptions</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">color</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s2">**</span><span class="s1">extra</span><span class="s2">: </span><span class="s1">t</span><span class="s2">.</span><span class="s1">Any</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; Result</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Invokes a command in an isolated environment.  The arguments are 
+        forwarded directly to the command line script, the `extra` keyword 
+        arguments are passed to the :meth:`~clickpkg.Command.main` function of 
+        the command. 
+ 
+        This returns a :class:`Result` object. 
+ 
+        :param cli: the command to invoke 
+        :param args: the arguments to invoke. It may be given as an iterable 
+                     or a string. When given as string it will be interpreted 
+                     as a Unix shell command. More details at 
+                     :func:`shlex.split`. 
+        :param input: the input data for `sys.stdin`. 
+        :param env: the environment overrides. 
+        :param catch_exceptions: Whether to catch any other exceptions than 
+                                 ``SystemExit``. If :data:`None`, the value 
+                                 from :class:`CliRunner` is used. 
+        :param extra: the keyword arguments to pass to :meth:`main`. 
+        :param color: whether the output should contain color codes. The 
+                      application can still override this explicitly. 
+ 
+        .. versionadded:: 8.2 
+            The result object has the ``output_bytes`` attribute with 
+            the mix of ``stdout_bytes`` and ``stderr_bytes``, as the user would 
+            see it in its terminal. 
+ 
+        .. versionchanged:: 8.2 
+            The result object always returns the ``stderr_bytes`` stream. 
+ 
+        .. versionchanged:: 8.0 
+            The result object has the ``return_value`` attribute with 
+            the value returned from the invoked command. 
+ 
+        .. versionchanged:: 4.0 
+            Added the ``color`` parameter. 
+ 
+        .. versionchanged:: 3.0 
+            Added the ``catch_exceptions`` parameter. 
+ 
+        .. versionchanged:: 3.0 
+            The result object has the ``exc_info`` attribute with the 
+            traceback if available. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">exc_info </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">catch_exceptions </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">catch_exceptions </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">catch_exceptions</span>
+
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">isolation</span><span class="s2">(</span><span class="s1">input</span><span class="s2">=</span><span class="s1">input</span><span class="s2">, </span><span class="s1">env</span><span class="s2">=</span><span class="s1">env</span><span class="s2">, </span><span class="s1">color</span><span class="s2">=</span><span class="s1">color</span><span class="s2">) </span><span class="s0">as </span><span class="s1">outstreams</span><span class="s2">:</span>
+            <span class="s1">return_value </span><span class="s2">= </span><span class="s0">None</span>
+            <span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+            <span class="s1">exit_code </span><span class="s2">= </span><span class="s3">0</span>
+
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">args</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+                <span class="s1">args </span><span class="s2">= </span><span class="s1">shlex</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">args</span><span class="s2">)</span>
+
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">prog_name </span><span class="s2">= </span><span class="s1">extra</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">(</span><span class="s6">&quot;prog_name&quot;</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+                <span class="s1">prog_name </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">get_default_prog_name</span><span class="s2">(</span><span class="s1">cli</span><span class="s2">)</span>
+
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">return_value </span><span class="s2">= </span><span class="s1">cli</span><span class="s2">.</span><span class="s1">main</span><span class="s2">(</span><span class="s1">args</span><span class="s2">=</span><span class="s1">args </span><span class="s0">or </span><span class="s2">(), </span><span class="s1">prog_name</span><span class="s2">=</span><span class="s1">prog_name</span><span class="s2">, **</span><span class="s1">extra</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">SystemExit </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                <span class="s1">exc_info </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">exc_info</span><span class="s2">()</span>
+                <span class="s1">e_code </span><span class="s2">= </span><span class="s1">t</span><span class="s2">.</span><span class="s1">cast</span><span class="s2">(</span><span class="s6">&quot;int | t.Any | None&quot;</span><span class="s2">, </span><span class="s1">e</span><span class="s2">.</span><span class="s1">code</span><span class="s2">)</span>
+
+                <span class="s0">if </span><span class="s1">e_code </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s1">e_code </span><span class="s2">= </span><span class="s3">0</span>
+
+                <span class="s0">if </span><span class="s1">e_code </span><span class="s2">!= </span><span class="s3">0</span><span class="s2">:</span>
+                    <span class="s1">exception </span><span class="s2">= </span><span class="s1">e</span>
+
+                <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e_code</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+                    <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">e_code</span><span class="s2">))</span>
+                    <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s6">&quot;</span><span class="s0">\n</span><span class="s6">&quot;</span><span class="s2">)</span>
+                    <span class="s1">e_code </span><span class="s2">= </span><span class="s3">1</span>
+
+                <span class="s1">exit_code </span><span class="s2">= </span><span class="s1">e_code</span>
+
+            <span class="s0">except </span><span class="s1">Exception </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                <span class="s0">if not </span><span class="s1">catch_exceptions</span><span class="s2">:</span>
+                    <span class="s0">raise</span>
+                <span class="s1">exception </span><span class="s2">= </span><span class="s1">e</span>
+                <span class="s1">exit_code </span><span class="s2">= </span><span class="s3">1</span>
+                <span class="s1">exc_info </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">exc_info</span><span class="s2">()</span>
+            <span class="s0">finally</span><span class="s2">:</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+                <span class="s1">stdout </span><span class="s2">= </span><span class="s1">outstreams</span><span class="s2">[</span><span class="s3">0</span><span class="s2">].</span><span class="s1">getvalue</span><span class="s2">()</span>
+                <span class="s1">stderr </span><span class="s2">= </span><span class="s1">outstreams</span><span class="s2">[</span><span class="s3">1</span><span class="s2">].</span><span class="s1">getvalue</span><span class="s2">()</span>
+                <span class="s1">output </span><span class="s2">= </span><span class="s1">outstreams</span><span class="s2">[</span><span class="s3">2</span><span class="s2">].</span><span class="s1">getvalue</span><span class="s2">()</span>
+
+        <span class="s0">return </span><span class="s1">Result</span><span class="s2">(</span>
+            <span class="s1">runner</span><span class="s2">=</span><span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">stdout_bytes</span><span class="s2">=</span><span class="s1">stdout</span><span class="s2">,</span>
+            <span class="s1">stderr_bytes</span><span class="s2">=</span><span class="s1">stderr</span><span class="s2">,</span>
+            <span class="s1">output_bytes</span><span class="s2">=</span><span class="s1">output</span><span class="s2">,</span>
+            <span class="s1">return_value</span><span class="s2">=</span><span class="s1">return_value</span><span class="s2">,</span>
+            <span class="s1">exit_code</span><span class="s2">=</span><span class="s1">exit_code</span><span class="s2">,</span>
+            <span class="s1">exception</span><span class="s2">=</span><span class="s1">exception</span><span class="s2">,</span>
+            <span class="s1">exc_info</span><span class="s2">=</span><span class="s1">exc_info</span><span class="s2">,  </span><span class="s4"># type: ignore</span>
+        <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+    <span class="s0">def </span><span class="s1">isolated_filesystem</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">temp_dir</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">os</span><span class="s2">.</span><span class="s1">PathLike</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s2">) </span><span class="s1">-&gt; cabc</span><span class="s2">.</span><span class="s1">Iterator</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s5">&quot;&quot;&quot;A context manager that creates a temporary directory and 
+        changes the current working directory to it. This isolates tests 
+        that affect the contents of the CWD to prevent them from 
+        interfering with each other. 
+ 
+        :param temp_dir: Create the temporary directory under this 
+            directory. If given, the created directory is not removed 
+            when exiting. 
+ 
+        .. versionchanged:: 8.0 
+            Added the ``temp_dir`` parameter. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cwd </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">getcwd</span><span class="s2">()</span>
+        <span class="s1">dt </span><span class="s2">= </span><span class="s1">tempfile</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">(</span><span class="s1">dir</span><span class="s2">=</span><span class="s1">temp_dir</span><span class="s2">)</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">chdir</span><span class="s2">(</span><span class="s1">dt</span><span class="s2">)</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield </span><span class="s1">dt</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">chdir</span><span class="s2">(</span><span class="s1">cwd</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">temp_dir </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">shutil</span><span class="s2">.</span><span class="s1">rmtree</span><span class="s2">(</span><span class="s1">dt</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+                    <span class="s0">pass</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,795 @@
+<html>
+<head>
+<title>test_apply_pyprojecttoml.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_apply_pyprojecttoml.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Make sure that applying the configuration from pyproject.toml is equivalent to 
+applying a similar configuration from setup.cfg 
+ 
+To run these tests offline, please have a look on ``./downloads/preload.py`` 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">io</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">tarfile</span>
+<span class="s2">from </span><span class="s1">inspect </span><span class="s2">import </span><span class="s1">cleandoc</span>
+<span class="s2">from </span><span class="s1">pathlib </span><span class="s2">import </span><span class="s1">Path</span>
+<span class="s2">from </span><span class="s1">unittest</span><span class="s3">.</span><span class="s1">mock </span><span class="s2">import </span><span class="s1">Mock</span>
+
+<span class="s2">import </span><span class="s1">pytest</span>
+<span class="s2">from </span><span class="s1">ini2toml</span><span class="s3">.</span><span class="s1">api </span><span class="s2">import </span><span class="s1">LiteTranslator</span>
+<span class="s2">from </span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">metadata </span><span class="s2">import </span><span class="s1">Metadata</span>
+
+<span class="s2">import </span><span class="s1">setuptools  </span><span class="s4"># noqa: F401 # ensure monkey patch to metadata</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">_static </span><span class="s2">import </span><span class="s1">is_static</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">command</span><span class="s3">.</span><span class="s1">egg_info </span><span class="s2">import </span><span class="s1">write_requirements</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">config </span><span class="s2">import </span><span class="s1">expand</span><span class="s3">, </span><span class="s1">pyprojecttoml</span><span class="s3">, </span><span class="s1">setupcfg</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">config</span><span class="s3">.</span><span class="s1">_apply_pyprojecttoml </span><span class="s2">import </span><span class="s1">_MissingDynamic</span><span class="s3">, </span><span class="s1">_some_attrgetter</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">dist </span><span class="s2">import </span><span class="s1">Distribution</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">InvalidConfigError</span><span class="s3">, </span><span class="s1">RemovedConfigError</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">warnings </span><span class="s2">import </span><span class="s1">InformationOnly</span><span class="s3">, </span><span class="s1">SetuptoolsDeprecationWarning</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">downloads </span><span class="s2">import </span><span class="s1">retrieve_file</span><span class="s3">, </span><span class="s1">urls_from_file</span>
+
+<span class="s1">HERE </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">__file__</span><span class="s3">).</span><span class="s1">parent</span>
+<span class="s1">EXAMPLES_FILE </span><span class="s3">= </span><span class="s5">&quot;setupcfg_examples.txt&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, **</span><span class="s1">attrs</span><span class="s3">):</span>
+    <span class="s2">return </span><span class="s1">Distribution</span><span class="s3">({</span><span class="s5">&quot;src_root&quot;</span><span class="s3">: </span><span class="s1">path</span><span class="s3">, **</span><span class="s1">attrs</span><span class="s3">})</span>
+
+
+<span class="s2">def </span><span class="s1">_mock_expand_patterns</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">, *</span><span class="s1">_</span><span class="s3">, **</span><span class="s1">__</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Allow comparing the given patterns for 2 dist objects. 
+    We need to strip special chars to avoid errors when validating. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s3">[</span><span class="s1">re</span><span class="s3">.</span><span class="s1">sub</span><span class="s3">(</span><span class="s5">&quot;[^a-z0-9]+&quot;</span><span class="s3">, </span><span class="s5">&quot;&quot;</span><span class="s3">, </span><span class="s1">p</span><span class="s3">, </span><span class="s1">flags</span><span class="s3">=</span><span class="s1">re</span><span class="s3">.</span><span class="s1">I</span><span class="s3">) </span><span class="s2">or </span><span class="s5">&quot;empty&quot; </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">]</span>
+
+
+<span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span><span class="s5">&quot;url&quot;</span><span class="s3">, </span><span class="s1">urls_from_file</span><span class="s3">(</span><span class="s1">HERE </span><span class="s3">/ </span><span class="s1">EXAMPLES_FILE</span><span class="s3">))</span>
+<span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">filterwarnings</span><span class="s3">(</span><span class="s5">&quot;ignore&quot;</span><span class="s3">)</span>
+<span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">uses_network</span>
+<span class="s2">def </span><span class="s1">test_apply_pyproject_equivalent_to_setupcfg</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+    <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">setattr</span><span class="s3">(</span><span class="s1">expand</span><span class="s3">, </span><span class="s5">&quot;read_attr&quot;</span><span class="s3">, </span><span class="s1">Mock</span><span class="s3">(</span><span class="s1">return_value</span><span class="s3">=</span><span class="s5">&quot;0.0.1&quot;</span><span class="s3">))</span>
+    <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">setattr</span><span class="s3">(</span>
+        <span class="s1">Distribution</span><span class="s3">, </span><span class="s5">&quot;_expand_patterns&quot;</span><span class="s3">, </span><span class="s1">Mock</span><span class="s3">(</span><span class="s1">side_effect</span><span class="s3">=</span><span class="s1">_mock_expand_patterns</span><span class="s3">)</span>
+    <span class="s3">)</span>
+    <span class="s1">setupcfg_example </span><span class="s3">= </span><span class="s1">retrieve_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+    <span class="s1">pyproject_example </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;pyproject.toml&quot;</span><span class="s3">)</span>
+    <span class="s1">setupcfg_text </span><span class="s3">= </span><span class="s1">setupcfg_example</span><span class="s3">.</span><span class="s1">read_text</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s1">toml_config </span><span class="s3">= </span><span class="s1">LiteTranslator</span><span class="s3">().</span><span class="s1">translate</span><span class="s3">(</span><span class="s1">setupcfg_text</span><span class="s3">, </span><span class="s5">&quot;setup.cfg&quot;</span><span class="s3">)</span>
+    <span class="s1">pyproject_example</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">toml_config</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+
+    <span class="s1">dist_toml </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject_example</span><span class="s3">)</span>
+    <span class="s1">dist_cfg </span><span class="s3">= </span><span class="s1">setupcfg</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">setupcfg_example</span><span class="s3">)</span>
+
+    <span class="s1">pkg_info_toml </span><span class="s3">= </span><span class="s1">core_metadata</span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">)</span>
+    <span class="s1">pkg_info_cfg </span><span class="s3">= </span><span class="s1">core_metadata</span><span class="s3">(</span><span class="s1">dist_cfg</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">pkg_info_toml </span><span class="s3">== </span><span class="s1">pkg_info_cfg</span>
+
+    <span class="s2">if </span><span class="s1">any</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">d</span><span class="s3">, </span><span class="s5">&quot;license_files&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">, </span><span class="s1">dist_cfg</span><span class="s3">)):</span>
+        <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">) == </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">any</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">d</span><span class="s3">, </span><span class="s5">&quot;entry_points&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">, </span><span class="s1">dist_cfg</span><span class="s3">)):</span>
+        <span class="s1">print</span><span class="s3">(</span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">entry_points</span><span class="s3">)</span>
+        <span class="s1">ep_toml </span><span class="s3">= {</span>
+            <span class="s3">(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">i</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot; &quot;</span><span class="s3">, </span><span class="s5">&quot;&quot;</span><span class="s3">) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">v</span><span class="s3">))</span>
+            <span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_toml</span><span class="s3">.</span><span class="s1">entry_points</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+        <span class="s3">}</span>
+        <span class="s1">ep_cfg </span><span class="s3">= {</span>
+            <span class="s3">(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">i</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot; &quot;</span><span class="s3">, </span><span class="s5">&quot;&quot;</span><span class="s3">) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">v</span><span class="s3">))</span>
+            <span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">entry_points</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+        <span class="s3">}</span>
+        <span class="s2">assert </span><span class="s1">ep_toml </span><span class="s3">== </span><span class="s1">ep_cfg</span>
+
+    <span class="s2">if </span><span class="s1">any</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">d</span><span class="s3">, </span><span class="s5">&quot;package_data&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">, </span><span class="s1">dist_cfg</span><span class="s3">)):</span>
+        <span class="s1">pkg_data_toml </span><span class="s3">= {(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">v</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_toml</span><span class="s3">.</span><span class="s1">package_data</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()}</span>
+        <span class="s1">pkg_data_cfg </span><span class="s3">= {(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">v</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">package_data</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()}</span>
+        <span class="s2">assert </span><span class="s1">pkg_data_toml </span><span class="s3">== </span><span class="s1">pkg_data_cfg</span>
+
+    <span class="s2">if </span><span class="s1">any</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">d</span><span class="s3">, </span><span class="s5">&quot;data_files&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">, </span><span class="s1">dist_cfg</span><span class="s3">)):</span>
+        <span class="s1">data_files_toml </span><span class="s3">= {(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">v</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_toml</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">}</span>
+        <span class="s1">data_files_cfg </span><span class="s3">= {(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">v</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">}</span>
+        <span class="s2">assert </span><span class="s1">data_files_toml </span><span class="s3">== </span><span class="s1">data_files_cfg</span>
+
+    <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">.</span><span class="s1">install_requires</span><span class="s3">) == </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">install_requires</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">any</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">d</span><span class="s3">, </span><span class="s5">&quot;extras_require&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s1">dist_toml</span><span class="s3">, </span><span class="s1">dist_cfg</span><span class="s3">)):</span>
+        <span class="s1">extra_req_toml </span><span class="s3">= {(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">v</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_toml</span><span class="s3">.</span><span class="s1">extras_require</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()}</span>
+        <span class="s1">extra_req_cfg </span><span class="s3">= {(</span><span class="s1">k</span><span class="s3">, *</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">v</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">dist_cfg</span><span class="s3">.</span><span class="s1">extras_require</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()}</span>
+        <span class="s2">assert </span><span class="s1">extra_req_toml </span><span class="s3">== </span><span class="s1">extra_req_cfg</span>
+
+
+<span class="s1">PEP621_EXAMPLE </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s5">[project] 
+name = &quot;spam&quot; 
+version = &quot;2020.0.0&quot; 
+description = &quot;Lovely Spam! Wonderful Spam!&quot; 
+readme = &quot;README.rst&quot; 
+requires-python = &quot;&gt;=3.8&quot; 
+license-files = [&quot;LICENSE.txt&quot;]  # Updated to be PEP 639 compliant 
+keywords = [&quot;egg&quot;, &quot;bacon&quot;, &quot;sausage&quot;, &quot;tomatoes&quot;, &quot;Lobster Thermidor&quot;] 
+authors = [ 
+  {email = &quot;hi@pradyunsg.me&quot;}, 
+  {name = &quot;Tzu-Ping Chung&quot;} 
+] 
+maintainers = [ 
+  {name = &quot;Brett Cannon&quot;, email = &quot;brett@python.org&quot;}, 
+  {name = &quot;John X. Ãørçeč&quot;, email = &quot;john@utf8.org&quot;}, 
+  {name = &quot;Γαμα קּ 東&quot;, email = &quot;gama@utf8.org&quot;}, 
+] 
+classifiers = [ 
+  &quot;Development Status :: 4 - Beta&quot;, 
+  &quot;Programming Language :: Python&quot; 
+] 
+ 
+dependencies = [ 
+  &quot;httpx&quot;, 
+  &quot;gidgethub[httpx]&gt;4.0.0&quot;, 
+  &quot;django&gt;2.1; os_name != 'nt'&quot;, 
+  &quot;django&gt;2.0; os_name == 'nt'&quot; 
+] 
+ 
+[project.optional-dependencies] 
+test = [ 
+  &quot;pytest &lt; 5.0.0&quot;, 
+  &quot;pytest-cov[all]&quot; 
+] 
+ 
+[project.urls] 
+homepage = &quot;http://example.com&quot; 
+documentation = &quot;http://readthedocs.org&quot; 
+repository = &quot;http://github.com&quot; 
+changelog = &quot;http://github.com/me/spam/blob/master/CHANGELOG.md&quot; 
+ 
+[project.scripts] 
+spam-cli = &quot;spam:main_cli&quot; 
+ 
+[project.gui-scripts] 
+spam-gui = &quot;spam:main_gui&quot; 
+ 
+[project.entry-points.&quot;spam.magical&quot;] 
+tomatoes = &quot;spam:main_tomatoes&quot; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">PEP621_INTERNATIONAL_EMAIL_EXAMPLE </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s5">[project] 
+name = &quot;spam&quot; 
+version = &quot;2020.0.0&quot; 
+authors = [ 
+  {email = &quot;hi@pradyunsg.me&quot;}, 
+  {name = &quot;Tzu-Ping Chung&quot;} 
+] 
+maintainers = [ 
+  {name = &quot;Степан Бандера&quot;, email = &quot;криївка@оун-упа.укр&quot;}, 
+] 
+&quot;&quot;&quot;</span>
+
+<span class="s1">PEP621_EXAMPLE_SCRIPT </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot; 
+def main_cli(): pass 
+def main_gui(): pass 
+def main_tomatoes(): pass 
+&quot;&quot;&quot;</span>
+
+<span class="s1">PEP639_LICENSE_TEXT </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s5">[project] 
+name = &quot;spam&quot; 
+version = &quot;2020.0.0&quot; 
+authors = [ 
+  {email = &quot;hi@pradyunsg.me&quot;}, 
+  {name = &quot;Tzu-Ping Chung&quot;} 
+] 
+license = {text = &quot;MIT&quot;} 
+&quot;&quot;&quot;</span>
+
+<span class="s1">PEP639_LICENSE_EXPRESSION </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s5">[project] 
+name = &quot;spam&quot; 
+version = &quot;2020.0.0&quot; 
+authors = [ 
+  {email = &quot;hi@pradyunsg.me&quot;}, 
+  {name = &quot;Tzu-Ping Chung&quot;} 
+] 
+license = &quot;mit or apache-2.0&quot;  # should be normalized in metadata 
+classifiers = [ 
+    &quot;Development Status :: 5 - Production/Stable&quot;, 
+    &quot;Programming Language :: Python&quot;, 
+] 
+&quot;&quot;&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_pep621_example_project</span><span class="s3">(</span>
+    <span class="s1">tmp_path</span><span class="s3">,</span>
+    <span class="s1">readme</span><span class="s3">=</span><span class="s5">&quot;README.rst&quot;</span><span class="s3">,</span>
+    <span class="s1">pyproject_text</span><span class="s3">=</span><span class="s1">PEP621_EXAMPLE</span><span class="s3">,</span>
+<span class="s3">):</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;pyproject.toml&quot;</span>
+    <span class="s1">text </span><span class="s3">= </span><span class="s1">pyproject_text</span>
+    <span class="s1">replacements </span><span class="s3">= {</span><span class="s5">'readme = &quot;README.rst&quot;'</span><span class="s3">: </span><span class="s5">f'readme = &quot;</span><span class="s2">{</span><span class="s1">readme</span><span class="s2">}</span><span class="s5">&quot;'</span><span class="s3">}</span>
+    <span class="s2">for </span><span class="s1">orig</span><span class="s3">, </span><span class="s1">subst </span><span class="s2">in </span><span class="s1">replacements</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+        <span class="s1">text </span><span class="s3">= </span><span class="s1">text</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">orig</span><span class="s3">, </span><span class="s1">subst</span><span class="s3">)</span>
+    <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">text</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+
+    <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s1">readme</span><span class="s3">).</span><span class="s1">write_text</span><span class="s3">(</span><span class="s5">&quot;hello world&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;LICENSE.txt&quot;</span><span class="s3">).</span><span class="s1">write_text</span><span class="s3">(</span><span class="s5">&quot;--- LICENSE stub ---&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;spam.py&quot;</span><span class="s3">).</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">PEP621_EXAMPLE_SCRIPT</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">pyproject</span>
+
+
+<span class="s2">def </span><span class="s1">test_pep621_example</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Make sure the example in PEP 621 works&quot;&quot;&quot;</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+    <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">) == {</span><span class="s5">&quot;LICENSE.txt&quot;</span><span class="s3">}</span>
+
+
+<span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span>
+    <span class="s3">(</span><span class="s5">&quot;readme&quot;</span><span class="s3">, </span><span class="s5">&quot;ctype&quot;</span><span class="s3">),</span>
+    <span class="s3">[</span>
+        <span class="s3">(</span><span class="s5">&quot;Readme.txt&quot;</span><span class="s3">, </span><span class="s5">&quot;text/plain&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">&quot;readme.md&quot;</span><span class="s3">, </span><span class="s5">&quot;text/markdown&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">&quot;text.rst&quot;</span><span class="s3">, </span><span class="s5">&quot;text/x-rst&quot;</span><span class="s3">),</span>
+    <span class="s3">],</span>
+<span class="s3">)</span>
+<span class="s2">def </span><span class="s1">test_readme_content_type</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">readme</span><span class="s3">, </span><span class="s1">ctype</span><span class="s3">):</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">readme</span><span class="s3">)</span>
+    <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">long_description_content_type </span><span class="s3">== </span><span class="s1">ctype</span>
+
+
+<span class="s2">def </span><span class="s1">test_undefined_content_type</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">):</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;README.tex&quot;</span><span class="s3">)</span>
+    <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">raises</span><span class="s3">(</span><span class="s1">ValueError</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s5">&quot;Undefined content type for README.tex&quot;</span><span class="s3">):</span>
+        <span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">test_no_explicit_content_type_for_missing_extension</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">):</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;README&quot;</span><span class="s3">)</span>
+    <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">long_description_content_type </span><span class="s2">is None</span>
+
+
+<span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span>
+    <span class="s3">(</span><span class="s5">&quot;pyproject_text&quot;</span><span class="s3">, </span><span class="s5">&quot;expected_maintainers_meta_value&quot;</span><span class="s3">),</span>
+    <span class="s3">(</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">param</span><span class="s3">(</span>
+            <span class="s1">PEP621_EXAMPLE</span><span class="s3">,</span>
+            <span class="s3">(</span>
+                <span class="s5">'Brett Cannon &lt;brett@python.org&gt;, &quot;John X. Ãørçeč&quot; &lt;john@utf8.org&gt;, '</span>
+                <span class="s5">'Γαμα קּ 東 &lt;gama@utf8.org&gt;'</span>
+            <span class="s3">),</span>
+            <span class="s1">id</span><span class="s3">=</span><span class="s5">'non-international-emails'</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">param</span><span class="s3">(</span>
+            <span class="s1">PEP621_INTERNATIONAL_EMAIL_EXAMPLE</span><span class="s3">,</span>
+            <span class="s5">'Степан Бандера &lt;криївка@оун-упа.укр&gt;'</span><span class="s3">,</span>
+            <span class="s1">marks</span><span class="s3">=</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">xfail</span><span class="s3">(</span>
+                <span class="s1">reason</span><span class="s3">=</span><span class="s5">&quot;CPython's `email.headerregistry.Address` only supports &quot;</span>
+                <span class="s5">'RFC 5322, as of Nov 10, 2022 and latest Python 3.11.0'</span><span class="s3">,</span>
+                <span class="s1">strict</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">),</span>
+            <span class="s1">id</span><span class="s3">=</span><span class="s5">'international-email'</span><span class="s3">,</span>
+        <span class="s3">),</span>
+    <span class="s3">),</span>
+<span class="s3">)</span>
+<span class="s2">def </span><span class="s1">test_utf8_maintainer_in_metadata</span><span class="s3">(  </span><span class="s4"># issue-3663</span>
+    <span class="s1">expected_maintainers_meta_value</span><span class="s3">,</span>
+    <span class="s1">pyproject_text</span><span class="s3">,</span>
+    <span class="s1">tmp_path</span><span class="s3">,</span>
+<span class="s3">):</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span>
+        <span class="s1">tmp_path</span><span class="s3">,</span>
+        <span class="s5">&quot;README&quot;</span><span class="s3">,</span>
+        <span class="s1">pyproject_text</span><span class="s3">=</span><span class="s1">pyproject_text</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">maintainer_email </span><span class="s3">== </span><span class="s1">expected_maintainers_meta_value</span>
+    <span class="s1">pkg_file </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;PKG-FILE&quot;</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">pkg_file</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">fh</span><span class="s3">:</span>
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">write_pkg_file</span><span class="s3">(</span><span class="s1">fh</span><span class="s3">)</span>
+    <span class="s1">content </span><span class="s3">= </span><span class="s1">pkg_file</span><span class="s3">.</span><span class="s1">read_text</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s5">f&quot;Maintainer-email: </span><span class="s2">{</span><span class="s1">expected_maintainers_meta_value</span><span class="s2">}</span><span class="s5">&quot; </span><span class="s2">in </span><span class="s1">content</span>
+
+
+<span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span>
+    <span class="s3">(</span>
+        <span class="s5">'pyproject_text'</span><span class="s3">,</span>
+        <span class="s5">'license'</span><span class="s3">,</span>
+        <span class="s5">'license_expression'</span><span class="s3">,</span>
+        <span class="s5">'content_str'</span><span class="s3">,</span>
+        <span class="s5">'not_content_str'</span><span class="s3">,</span>
+    <span class="s3">),</span>
+    <span class="s3">(</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">param</span><span class="s3">(</span>
+            <span class="s1">PEP639_LICENSE_TEXT</span><span class="s3">,</span>
+            <span class="s5">'MIT'</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">'License: MIT'</span><span class="s3">,</span>
+            <span class="s5">'License-Expression: '</span><span class="s3">,</span>
+            <span class="s1">id</span><span class="s3">=</span><span class="s5">'license-text'</span><span class="s3">,</span>
+            <span class="s1">marks</span><span class="s3">=[</span>
+                <span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">filterwarnings</span><span class="s3">(</span>
+                    <span class="s5">&quot;ignore:.project.license. as a TOML table is deprecated&quot;</span><span class="s3">,</span>
+                <span class="s3">)</span>
+            <span class="s3">],</span>
+        <span class="s3">),</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">param</span><span class="s3">(</span>
+            <span class="s1">PEP639_LICENSE_EXPRESSION</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">'MIT OR Apache-2.0'</span><span class="s3">,</span>
+            <span class="s5">'License-Expression: MIT OR Apache-2.0'</span><span class="s3">,</span>
+            <span class="s5">'License: '</span><span class="s3">,</span>
+            <span class="s1">id</span><span class="s3">=</span><span class="s5">'license-expression'</span><span class="s3">,</span>
+        <span class="s3">),</span>
+    <span class="s3">),</span>
+<span class="s3">)</span>
+<span class="s2">def </span><span class="s1">test_license_in_metadata</span><span class="s3">(</span>
+    <span class="s1">license</span><span class="s3">,</span>
+    <span class="s1">license_expression</span><span class="s3">,</span>
+    <span class="s1">content_str</span><span class="s3">,</span>
+    <span class="s1">not_content_str</span><span class="s3">,</span>
+    <span class="s1">pyproject_text</span><span class="s3">,</span>
+    <span class="s1">tmp_path</span><span class="s3">,</span>
+<span class="s3">):</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span>
+        <span class="s1">tmp_path</span><span class="s3">,</span>
+        <span class="s5">&quot;README&quot;</span><span class="s3">,</span>
+        <span class="s1">pyproject_text</span><span class="s3">=</span><span class="s1">pyproject_text</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license </span><span class="s3">== </span><span class="s1">license</span>
+    <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_expression </span><span class="s3">== </span><span class="s1">license_expression</span>
+    <span class="s1">pkg_file </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;PKG-FILE&quot;</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">pkg_file</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">fh</span><span class="s3">:</span>
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">write_pkg_file</span><span class="s3">(</span><span class="s1">fh</span><span class="s3">)</span>
+    <span class="s1">content </span><span class="s3">= </span><span class="s1">pkg_file</span><span class="s3">.</span><span class="s1">read_text</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s5">&quot;Metadata-Version: 2.4&quot; </span><span class="s2">in </span><span class="s1">content</span>
+    <span class="s2">assert </span><span class="s1">content_str </span><span class="s2">in </span><span class="s1">content</span>
+    <span class="s2">assert </span><span class="s1">not_content_str </span><span class="s2">not in </span><span class="s1">content</span>
+
+
+<span class="s2">def </span><span class="s1">test_license_classifier_with_license_expression</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">):</span>
+    <span class="s1">text </span><span class="s3">= </span><span class="s1">PEP639_LICENSE_EXPRESSION</span><span class="s3">.</span><span class="s1">rsplit</span><span class="s3">(</span><span class="s5">&quot;</span><span class="s2">\n</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s6">2</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span>
+        <span class="s1">tmp_path</span><span class="s3">,</span>
+        <span class="s5">&quot;README&quot;</span><span class="s3">,</span>
+        <span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">text</span><span class="s2">}\n    \&quot;</span><span class="s5">License :: OSI Approved :: MIT License</span><span class="s2">\&quot;\n</span><span class="s5">]&quot;</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s1">msg </span><span class="s3">= </span><span class="s5">&quot;License classifiers have been superseded by license expressions&quot;</span>
+    <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">raises</span><span class="s3">(</span><span class="s1">InvalidConfigError</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg</span><span class="s3">) </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+    <span class="s2">assert </span><span class="s5">&quot;License :: OSI Approved :: MIT License&quot; </span><span class="s2">in </span><span class="s1">str</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">.</span><span class="s1">value</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">test_license_classifier_without_license_expression</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">):</span>
+    <span class="s1">text </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot;</span><span class="s2">\ 
+    </span><span class="s5">[project] 
+    name = &quot;spam&quot; 
+    version = &quot;2020.0.0&quot; 
+    license = {text = &quot;mit or apache-2.0&quot;} 
+    classifiers = [&quot;License :: OSI Approved :: MIT License&quot;] 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;README&quot;</span><span class="s3">, </span><span class="s1">text</span><span class="s3">)</span>
+
+    <span class="s1">msg1 </span><span class="s3">= </span><span class="s5">&quot;License classifiers are deprecated(?:.|</span><span class="s2">\n</span><span class="s5">)*MIT License&quot;</span>
+    <span class="s1">msg2 </span><span class="s3">= </span><span class="s5">&quot;.project.license. as a TOML table is deprecated&quot;</span>
+    <span class="s2">with </span><span class="s3">(</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg1</span><span class="s3">),</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg2</span><span class="s3">),</span>
+    <span class="s3">):</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+    <span class="s4"># Check license classifier is still included</span>
+    <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">get_classifiers</span><span class="s3">() == [</span><span class="s5">&quot;License :: OSI Approved :: MIT License&quot;</span><span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">TestLicenseFiles</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">base_pyproject</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">tmp_path</span><span class="s3">,</span>
+        <span class="s1">additional_text</span><span class="s3">=</span><span class="s5">&quot;&quot;</span><span class="s3">,</span>
+        <span class="s1">license_toml</span><span class="s3">=</span><span class="s5">'license = {file = &quot;LICENSE.txt&quot;}</span><span class="s2">\n</span><span class="s5">'</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">text </span><span class="s3">= </span><span class="s1">PEP639_LICENSE_EXPRESSION</span>
+
+        <span class="s4"># Sanity-check</span>
+        <span class="s2">assert </span><span class="s5">'license = &quot;mit or apache-2.0&quot;' </span><span class="s2">in </span><span class="s1">text</span>
+        <span class="s2">assert </span><span class="s5">'license-files' </span><span class="s2">not in </span><span class="s1">text</span>
+        <span class="s2">assert </span><span class="s5">&quot;[tool.setuptools]&quot; </span><span class="s2">not in </span><span class="s1">text</span>
+
+        <span class="s1">text </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">sub</span><span class="s3">(</span>
+            <span class="s5">r&quot;(license = .*)\n&quot;</span><span class="s3">,</span>
+            <span class="s1">license_toml</span><span class="s3">,</span>
+            <span class="s1">text</span><span class="s3">,</span>
+            <span class="s1">count</span><span class="s3">=</span><span class="s6">1</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">license_toml </span><span class="s2">in </span><span class="s1">text  </span><span class="s4"># sanity check</span>
+        <span class="s1">text </span><span class="s3">= </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">text</span><span class="s2">}\n{</span><span class="s1">additional_text</span><span class="s2">}\n</span><span class="s5">&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;README&quot;</span><span class="s3">, </span><span class="s1">pyproject_text</span><span class="s3">=</span><span class="s1">text</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">pyproject</span>
+
+    <span class="s2">def </span><span class="s1">base_pyproject_license_pep639</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">additional_text</span><span class="s3">=</span><span class="s5">&quot;&quot;</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_pyproject</span><span class="s3">(</span>
+            <span class="s1">tmp_path</span><span class="s3">,</span>
+            <span class="s1">additional_text</span><span class="s3">=</span><span class="s1">additional_text</span><span class="s3">,</span>
+            <span class="s1">license_toml</span><span class="s3">=</span><span class="s5">'license = &quot;licenseref-Proprietary&quot;'</span>
+            <span class="s5">'</span><span class="s2">\n</span><span class="s5">license-files = [&quot;_FILE*&quot;]</span><span class="s2">\n</span><span class="s5">'</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_both_license_and_license_files_defined</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s1">setuptools_config </span><span class="s3">= </span><span class="s5">'[tool.setuptools]</span><span class="s2">\n</span><span class="s5">license-files = [&quot;_FILE*&quot;]'</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">setuptools_config</span><span class="s3">)</span>
+
+        <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;_FILE.txt&quot;</span><span class="s3">).</span><span class="s1">touch</span><span class="s3">()</span>
+        <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;_FILE.rst&quot;</span><span class="s3">).</span><span class="s1">touch</span><span class="s3">()</span>
+
+        <span class="s4"># Would normally match the `license_files` patterns, but we want to exclude it</span>
+        <span class="s4"># by being explicit. On the other hand, contents should be added to `license`</span>
+        <span class="s1">license </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;LICENSE.txt&quot;</span>
+        <span class="s1">license</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s5">&quot;LicenseRef-Proprietary</span><span class="s2">\n</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+
+        <span class="s1">msg1 </span><span class="s3">= </span><span class="s5">&quot;'tool.setuptools.license-files' is deprecated in favor of 'project.license-files'&quot;</span>
+        <span class="s1">msg2 </span><span class="s3">= </span><span class="s5">&quot;.project.license. as a TOML table is deprecated&quot;</span>
+        <span class="s2">with </span><span class="s3">(</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg1</span><span class="s3">),</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg2</span><span class="s3">),</span>
+        <span class="s3">):</span>
+            <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">) == {</span><span class="s5">&quot;_FILE.rst&quot;</span><span class="s3">, </span><span class="s5">&quot;_FILE.txt&quot;</span><span class="s3">}</span>
+        <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license </span><span class="s3">== </span><span class="s5">&quot;LicenseRef-Proprietary</span><span class="s2">\n</span><span class="s5">&quot;</span>
+
+    <span class="s2">def </span><span class="s1">test_both_license_and_license_files_defined_pep639</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s4"># Set license and license-files</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_pyproject_license_pep639</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+
+        <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;_FILE.txt&quot;</span><span class="s3">).</span><span class="s1">touch</span><span class="s3">()</span>
+        <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;_FILE.rst&quot;</span><span class="s3">).</span><span class="s1">touch</span><span class="s3">()</span>
+
+        <span class="s1">msg </span><span class="s3">= </span><span class="s5">&quot;Normalizing.*LicenseRef&quot;</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">InformationOnly</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg</span><span class="s3">):</span>
+            <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+        <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">) == {</span><span class="s5">&quot;_FILE.rst&quot;</span><span class="s3">, </span><span class="s5">&quot;_FILE.txt&quot;</span><span class="s3">}</span>
+        <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license </span><span class="s2">is None</span>
+        <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_expression </span><span class="s3">== </span><span class="s5">&quot;LicenseRef-Proprietary&quot;</span>
+
+    <span class="s2">def </span><span class="s1">test_license_files_defined_twice</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s4"># Set project.license-files and tools.setuptools.license-files</span>
+        <span class="s1">setuptools_config </span><span class="s3">= </span><span class="s5">'[tool.setuptools]</span><span class="s2">\n</span><span class="s5">license-files = [&quot;_FILE*&quot;]'</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_pyproject_license_pep639</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">setuptools_config</span><span class="s3">)</span>
+
+        <span class="s1">msg </span><span class="s3">= </span><span class="s5">&quot;'project.license-files' is defined already. Remove 'tool.setuptools.license-files'&quot;</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">raises</span><span class="s3">(</span><span class="s1">InvalidConfigError</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg</span><span class="s3">):</span>
+            <span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_default_patterns</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s1">setuptools_config </span><span class="s3">= </span><span class="s5">'[tool.setuptools]</span><span class="s2">\n</span><span class="s5">zip-safe = false'</span>
+        <span class="s4"># ^ used just to trigger section validation</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">setuptools_config</span><span class="s3">, </span><span class="s1">license_toml</span><span class="s3">=</span><span class="s5">&quot;&quot;</span><span class="s3">)</span>
+
+        <span class="s1">license_files </span><span class="s3">= </span><span class="s5">&quot;LICENCE-a.html COPYING-abc.txt AUTHORS-xyz NOTICE,def&quot;</span><span class="s3">.</span><span class="s1">split</span><span class="s3">()</span>
+
+        <span class="s2">for </span><span class="s1">fname </span><span class="s2">in </span><span class="s1">license_files</span><span class="s3">:</span>
+            <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s1">fname</span><span class="s3">).</span><span class="s1">write_text</span><span class="s3">(</span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">fname</span><span class="s2">}\n</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+        <span class="s2">assert </span><span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;LICENSE.txt&quot;</span><span class="s3">).</span><span class="s1">exists</span><span class="s3">()  </span><span class="s4"># from base example</span>
+        <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">) == {*</span><span class="s1">license_files</span><span class="s3">, </span><span class="s5">&quot;LICENSE.txt&quot;</span><span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">test_missing_patterns</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_pyproject_license_pep639</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">list</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">.</span><span class="s1">glob</span><span class="s3">(</span><span class="s5">&quot;_FILE*&quot;</span><span class="s3">)) == []  </span><span class="s4"># sanity check</span>
+
+        <span class="s1">msg1 </span><span class="s3">= </span><span class="s5">&quot;Cannot find any files for the given pattern.*&quot;</span>
+        <span class="s1">msg2 </span><span class="s3">= </span><span class="s5">&quot;Normalizing 'licenseref-Proprietary' to 'LicenseRef-Proprietary'&quot;</span>
+        <span class="s2">with </span><span class="s3">(</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg1</span><span class="s3">),</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">InformationOnly</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg2</span><span class="s3">),</span>
+        <span class="s3">):</span>
+            <span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_deprecated_file_expands_to_text</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Make sure the old example with ``license = {text = ...}`` works&quot;&quot;&quot;</span>
+
+        <span class="s2">assert </span><span class="s5">'license-files = [&quot;LICENSE.txt&quot;]' </span><span class="s2">in </span><span class="s1">PEP621_EXAMPLE  </span><span class="s4"># sanity check</span>
+        <span class="s1">text </span><span class="s3">= </span><span class="s1">PEP621_EXAMPLE</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span>
+            <span class="s5">'license-files = [&quot;LICENSE.txt&quot;]'</span><span class="s3">,</span>
+            <span class="s5">'license = {file = &quot;LICENSE.txt&quot;}'</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">_pep621_example_project</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">pyproject_text</span><span class="s3">=</span><span class="s1">text</span><span class="s3">)</span>
+
+        <span class="s1">msg </span><span class="s3">= </span><span class="s5">&quot;.project.license. as a TOML table is deprecated&quot;</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg</span><span class="s3">):</span>
+            <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+        <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license </span><span class="s3">== </span><span class="s5">&quot;--- LICENSE stub ---&quot;</span>
+        <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">) == {</span><span class="s5">&quot;LICENSE.txt&quot;</span><span class="s3">}  </span><span class="s4"># auto-filled</span>
+
+
+<span class="s2">class </span><span class="s1">TestPyModules</span><span class="s3">:</span>
+    <span class="s4"># https://github.com/pypa/setuptools/issues/4316</span>
+
+    <span class="s2">def </span><span class="s1">dist</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">):</span>
+        <span class="s1">toml_config </span><span class="s3">= </span><span class="s5">f&quot;&quot;&quot;</span>
+        <span class="s5">[project]</span>
+        <span class="s5">name = &quot;test&quot;</span>
+        <span class="s5">version = &quot;42.0&quot;</span>
+        <span class="s5">[tool.setuptools]</span>
+        <span class="s5">py-modules = [</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s5">]</span>
+        <span class="s5">&quot;&quot;&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s5">&quot;pyproject.toml&quot;</span><span class="s3">)</span>
+        <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">cleandoc</span><span class="s3">(</span><span class="s1">toml_config</span><span class="s3">), </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">Distribution</span><span class="s3">({}), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span><span class="s5">&quot;module&quot;</span><span class="s3">, [</span><span class="s5">&quot;pip-run&quot;</span><span class="s3">, </span><span class="s5">&quot;abc-d.λ-xyz-e&quot;</span><span class="s3">])</span>
+    <span class="s2">def </span><span class="s1">test_valid_module_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">, </span><span class="s1">module</span><span class="s3">):</span>
+        <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">module </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">(</span><span class="s1">module</span><span class="s3">).</span><span class="s1">py_modules</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span><span class="s5">&quot;module&quot;</span><span class="s3">, [</span><span class="s5">&quot;pip run&quot;</span><span class="s3">, </span><span class="s5">&quot;-pip-run&quot;</span><span class="s3">, </span><span class="s5">&quot;pip-run-stubs&quot;</span><span class="s3">])</span>
+    <span class="s2">def </span><span class="s1">test_invalid_module_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">, </span><span class="s1">module</span><span class="s3">):</span>
+        <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">raises</span><span class="s3">(</span><span class="s1">ValueError</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s5">&quot;py-modules&quot;</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">(</span><span class="s1">module</span><span class="s3">).</span><span class="s1">py_modules</span>
+
+
+<span class="s2">class </span><span class="s1">TestExtModules</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">test_pyproject_sets_attribute</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">):</span>
+        <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s5">&quot;pyproject.toml&quot;</span><span class="s3">)</span>
+        <span class="s1">toml_config </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot; 
+        [project] 
+        name = &quot;test&quot; 
+        version = &quot;42.0&quot; 
+        [tool.setuptools] 
+        ext-modules = [ 
+          {name = &quot;my.ext&quot;, sources = [&quot;hello.c&quot;, &quot;world.c&quot;]} 
+        ] 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">cleandoc</span><span class="s3">(</span><span class="s1">toml_config</span><span class="s3">), </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">_ExperimentalConfiguration</span><span class="s3">):</span>
+            <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">Distribution</span><span class="s3">({}), </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_modules</span><span class="s3">) == </span><span class="s6">1</span>
+        <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_modules</span><span class="s3">[</span><span class="s6">0</span><span class="s3">].</span><span class="s1">name </span><span class="s3">== </span><span class="s5">&quot;my.ext&quot;</span>
+        <span class="s2">assert </span><span class="s1">set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_modules</span><span class="s3">[</span><span class="s6">0</span><span class="s3">].</span><span class="s1">sources</span><span class="s3">) == {</span><span class="s5">&quot;hello.c&quot;</span><span class="s3">, </span><span class="s5">&quot;world.c&quot;</span><span class="s3">}</span>
+
+
+<span class="s2">class </span><span class="s1">TestDeprecatedFields</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">test_namespace_packages</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;pyproject.toml&quot;</span>
+        <span class="s1">config </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot; 
+        [project] 
+        name = &quot;myproj&quot; 
+        version = &quot;42&quot; 
+        [tool.setuptools] 
+        namespace-packages = [&quot;myproj.pkg&quot;] 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">cleandoc</span><span class="s3">(</span><span class="s1">config</span><span class="s3">), </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">raises</span><span class="s3">(</span><span class="s1">RemovedConfigError</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s5">&quot;namespace-packages&quot;</span><span class="s3">):</span>
+            <span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">TestPresetField</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">pyproject</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">dynamic</span><span class="s3">, </span><span class="s1">extra_content</span><span class="s3">=</span><span class="s5">&quot;&quot;</span><span class="s3">):</span>
+        <span class="s1">content </span><span class="s3">= </span><span class="s5">f&quot;[project]</span><span class="s2">\n</span><span class="s5">name = 'proj'</span><span class="s2">\n</span><span class="s5">dynamic = </span><span class="s2">{</span><span class="s1">dynamic</span><span class="s2">!r}\n</span><span class="s5">&quot;</span>
+        <span class="s2">if </span><span class="s5">&quot;version&quot; </span><span class="s2">not in </span><span class="s1">dynamic</span><span class="s3">:</span>
+            <span class="s1">content </span><span class="s3">+= </span><span class="s5">&quot;version = '42'</span><span class="s2">\n</span><span class="s5">&quot;</span>
+        <span class="s1">file </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;pyproject.toml&quot;</span>
+        <span class="s1">file</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">content </span><span class="s3">+ </span><span class="s1">extra_content</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">file</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s5">&quot;attr&quot;</span><span class="s3">, </span><span class="s5">&quot;field&quot;</span><span class="s3">, </span><span class="s5">&quot;value&quot;</span><span class="s3">),</span>
+        <span class="s3">[</span>
+            <span class="s3">(</span><span class="s5">&quot;license_expression&quot;</span><span class="s3">, </span><span class="s5">&quot;license&quot;</span><span class="s3">, </span><span class="s5">&quot;MIT&quot;</span><span class="s3">),</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">param</span><span class="s3">(</span>
+                <span class="s3">*(</span><span class="s5">&quot;license&quot;</span><span class="s3">, </span><span class="s5">&quot;license&quot;</span><span class="s3">, </span><span class="s5">&quot;Not SPDX&quot;</span><span class="s3">),</span>
+                <span class="s1">marks</span><span class="s3">=[</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">filterwarnings</span><span class="s3">(</span><span class="s5">&quot;ignore:.*license. overwritten&quot;</span><span class="s3">)],</span>
+            <span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">&quot;classifiers&quot;</span><span class="s3">, </span><span class="s5">&quot;classifiers&quot;</span><span class="s3">, [</span><span class="s5">&quot;Private :: Classifier&quot;</span><span class="s3">]),</span>
+            <span class="s3">(</span><span class="s5">&quot;entry_points&quot;</span><span class="s3">, </span><span class="s5">&quot;scripts&quot;</span><span class="s3">, {</span><span class="s5">&quot;console_scripts&quot;</span><span class="s3">: [</span><span class="s5">&quot;foobar=foobar:main&quot;</span><span class="s3">]}),</span>
+            <span class="s3">(</span><span class="s5">&quot;entry_points&quot;</span><span class="s3">, </span><span class="s5">&quot;gui-scripts&quot;</span><span class="s3">, {</span><span class="s5">&quot;gui_scripts&quot;</span><span class="s3">: [</span><span class="s5">&quot;bazquux=bazquux:main&quot;</span><span class="s3">]}),</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">param</span><span class="s3">(</span>
+                <span class="s3">*(</span><span class="s5">&quot;install_requires&quot;</span><span class="s3">, </span><span class="s5">&quot;dependencies&quot;</span><span class="s3">, [</span><span class="s5">&quot;six&quot;</span><span class="s3">]),</span>
+                <span class="s1">marks</span><span class="s3">=[</span>
+                    <span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">filterwarnings</span><span class="s3">(</span><span class="s5">&quot;ignore:.*install_requires. overwritten&quot;</span><span class="s3">)</span>
+                <span class="s3">],</span>
+            <span class="s3">),</span>
+        <span class="s3">],</span>
+    <span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_not_listed_in_dynamic</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, </span><span class="s1">field</span><span class="s3">, </span><span class="s1">value</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Setuptools cannot set a field if not listed in ``dynamic``&quot;&quot;&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, [])</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, **{</span><span class="s1">attr</span><span class="s3">: </span><span class="s1">value</span><span class="s3">})</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s5">f&quot;defined outside of `pyproject.toml`:.*</span><span class="s2">{</span><span class="s1">field</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s1">re</span><span class="s3">.</span><span class="s1">S</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">_MissingDynamic</span><span class="s3">, </span><span class="s1">match</span><span class="s3">=</span><span class="s1">msg</span><span class="s3">):</span>
+            <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">pyproject</span><span class="s3">)</span>
+
+        <span class="s1">dist_value </span><span class="s3">= </span><span class="s1">_some_attrgetter</span><span class="s3">(</span><span class="s5">f&quot;metadata.</span><span class="s2">{</span><span class="s1">attr</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">)(</span><span class="s1">dist</span><span class="s3">)</span>
+        <span class="s2">assert not </span><span class="s1">dist_value</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s5">&quot;attr&quot;</span><span class="s3">, </span><span class="s5">&quot;field&quot;</span><span class="s3">, </span><span class="s5">&quot;value&quot;</span><span class="s3">),</span>
+        <span class="s3">[</span>
+            <span class="s3">(</span><span class="s5">&quot;license_expression&quot;</span><span class="s3">, </span><span class="s5">&quot;license&quot;</span><span class="s3">, </span><span class="s5">&quot;MIT&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">&quot;install_requires&quot;</span><span class="s3">, </span><span class="s5">&quot;dependencies&quot;</span><span class="s3">, []),</span>
+            <span class="s3">(</span><span class="s5">&quot;extras_require&quot;</span><span class="s3">, </span><span class="s5">&quot;optional-dependencies&quot;</span><span class="s3">, {}),</span>
+            <span class="s3">(</span><span class="s5">&quot;install_requires&quot;</span><span class="s3">, </span><span class="s5">&quot;dependencies&quot;</span><span class="s3">, [</span><span class="s5">&quot;six&quot;</span><span class="s3">]),</span>
+            <span class="s3">(</span><span class="s5">&quot;classifiers&quot;</span><span class="s3">, </span><span class="s5">&quot;classifiers&quot;</span><span class="s3">, [</span><span class="s5">&quot;Private :: Classifier&quot;</span><span class="s3">]),</span>
+        <span class="s3">],</span>
+    <span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_listed_in_dynamic</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, </span><span class="s1">field</span><span class="s3">, </span><span class="s1">value</span><span class="s3">):</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, [</span><span class="s1">field</span><span class="s3">])</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, **{</span><span class="s1">attr</span><span class="s3">: </span><span class="s1">value</span><span class="s3">})</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s1">dist_value </span><span class="s3">= </span><span class="s1">_some_attrgetter</span><span class="s3">(</span><span class="s5">f&quot;metadata.</span><span class="s2">{</span><span class="s1">attr</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">)(</span><span class="s1">dist</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">dist_value </span><span class="s3">== </span><span class="s1">value</span>
+
+    <span class="s2">def </span><span class="s1">test_license_files_exempt_from_dynamic</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        license-file is currently not considered in the context of dynamic. 
+        As per 2025-02-19, https://packaging.python.org/en/latest/specifications/pyproject-toml/#license-files 
+        allows setuptools to fill-in `license-files` the way it sees fit: 
+ 
+        &gt; If the license-files key is not defined, tools can decide how to handle license files. 
+        &gt; For example they can choose not to include any files or use their own 
+        &gt; logic to discover the appropriate files in the distribution. 
+ 
+        Using license_files from setup.py to fill-in the value is in accordance 
+        with this rule. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, [])</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">license_files</span><span class="s3">=[</span><span class="s5">&quot;LIC*&quot;</span><span class="s3">])</span>
+        <span class="s3">(</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;LIC1&quot;</span><span class="s3">).</span><span class="s1">write_text</span><span class="s3">(</span><span class="s5">&quot;42&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files </span><span class="s3">== [</span><span class="s5">&quot;LIC1&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">test_warning_overwritten_dependencies</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s1">src </span><span class="s3">= </span><span class="s5">&quot;[project]</span><span class="s2">\n</span><span class="s5">name='pkg'</span><span class="s2">\n</span><span class="s5">version='0.1'</span><span class="s2">\n</span><span class="s5">dependencies=['click']</span><span class="s2">\n</span><span class="s5">&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;pyproject.toml&quot;</span>
+        <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">src</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">install_requires</span><span class="s3">=[</span><span class="s5">&quot;wheel&quot;</span><span class="s3">])</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">warns</span><span class="s3">(</span><span class="s1">match</span><span class="s3">=</span><span class="s5">&quot;`install_requires` overwritten&quot;</span><span class="s3">):</span>
+            <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s5">&quot;wheel&quot; </span><span class="s2">not in </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">install_requires</span>
+
+    <span class="s2">def </span><span class="s1">test_optional_dependencies_dont_remove_env_markers</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Internally setuptools converts dependencies with markers to &quot;extras&quot;. 
+        If ``install_requires`` is given by ``setup.py``, we have to ensure that 
+        applying ``optional-dependencies`` does not overwrite the mandatory 
+        dependencies with markers (see #3204). 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># If setuptools replace its internal mechanism that uses `requires.txt`</span>
+        <span class="s4"># this test has to be rewritten to adapt accordingly</span>
+        <span class="s1">extra </span><span class="s3">= </span><span class="s5">&quot;</span><span class="s2">\n</span><span class="s5">[project.optional-dependencies]</span><span class="s2">\n</span><span class="s5">foo = ['bar&gt;1']</span><span class="s2">\n</span><span class="s5">&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, [</span><span class="s5">&quot;dependencies&quot;</span><span class="s3">], </span><span class="s1">extra</span><span class="s3">)</span>
+        <span class="s1">install_req </span><span class="s3">= [</span><span class="s5">'importlib-resources (&gt;=3.0.0) ; python_version &lt; &quot;3.7&quot;'</span><span class="s3">]</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">install_requires</span><span class="s3">=</span><span class="s1">install_req</span><span class="s3">)</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s5">&quot;foo&quot; </span><span class="s2">in </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">extras_require</span>
+        <span class="s1">egg_info </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s5">&quot;egg_info&quot;</span><span class="s3">)</span>
+        <span class="s1">write_requirements</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;requires.txt&quot;</span><span class="s3">)</span>
+        <span class="s1">reqs </span><span class="s3">= (</span><span class="s1">tmp_path </span><span class="s3">/ </span><span class="s5">&quot;requires.txt&quot;</span><span class="s3">).</span><span class="s1">read_text</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s5">&quot;importlib-resources&quot; </span><span class="s2">in </span><span class="s1">reqs</span>
+        <span class="s2">assert </span><span class="s5">&quot;bar&quot; </span><span class="s2">in </span><span class="s1">reqs</span>
+        <span class="s2">assert </span><span class="s5">':python_version &lt; &quot;3.7&quot;' </span><span class="s2">in </span><span class="s1">reqs</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">parametrize</span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s5">&quot;field&quot;</span><span class="s3">, </span><span class="s5">&quot;group&quot;</span><span class="s3">),</span>
+        <span class="s3">[(</span><span class="s5">&quot;scripts&quot;</span><span class="s3">, </span><span class="s5">&quot;console_scripts&quot;</span><span class="s3">), (</span><span class="s5">&quot;gui-scripts&quot;</span><span class="s3">, </span><span class="s5">&quot;gui_scripts&quot;</span><span class="s3">)],</span>
+    <span class="s3">)</span>
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">filterwarnings</span><span class="s3">(</span><span class="s5">&quot;error&quot;</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_scripts_dont_require_dynamic_entry_points</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">field</span><span class="s3">, </span><span class="s1">group</span><span class="s3">):</span>
+        <span class="s4"># Issue 3862</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pyproject</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, [</span><span class="s1">field</span><span class="s3">])</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">makedist</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">entry_points</span><span class="s3">={</span><span class="s1">group</span><span class="s3">: [</span><span class="s5">&quot;foobar=foobar:main&quot;</span><span class="s3">]})</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">group </span><span class="s2">in </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">entry_points</span>
+
+
+<span class="s2">class </span><span class="s1">TestMeta</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">test_example_file_in_sdist</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">setuptools_sdist</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Meta test to ensure tests can run from sdist&quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">setuptools_sdist</span><span class="s3">) </span><span class="s2">as </span><span class="s1">tar</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">any</span><span class="s3">(</span><span class="s1">name</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">EXAMPLES_FILE</span><span class="s3">) </span><span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">tar</span><span class="s3">.</span><span class="s1">getnames</span><span class="s3">())</span>
+
+
+<span class="s2">class </span><span class="s1">TestInteropCommandLineParsing</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">test_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">, </span><span class="s1">capsys</span><span class="s3">):</span>
+        <span class="s4"># See pypa/setuptools#4047</span>
+        <span class="s4"># This test can be removed once the CLI interface of setup.py is removed</span>
+        <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s1">toml_config </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot; 
+        [project] 
+        name = &quot;test&quot; 
+        version = &quot;42.0&quot; 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;pyproject.toml&quot;</span><span class="s3">)</span>
+        <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">cleandoc</span><span class="s3">(</span><span class="s1">toml_config</span><span class="s3">), </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s1">opts </span><span class="s3">= {</span><span class="s5">&quot;script_args&quot;</span><span class="s3">: [</span><span class="s5">&quot;--version&quot;</span><span class="s3">]}</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">Distribution</span><span class="s3">(</span><span class="s1">opts</span><span class="s3">), </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">parse_command_line</span><span class="s3">()  </span><span class="s4"># &lt;-- there should be no exception here.</span>
+        <span class="s1">captured </span><span class="s3">= </span><span class="s1">capsys</span><span class="s3">.</span><span class="s1">readouterr</span><span class="s3">()</span>
+        <span class="s2">assert </span><span class="s5">&quot;42.0&quot; </span><span class="s2">in </span><span class="s1">captured</span><span class="s3">.</span><span class="s1">out</span>
+
+
+<span class="s2">class </span><span class="s1">TestStaticConfig</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">test_mark_static_fields</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s1">monkeypatch</span><span class="s3">):</span>
+        <span class="s1">monkeypatch</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">)</span>
+        <span class="s1">toml_config </span><span class="s3">= </span><span class="s5">&quot;&quot;&quot; 
+        [project] 
+        name = &quot;test&quot; 
+        version = &quot;42.0&quot; 
+        dependencies = [&quot;hello&quot;] 
+        keywords = [&quot;world&quot;] 
+        classifiers = [&quot;private :: hello world&quot;] 
+        [tool.setuptools] 
+        obsoletes = [&quot;abcd&quot;] 
+        provides = [&quot;abcd&quot;] 
+        platforms = [&quot;abcd&quot;] 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pyproject </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmp_path</span><span class="s3">, </span><span class="s5">&quot;pyproject.toml&quot;</span><span class="s3">)</span>
+        <span class="s1">pyproject</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s1">cleandoc</span><span class="s3">(</span><span class="s1">toml_config</span><span class="s3">), </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pyprojecttoml</span><span class="s3">.</span><span class="s1">apply_configuration</span><span class="s3">(</span><span class="s1">Distribution</span><span class="s3">({}), </span><span class="s1">pyproject</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">is_static</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">install_requires</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">is_static</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">keywords</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">is_static</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">classifiers</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">is_static</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">obsoletes</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">is_static</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">provides</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">is_static</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">platforms</span><span class="s3">)</span>
+
+
+<span class="s4"># --- Auxiliary Functions ---</span>
+
+
+<span class="s2">def </span><span class="s1">core_metadata</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s2">with </span><span class="s1">io</span><span class="s3">.</span><span class="s1">StringIO</span><span class="s3">() </span><span class="s2">as </span><span class="s1">buffer</span><span class="s3">:</span>
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">write_pkg_file</span><span class="s3">(</span><span class="s1">buffer</span><span class="s3">)</span>
+        <span class="s1">pkg_file_txt </span><span class="s3">= </span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">getvalue</span><span class="s3">()</span>
+
+    <span class="s4"># Make sure core metadata is valid</span>
+    <span class="s1">Metadata</span><span class="s3">.</span><span class="s1">from_email</span><span class="s3">(</span><span class="s1">pkg_file_txt</span><span class="s3">, </span><span class="s1">validate</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)  </span><span class="s4"># can raise exceptions</span>
+
+    <span class="s1">skip_prefixes</span><span class="s3">: </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] = ()</span>
+    <span class="s1">skip_lines </span><span class="s3">= </span><span class="s1">set</span><span class="s3">()</span>
+    <span class="s4"># ---- DIFF NORMALISATION ----</span>
+    <span class="s4"># PEP 621 is very particular about author/maintainer metadata conversion, so skip</span>
+    <span class="s1">skip_prefixes </span><span class="s3">+= (</span><span class="s5">&quot;Author:&quot;</span><span class="s3">, </span><span class="s5">&quot;Author-email:&quot;</span><span class="s3">, </span><span class="s5">&quot;Maintainer:&quot;</span><span class="s3">, </span><span class="s5">&quot;Maintainer-email:&quot;</span><span class="s3">)</span>
+    <span class="s4"># May be redundant with Home-page</span>
+    <span class="s1">skip_prefixes </span><span class="s3">+= (</span><span class="s5">&quot;Project-URL: Homepage,&quot;</span><span class="s3">, </span><span class="s5">&quot;Home-page:&quot;</span><span class="s3">)</span>
+    <span class="s4"># May be missing in original (relying on default) but backfilled in the TOML</span>
+    <span class="s1">skip_prefixes </span><span class="s3">+= (</span><span class="s5">&quot;Description-Content-Type:&quot;</span><span class="s3">,)</span>
+    <span class="s4"># Remove empty lines</span>
+    <span class="s1">skip_lines</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s5">&quot;&quot;</span><span class="s3">)</span>
+
+    <span class="s1">result </span><span class="s3">= []</span>
+    <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">pkg_file_txt</span><span class="s3">.</span><span class="s1">splitlines</span><span class="s3">():</span>
+        <span class="s2">if </span><span class="s1">line</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">skip_prefixes</span><span class="s3">) </span><span class="s2">or </span><span class="s1">line </span><span class="s2">in </span><span class="s1">skip_lines</span><span class="s3">:</span>
+            <span class="s2">continue</span>
+        <span class="s1">result</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">line </span><span class="s3">+ </span><span class="s5">&quot;</span><span class="s2">\n</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s5">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">result</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

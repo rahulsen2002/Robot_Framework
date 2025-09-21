@@ -1,0 +1,621 @@
+<html>
+<head>
+<title>bdist_rpm.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bdist_rpm.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.bdist_rpm 
+ 
+Implements the Distutils 'bdist_rpm' command (create RPM source and binary 
+distributions).&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">subprocess</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">_log </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">ClassVar</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">debug </span><span class="s2">import </span><span class="s1">DEBUG</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">errors </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">DistutilsExecError</span><span class="s3">,</span>
+    <span class="s1">DistutilsFileError</span><span class="s3">,</span>
+    <span class="s1">DistutilsOptionError</span><span class="s3">,</span>
+    <span class="s1">DistutilsPlatformError</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">file_util </span><span class="s2">import </span><span class="s1">write_file</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">sysconfig </span><span class="s2">import </span><span class="s1">get_python_version</span>
+
+
+<span class="s2">class </span><span class="s1">bdist_rpm</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s1">description </span><span class="s3">= </span><span class="s4">&quot;create an RPM distribution&quot;</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s4">'bdist-base='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;base directory for creating built distributions&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'rpm-base='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;base directory for creating RPMs (defaults to </span><span class="s2">\&quot;</span><span class="s4">rpm</span><span class="s2">\&quot; </span><span class="s4">under &quot;</span>
+            <span class="s4">&quot;--bdist-base; must be specified for RPM 2)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'dist-dir='</span><span class="s3">,</span>
+            <span class="s4">'d'</span><span class="s3">,</span>
+            <span class="s4">&quot;directory to put final RPM files in (and .spec files if --spec-only)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'python='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;path to Python interpreter to hard-code in the .spec file &quot;</span>
+            <span class="s4">&quot;[default: </span><span class="s2">\&quot;</span><span class="s4">python</span><span class="s2">\&quot;</span><span class="s4">]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'fix-python'</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;hard-code the exact path to the current Python interpreter in &quot;</span>
+            <span class="s4">&quot;the .spec file&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'spec-only'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;only regenerate spec file&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'source-only'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;only generate source RPM&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'binary-only'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;only generate binary RPM&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'use-bzip2'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;use bzip2 instead of gzip to create source distribution&quot;</span><span class="s3">),</span>
+        <span class="s5"># More meta-data: too RPM-specific to put in the setup script,</span>
+        <span class="s5"># but needs to go in the .spec file -- so we make these options</span>
+        <span class="s5"># to &quot;bdist_rpm&quot;.  The idea is that packagers would put this</span>
+        <span class="s5"># info in setup.cfg, although they are of course free to</span>
+        <span class="s5"># supply it on the command line.</span>
+        <span class="s3">(</span>
+            <span class="s4">'distribution-name='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;name of the (Linux) distribution to which this &quot;</span>
+            <span class="s4">&quot;RPM applies (*not* the name of the module distribution!)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'group='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;package classification [default: </span><span class="s2">\&quot;</span><span class="s4">Development/Libraries</span><span class="s2">\&quot;</span><span class="s4">]&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'release='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;RPM release number&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'serial='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;RPM serial number&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'vendor='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;RPM </span><span class="s2">\&quot;</span><span class="s4">vendor</span><span class="s2">\&quot; </span><span class="s4">(eg. </span><span class="s2">\&quot;</span><span class="s4">Joe Blow &lt;joe@example.com&gt;</span><span class="s2">\&quot;</span><span class="s4">) &quot;</span>
+            <span class="s4">&quot;[default: maintainer or author from setup script]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'packager='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;RPM packager (eg. </span><span class="s2">\&quot;</span><span class="s4">Jane Doe &lt;jane@example.net&gt;</span><span class="s2">\&quot;</span><span class="s4">) [default: vendor]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'doc-files='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;list of documentation files (space or comma-separated)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'changelog='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;RPM changelog&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'icon='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;name of icon file&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'provides='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;capabilities provided by this package&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'requires='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;capabilities required by this package&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'conflicts='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;capabilities which conflict with this package&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'build-requires='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;capabilities required to build this package&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'obsoletes='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;capabilities made obsolete by this package&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'no-autoreq'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;do not automatically calculate dependencies&quot;</span><span class="s3">),</span>
+        <span class="s5"># Actions to take when building RPM</span>
+        <span class="s3">(</span><span class="s4">'keep-temp'</span><span class="s3">, </span><span class="s4">'k'</span><span class="s3">, </span><span class="s4">&quot;don't clean up RPM build directory&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'no-keep-temp'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;clean up RPM build directory [default]&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'use-rpm-opt-flags'</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;compile with RPM_OPT_FLAGS when building from source RPM&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'no-rpm-opt-flags'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;do not pass any RPM CFLAGS to compiler&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'rpm3-mode'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;RPM 3 compatibility mode (default)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'rpm2-mode'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;RPM 2 compatibility mode&quot;</span><span class="s3">),</span>
+        <span class="s5"># Add the hooks necessary for specifying custom scripts</span>
+        <span class="s3">(</span><span class="s4">'prep-script='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;Specify a script for the PREP phase of RPM building&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'build-script='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;Specify a script for the BUILD phase of RPM building&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'pre-install='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Specify a script for the pre-INSTALL phase of RPM building&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'install-script='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Specify a script for the INSTALL phase of RPM building&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'post-install='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Specify a script for the post-INSTALL phase of RPM building&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'pre-uninstall='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Specify a script for the pre-UNINSTALL phase of RPM building&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'post-uninstall='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Specify a script for the post-UNINSTALL phase of RPM building&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'clean-script='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;Specify a script for the CLEAN phase of RPM building&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'verify-script='</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Specify a script for the VERIFY phase of the RPM build&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s5"># Allow a packager to explicitly force an architecture</span>
+        <span class="s3">(</span><span class="s4">'force-arch='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;Force an architecture onto the RPM build process&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'quiet'</span><span class="s3">, </span><span class="s4">'q'</span><span class="s3">, </span><span class="s4">&quot;Run the INSTALL phase of RPM building in quiet mode&quot;</span><span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">boolean_options</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = [</span>
+        <span class="s4">'keep-temp'</span><span class="s3">,</span>
+        <span class="s4">'use-rpm-opt-flags'</span><span class="s3">,</span>
+        <span class="s4">'rpm3-mode'</span><span class="s3">,</span>
+        <span class="s4">'no-autoreq'</span><span class="s3">,</span>
+        <span class="s4">'quiet'</span><span class="s3">,</span>
+    <span class="s3">]</span>
+
+    <span class="s1">negative_opt</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]] = {</span>
+        <span class="s4">'no-keep-temp'</span><span class="s3">: </span><span class="s4">'keep-temp'</span><span class="s3">,</span>
+        <span class="s4">'no-rpm-opt-flags'</span><span class="s3">: </span><span class="s4">'use-rpm-opt-flags'</span><span class="s3">,</span>
+        <span class="s4">'rpm2-mode'</span><span class="s3">: </span><span class="s4">'rpm3-mode'</span><span class="s3">,</span>
+    <span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_base </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">rpm_base </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">python </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">fix_python </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">spec_only </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">binary_only </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">source_only </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">use_bzip2 </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution_name </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">group </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">release </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">serial </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">vendor </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">packager </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">changelog </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">icon </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">prep_script </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">build_script </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">install_script </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">clean_script </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">verify_script </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">pre_install </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">post_install </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">pre_uninstall </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">post_uninstall </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">prep </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">provides </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">requires </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conflicts </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">build_requires </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">obsoletes </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">use_rpm_opt_flags </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">rpm3_mode </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">no_autoreq </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">force_arch </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">quiet </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_undefined_options</span><span class="s3">(</span><span class="s4">'bdist'</span><span class="s3">, (</span><span class="s4">'bdist_base'</span><span class="s3">, </span><span class="s4">'bdist_base'</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">rpm_base </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">rpm3_mode</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsOptionError</span><span class="s3">(</span><span class="s4">&quot;you must specify --rpm-base in RPM 2 mode&quot;</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">rpm_base </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_base</span><span class="s3">, </span><span class="s4">&quot;rpm&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">python </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">fix_python</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">python </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">executable</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">python </span><span class="s3">= </span><span class="s4">&quot;python3&quot;</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">fix_python</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsOptionError</span><span class="s3">(</span>
+                <span class="s4">&quot;--python and --fix-python are mutually exclusive options&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">name </span><span class="s3">!= </span><span class="s4">'posix'</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsPlatformError</span><span class="s3">(</span>
+                <span class="s4">f&quot;don't know how to create RPM distributions on platform </span><span class="s2">{</span><span class="s1">os</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">binary_only </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">source_only</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsOptionError</span><span class="s3">(</span>
+                <span class="s4">&quot;cannot supply both '--source-only' and '--binary-only'&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s5"># don't pass CFLAGS to pure python distributions</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">use_rpm_opt_flags </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_undefined_options</span><span class="s3">(</span><span class="s4">'bdist'</span><span class="s3">, (</span><span class="s4">'dist_dir'</span><span class="s3">, </span><span class="s4">'dist_dir'</span><span class="s3">))</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">finalize_package_data</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">finalize_package_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'group'</span><span class="s3">, </span><span class="s4">&quot;Development/Libraries&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span>
+            <span class="s4">'vendor'</span><span class="s3">,</span>
+            <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_contact</span><span class="s3">()</span><span class="s2">} </span><span class="s4">&lt;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_contact_email</span><span class="s3">()</span><span class="s2">}</span><span class="s4">&gt;&quot;</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'packager'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'doc_files'</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files</span><span class="s3">, </span><span class="s1">list</span><span class="s3">):</span>
+            <span class="s2">for </span><span class="s1">readme </span><span class="s2">in </span><span class="s3">(</span><span class="s4">'README'</span><span class="s3">, </span><span class="s4">'README.txt'</span><span class="s3">):</span>
+                <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">readme</span><span class="s3">) </span><span class="s2">and </span><span class="s1">readme </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">readme</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'release'</span><span class="s3">, </span><span class="s4">&quot;1&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'serial'</span><span class="s3">)  </span><span class="s5"># should it be an int?</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'distribution_name'</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'changelog'</span><span class="s3">)</span>
+        <span class="s5"># Format changelog correctly</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">changelog </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_format_changelog</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">changelog</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'icon'</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'prep_script'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'build_script'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'install_script'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'clean_script'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'verify_script'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'pre_install'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'post_install'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'pre_uninstall'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_filename</span><span class="s3">(</span><span class="s4">'post_uninstall'</span><span class="s3">)</span>
+
+        <span class="s5"># XXX don't forget we punted on summaries and descriptions -- they</span>
+        <span class="s5"># should be handled here eventually!</span>
+
+        <span class="s5"># Now *this* is some meta-data that belongs in the setup script...</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'provides'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'requires'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'conflicts'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'build_requires'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'obsoletes'</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string</span><span class="s3">(</span><span class="s4">'force_arch'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:  </span><span class="s5"># noqa: C901</span>
+        <span class="s2">if </span><span class="s1">DEBUG</span><span class="s3">:</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s4">&quot;before _get_package_data():&quot;</span><span class="s3">)</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s4">&quot;vendor =&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">vendor</span><span class="s3">)</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s4">&quot;packager =&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">packager</span><span class="s3">)</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s4">&quot;doc_files =&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files</span><span class="s3">)</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s4">&quot;changelog =&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">changelog</span><span class="s3">)</span>
+
+        <span class="s5"># make directories</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">spec_only</span><span class="s3">:</span>
+            <span class="s1">spec_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">spec_dir</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">rpm_dir </span><span class="s3">= {}</span>
+            <span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s4">'SOURCES'</span><span class="s3">, </span><span class="s4">'SPECS'</span><span class="s3">, </span><span class="s4">'BUILD'</span><span class="s3">, </span><span class="s4">'RPMS'</span><span class="s3">, </span><span class="s4">'SRPMS'</span><span class="s3">):</span>
+                <span class="s1">rpm_dir</span><span class="s3">[</span><span class="s1">d</span><span class="s3">] = </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">rpm_base</span><span class="s3">, </span><span class="s1">d</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">rpm_dir</span><span class="s3">[</span><span class="s1">d</span><span class="s3">])</span>
+            <span class="s1">spec_dir </span><span class="s3">= </span><span class="s1">rpm_dir</span><span class="s3">[</span><span class="s4">'SPECS'</span><span class="s3">]</span>
+
+        <span class="s5"># Spec file goes into 'dist_dir' if '--spec-only specified',</span>
+        <span class="s5"># build/rpm.&lt;plat&gt; otherwise.</span>
+        <span class="s1">spec_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">spec_dir</span><span class="s3">, </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_name</span><span class="s3">()</span><span class="s2">}</span><span class="s4">.spec&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span>
+            <span class="s1">write_file</span><span class="s3">, (</span><span class="s1">spec_path</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_make_spec_file</span><span class="s3">()), </span><span class="s4">f&quot;writing '</span><span class="s2">{</span><span class="s1">spec_path</span><span class="s2">}</span><span class="s4">'&quot;</span>
+        <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">spec_only</span><span class="s3">:  </span><span class="s5"># stop if requested</span>
+            <span class="s2">return</span>
+
+        <span class="s5"># Make a source distribution and copy to SOURCES directory with</span>
+        <span class="s5"># optional icon.</span>
+        <span class="s1">saved_dist_files </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">dist_files</span><span class="s3">[:]</span>
+        <span class="s1">sdist </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s4">'sdist'</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">use_bzip2</span><span class="s3">:</span>
+            <span class="s1">sdist</span><span class="s3">.</span><span class="s1">formats </span><span class="s3">= [</span><span class="s4">'bztar'</span><span class="s3">]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">sdist</span><span class="s3">.</span><span class="s1">formats </span><span class="s3">= [</span><span class="s4">'gztar'</span><span class="s3">]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s4">'sdist'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">dist_files </span><span class="s3">= </span><span class="s1">saved_dist_files</span>
+
+        <span class="s1">source </span><span class="s3">= </span><span class="s1">sdist</span><span class="s3">.</span><span class="s1">get_archive_files</span><span class="s3">()[</span><span class="s6">0</span><span class="s3">]</span>
+        <span class="s1">source_dir </span><span class="s3">= </span><span class="s1">rpm_dir</span><span class="s3">[</span><span class="s4">'SOURCES'</span><span class="s3">]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">copy_file</span><span class="s3">(</span><span class="s1">source</span><span class="s3">, </span><span class="s1">source_dir</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">icon</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">icon</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">copy_file</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">icon</span><span class="s3">, </span><span class="s1">source_dir</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsFileError</span><span class="s3">(</span><span class="s4">f&quot;icon file '</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">icon</span><span class="s2">}</span><span class="s4">' does not exist&quot;</span><span class="s3">)</span>
+
+        <span class="s5"># build package</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s4">&quot;building RPMs&quot;</span><span class="s3">)</span>
+        <span class="s1">rpm_cmd </span><span class="s3">= [</span><span class="s4">'rpmbuild'</span><span class="s3">]</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">source_only</span><span class="s3">:  </span><span class="s5"># what kind of RPMs?</span>
+            <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'-bs'</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">binary_only</span><span class="s3">:</span>
+            <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'-bb'</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'-ba'</span><span class="s3">)</span>
+        <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span><span class="s4">'--define'</span><span class="s3">, </span><span class="s4">f'__python </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">python</span><span class="s2">}</span><span class="s4">'</span><span class="s3">])</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">rpm3_mode</span><span class="s3">:</span>
+            <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span><span class="s4">'--define'</span><span class="s3">, </span><span class="s4">f'_topdir </span><span class="s2">{</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">rpm_base</span><span class="s3">)</span><span class="s2">}</span><span class="s4">'</span><span class="s3">])</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp</span><span class="s3">:</span>
+            <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'--clean'</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">quiet</span><span class="s3">:</span>
+            <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'--quiet'</span><span class="s3">)</span>
+
+        <span class="s1">rpm_cmd</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">spec_path</span><span class="s3">)</span>
+        <span class="s5"># Determine the binary rpm names that should be built out of this spec</span>
+        <span class="s5"># file</span>
+        <span class="s5"># Note that some of these may not be really built (if the file</span>
+        <span class="s5"># list is empty)</span>
+        <span class="s1">nvr_string </span><span class="s3">= </span><span class="s4">&quot;%{name}-%{version}-%{release}&quot;</span>
+        <span class="s1">src_rpm </span><span class="s3">= </span><span class="s1">nvr_string </span><span class="s3">+ </span><span class="s4">&quot;.src.rpm&quot;</span>
+        <span class="s1">non_src_rpm </span><span class="s3">= </span><span class="s4">&quot;%{arch}/&quot; </span><span class="s3">+ </span><span class="s1">nvr_string </span><span class="s3">+ </span><span class="s4">&quot;.%{arch}.rpm&quot;</span>
+        <span class="s1">q_cmd </span><span class="s3">= </span><span class="s4">rf&quot;rpm -q --qf '</span><span class="s2">{</span><span class="s1">src_rpm</span><span class="s2">} {</span><span class="s1">non_src_rpm</span><span class="s2">}</span><span class="s4">\n' --specfile '</span><span class="s2">{</span><span class="s1">spec_path</span><span class="s2">}</span><span class="s4">'&quot;</span>
+
+        <span class="s1">out </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">popen</span><span class="s3">(</span><span class="s1">q_cmd</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">binary_rpms </span><span class="s3">= []</span>
+            <span class="s1">source_rpm </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s2">while True</span><span class="s3">:</span>
+                <span class="s1">line </span><span class="s3">= </span><span class="s1">out</span><span class="s3">.</span><span class="s1">readline</span><span class="s3">()</span>
+                <span class="s2">if not </span><span class="s1">line</span><span class="s3">:</span>
+                    <span class="s2">break</span>
+                <span class="s1">ell </span><span class="s3">= </span><span class="s1">line</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">().</span><span class="s1">split</span><span class="s3">()</span>
+                <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">ell</span><span class="s3">) == </span><span class="s6">2</span>
+                <span class="s1">binary_rpms</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">ell</span><span class="s3">[</span><span class="s6">1</span><span class="s3">])</span>
+                <span class="s5"># The source rpm is named after the first entry in the spec file</span>
+                <span class="s2">if </span><span class="s1">source_rpm </span><span class="s2">is None</span><span class="s3">:</span>
+                    <span class="s1">source_rpm </span><span class="s3">= </span><span class="s1">ell</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]</span>
+
+            <span class="s1">status </span><span class="s3">= </span><span class="s1">out</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">status</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsExecError</span><span class="s3">(</span><span class="s4">f&quot;Failed to execute: </span><span class="s2">{</span><span class="s1">q_cmd</span><span class="s2">!r}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">out</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">spawn</span><span class="s3">(</span><span class="s1">rpm_cmd</span><span class="s3">)</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+                <span class="s1">pyversion </span><span class="s3">= </span><span class="s1">get_python_version</span><span class="s3">()</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">pyversion </span><span class="s3">= </span><span class="s4">'any'</span>
+
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">binary_only</span><span class="s3">:</span>
+                <span class="s1">srpm </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">rpm_dir</span><span class="s3">[</span><span class="s4">'SRPMS'</span><span class="s3">], </span><span class="s1">source_rpm</span><span class="s3">)</span>
+                <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">srpm</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">move_file</span><span class="s3">(</span><span class="s1">srpm</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">)</span>
+                <span class="s1">filename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">source_rpm</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">dist_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s4">'bdist_rpm'</span><span class="s3">, </span><span class="s1">pyversion</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">))</span>
+
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">source_only</span><span class="s3">:</span>
+                <span class="s2">for </span><span class="s1">rpm </span><span class="s2">in </span><span class="s1">binary_rpms</span><span class="s3">:</span>
+                    <span class="s1">rpm </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">rpm_dir</span><span class="s3">[</span><span class="s4">'RPMS'</span><span class="s3">], </span><span class="s1">rpm</span><span class="s3">)</span>
+                    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">rpm</span><span class="s3">):</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">move_file</span><span class="s3">(</span><span class="s1">rpm</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">)</span>
+                        <span class="s1">filename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">rpm</span><span class="s3">))</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">dist_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span>
+                            <span class="s4">'bdist_rpm'</span><span class="s3">,</span>
+                            <span class="s1">pyversion</span><span class="s3">,</span>
+                            <span class="s1">filename</span><span class="s3">,</span>
+                        <span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_dist_path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">path</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_make_spec_file</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):  </span><span class="s5"># noqa: C901</span>
+        <span class="s0">&quot;&quot;&quot;Generate the text of an RPM spec file and return it as a 
+        list of strings (one per line). 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># definitions and headers</span>
+        <span class="s1">spec_file </span><span class="s3">= [</span>
+            <span class="s4">'%define name ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_name</span><span class="s3">(),</span>
+            <span class="s4">'%define version ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_version</span><span class="s3">().</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'_'</span><span class="s3">),</span>
+            <span class="s4">'%define unmangled_version ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_version</span><span class="s3">(),</span>
+            <span class="s4">'%define release ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">release</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'_'</span><span class="s3">),</span>
+            <span class="s4">''</span><span class="s3">,</span>
+            <span class="s4">'Summary: ' </span><span class="s3">+ (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_description</span><span class="s3">() </span><span class="s2">or </span><span class="s4">&quot;UNKNOWN&quot;</span><span class="s3">),</span>
+        <span class="s3">]</span>
+
+        <span class="s5"># Workaround for #14443 which affects some RPM based systems such as</span>
+        <span class="s5"># RHEL6 (and probably derivatives)</span>
+        <span class="s1">vendor_hook </span><span class="s3">= </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">getoutput</span><span class="s3">(</span><span class="s4">'rpm --eval %{__os_install_post}'</span><span class="s3">)</span>
+        <span class="s5"># Generate a potential replacement value for __os_install_post (whilst</span>
+        <span class="s5"># normalizing the whitespace to simplify the test for whether the</span>
+        <span class="s5"># invocation of brp-python-bytecompile passes in __python):</span>
+        <span class="s1">vendor_hook </span><span class="s3">= </span><span class="s4">'</span><span class="s2">\n</span><span class="s4">'</span><span class="s3">.</span><span class="s1">join</span><span class="s3">([</span>
+            <span class="s4">f'  </span><span class="s2">{</span><span class="s1">line</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">()</span><span class="s2">} \\</span><span class="s4">' </span><span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">vendor_hook</span><span class="s3">.</span><span class="s1">splitlines</span><span class="s3">()</span>
+        <span class="s3">])</span>
+        <span class="s1">problem </span><span class="s3">= </span><span class="s4">&quot;brp-python-bytecompile </span><span class="s2">\\\n</span><span class="s4">&quot;</span>
+        <span class="s1">fixed </span><span class="s3">= </span><span class="s4">&quot;brp-python-bytecompile %{__python} </span><span class="s2">\\\n</span><span class="s4">&quot;</span>
+        <span class="s1">fixed_hook </span><span class="s3">= </span><span class="s1">vendor_hook</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">problem</span><span class="s3">, </span><span class="s1">fixed</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">fixed_hook </span><span class="s3">!= </span><span class="s1">vendor_hook</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'# Workaround for https://bugs.python.org/issue14443'</span><span class="s3">)</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'%define __os_install_post ' </span><span class="s3">+ </span><span class="s1">fixed_hook </span><span class="s3">+ </span><span class="s4">'</span><span class="s2">\n</span><span class="s4">'</span><span class="s3">)</span>
+
+        <span class="s5"># put locale summaries into spec file</span>
+        <span class="s5"># XXX not supported for now (hard to put a dictionary</span>
+        <span class="s5"># in a config file -- arg!)</span>
+        <span class="s5"># for locale in self.summaries.keys():</span>
+        <span class="s5">#    spec_file.append('Summary(%s): %s' % (locale,</span>
+        <span class="s5">#                                          self.summaries[locale]))</span>
+
+        <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span>
+            <span class="s4">'Name: %{name}'</span><span class="s3">,</span>
+            <span class="s4">'Version: %{version}'</span><span class="s3">,</span>
+            <span class="s4">'Release: %{release}'</span><span class="s3">,</span>
+        <span class="s3">])</span>
+
+        <span class="s5"># XXX yuck! this filename is available from the &quot;sdist&quot; command,</span>
+        <span class="s5"># but only after it has run: and we create the spec file before</span>
+        <span class="s5"># running &quot;sdist&quot;, in case of --spec-only.</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">use_bzip2</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'Source0: %{name}-%{unmangled_version}.tar.bz2'</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'Source0: %{name}-%{unmangled_version}.tar.gz'</span><span class="s3">)</span>
+
+        <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span>
+            <span class="s4">'License: ' </span><span class="s3">+ (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_license</span><span class="s3">() </span><span class="s2">or </span><span class="s4">&quot;UNKNOWN&quot;</span><span class="s3">),</span>
+            <span class="s4">'Group: ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">group</span><span class="s3">,</span>
+            <span class="s4">'BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-buildroot'</span><span class="s3">,</span>
+            <span class="s4">'Prefix: %{_prefix}'</span><span class="s3">,</span>
+        <span class="s3">])</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">force_arch</span><span class="s3">:</span>
+            <span class="s5"># noarch if no extension modules</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+                <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'BuildArch: noarch'</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">f'BuildArch: </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">force_arch</span><span class="s2">}</span><span class="s4">'</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">field </span><span class="s2">in </span><span class="s3">(</span>
+            <span class="s4">'Vendor'</span><span class="s3">,</span>
+            <span class="s4">'Packager'</span><span class="s3">,</span>
+            <span class="s4">'Provides'</span><span class="s3">,</span>
+            <span class="s4">'Requires'</span><span class="s3">,</span>
+            <span class="s4">'Conflicts'</span><span class="s3">,</span>
+            <span class="s4">'Obsoletes'</span><span class="s3">,</span>
+        <span class="s3">):</span>
+            <span class="s1">val </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">field</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">())</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">val</span><span class="s3">, </span><span class="s1">list</span><span class="s3">):</span>
+                <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'{}: {}'</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">field</span><span class="s3">, </span><span class="s4">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">val</span><span class="s3">)))</span>
+            <span class="s2">elif </span><span class="s1">val </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">field</span><span class="s2">}</span><span class="s4">: </span><span class="s2">{</span><span class="s1">val</span><span class="s2">}</span><span class="s4">'</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_url</span><span class="s3">():</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'Url: ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_url</span><span class="s3">())</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution_name</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'Distribution: ' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution_name</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_requires</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'BuildRequires: ' </span><span class="s3">+ </span><span class="s4">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_requires</span><span class="s3">))</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">icon</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'Icon: ' </span><span class="s3">+ </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">icon</span><span class="s3">))</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">no_autoreq</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'AutoReq: 0'</span><span class="s3">)</span>
+
+        <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span>
+            <span class="s4">''</span><span class="s3">,</span>
+            <span class="s4">'%description'</span><span class="s3">,</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_long_description</span><span class="s3">() </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+        <span class="s3">])</span>
+
+        <span class="s5"># put locale descriptions into spec file</span>
+        <span class="s5"># XXX again, suppressed because config file syntax doesn't</span>
+        <span class="s5"># easily support this ;-(</span>
+        <span class="s5"># for locale in self.descriptions.keys():</span>
+        <span class="s5">#    spec_file.extend([</span>
+        <span class="s5">#        '',</span>
+        <span class="s5">#        '%description -l ' + locale,</span>
+        <span class="s5">#        self.descriptions[locale],</span>
+        <span class="s5">#        ])</span>
+
+        <span class="s5"># rpm scripts</span>
+        <span class="s5"># figure out default build script</span>
+        <span class="s1">def_setup_call </span><span class="s3">= </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">python</span><span class="s2">} {</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">argv</span><span class="s3">[</span><span class="s6">0</span><span class="s3">])</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">def_build </span><span class="s3">= </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">def_setup_call</span><span class="s2">} </span><span class="s4">build&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">use_rpm_opt_flags</span><span class="s3">:</span>
+            <span class="s1">def_build </span><span class="s3">= </span><span class="s4">'env CFLAGS=&quot;$RPM_OPT_FLAGS&quot; ' </span><span class="s3">+ </span><span class="s1">def_build</span>
+
+        <span class="s5"># insert contents of files</span>
+
+        <span class="s5"># XXX this is kind of misleading: user-supplied options are files</span>
+        <span class="s5"># that we open and interpolate into the spec file, but the defaults</span>
+        <span class="s5"># are just text that we drop in as-is.  Hmmm.</span>
+
+        <span class="s1">install_cmd </span><span class="s3">= </span><span class="s4">f'</span><span class="s2">{</span><span class="s1">def_setup_call</span><span class="s2">} </span><span class="s4">install -O1 --root=$RPM_BUILD_ROOT --record=INSTALLED_FILES'</span>
+
+        <span class="s1">script_options </span><span class="s3">= [</span>
+            <span class="s3">(</span><span class="s4">'prep'</span><span class="s3">, </span><span class="s4">'prep_script'</span><span class="s3">, </span><span class="s4">&quot;%setup -n %{name}-%{unmangled_version}&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'build'</span><span class="s3">, </span><span class="s4">'build_script'</span><span class="s3">, </span><span class="s1">def_build</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'install'</span><span class="s3">, </span><span class="s4">'install_script'</span><span class="s3">, </span><span class="s1">install_cmd</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'clean'</span><span class="s3">, </span><span class="s4">'clean_script'</span><span class="s3">, </span><span class="s4">&quot;rm -rf $RPM_BUILD_ROOT&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'verifyscript'</span><span class="s3">, </span><span class="s4">'verify_script'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'pre'</span><span class="s3">, </span><span class="s4">'pre_install'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'post'</span><span class="s3">, </span><span class="s4">'post_install'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'preun'</span><span class="s3">, </span><span class="s4">'pre_uninstall'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s4">'postun'</span><span class="s3">, </span><span class="s4">'post_uninstall'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">),</span>
+        <span class="s3">]</span>
+
+        <span class="s2">for </span><span class="s1">rpm_opt</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, </span><span class="s1">default </span><span class="s2">in </span><span class="s1">script_options</span><span class="s3">:</span>
+            <span class="s5"># Insert contents of file referred to, if no file is referred to</span>
+            <span class="s5"># use 'default' as contents of script</span>
+            <span class="s1">val </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">val </span><span class="s2">or </span><span class="s1">default</span><span class="s3">:</span>
+                <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span>
+                    <span class="s4">''</span><span class="s3">,</span>
+                    <span class="s4">'%' </span><span class="s3">+ </span><span class="s1">rpm_opt</span><span class="s3">,</span>
+                <span class="s3">])</span>
+                <span class="s2">if </span><span class="s1">val</span><span class="s3">:</span>
+                    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">val</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+                        <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">f</span><span class="s3">.</span><span class="s1">read</span><span class="s3">().</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'</span><span class="s2">\n</span><span class="s4">'</span><span class="s3">))</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">default</span><span class="s3">)</span>
+
+        <span class="s5"># files section</span>
+        <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span>
+            <span class="s4">''</span><span class="s3">,</span>
+            <span class="s4">'%files -f INSTALLED_FILES'</span><span class="s3">,</span>
+            <span class="s4">'%defattr(-,root,root)'</span><span class="s3">,</span>
+        <span class="s3">])</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'%doc ' </span><span class="s3">+ </span><span class="s4">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">doc_files</span><span class="s3">))</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">changelog</span><span class="s3">:</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span>
+                <span class="s4">''</span><span class="s3">,</span>
+                <span class="s4">'%changelog'</span><span class="s3">,</span>
+            <span class="s3">])</span>
+            <span class="s1">spec_file</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">changelog</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">spec_file</span>
+
+    <span class="s2">def </span><span class="s1">_format_changelog</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">changelog</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Format the changelog correctly and convert it to a list of strings&quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">changelog</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">changelog</span>
+        <span class="s1">new_changelog </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">changelog</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">().</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'</span><span class="s2">\n</span><span class="s4">'</span><span class="s3">):</span>
+            <span class="s1">line </span><span class="s3">= </span><span class="s1">line</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">line</span><span class="s3">[</span><span class="s6">0</span><span class="s3">] == </span><span class="s4">'*'</span><span class="s3">:</span>
+                <span class="s1">new_changelog</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span><span class="s4">''</span><span class="s3">, </span><span class="s1">line</span><span class="s3">])</span>
+            <span class="s2">elif </span><span class="s1">line</span><span class="s3">[</span><span class="s6">0</span><span class="s3">] == </span><span class="s4">'-'</span><span class="s3">:</span>
+                <span class="s1">new_changelog</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">new_changelog</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">'  ' </span><span class="s3">+ </span><span class="s1">line</span><span class="s3">)</span>
+
+        <span class="s5"># strip trailing newline inserted by first changelog entry</span>
+        <span class="s2">if not </span><span class="s1">new_changelog</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]:</span>
+            <span class="s2">del </span><span class="s1">new_changelog</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]</span>
+
+        <span class="s2">return </span><span class="s1">new_changelog</span>
+</pre>
+</body>
+</html>

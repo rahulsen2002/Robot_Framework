@@ -1,0 +1,198 @@
+<html>
+<head>
+<title>index_command.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+index_command.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Contains command classes which may interact with an index / the network. 
+ 
+Unlike its sister module, req_command, this module still uses lazy imports 
+so commands which don't always hit the network (e.g. list w/o --outdated or 
+--uptodate) don't need waste time importing PipSession and friends. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">lru_cache</span>
+<span class="s2">from </span><span class="s1">optparse </span><span class="s2">import </span><span class="s1">Values</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor </span><span class="s2">import </span><span class="s1">certifi</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">cli</span><span class="s3">.</span><span class="s1">base_command </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">cli</span><span class="s3">.</span><span class="s1">command_context </span><span class="s2">import </span><span class="s1">CommandContextMixIn</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">ssl </span><span class="s2">import </span><span class="s1">SSLContext</span>
+
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">network</span><span class="s3">.</span><span class="s1">session </span><span class="s2">import </span><span class="s1">PipSession</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">lru_cache</span>
+<span class="s2">def </span><span class="s1">_create_truststore_ssl_context</span><span class="s3">() </span><span class="s1">-&gt; SSLContext </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info </span><span class="s3">&lt; (</span><span class="s4">3</span><span class="s3">, </span><span class="s4">10</span><span class="s3">):</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;Disabling truststore because Python version isn't 3.10+&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">import </span><span class="s1">ssl</span>
+    <span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s5">&quot;Disabling truststore since ssl support is missing&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor </span><span class="s2">import </span><span class="s1">truststore</span>
+    <span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s5">&quot;Disabling truststore because platform isn't supported&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">ctx </span><span class="s3">= </span><span class="s1">truststore</span><span class="s3">.</span><span class="s1">SSLContext</span><span class="s3">(</span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">PROTOCOL_TLS_CLIENT</span><span class="s3">)</span>
+    <span class="s1">ctx</span><span class="s3">.</span><span class="s1">load_verify_locations</span><span class="s3">(</span><span class="s1">certifi</span><span class="s3">.</span><span class="s1">where</span><span class="s3">())</span>
+    <span class="s2">return </span><span class="s1">ctx</span>
+
+
+<span class="s2">class </span><span class="s1">SessionCommandMixin</span><span class="s3">(</span><span class="s1">CommandContextMixIn</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    A class mixin for command classes needing _build_session(). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_session</span><span class="s3">: </span><span class="s1">PipSession </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_get_index_urls</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">options</span><span class="s3">: </span><span class="s1">Values</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return a list of index urls from user-provided options.&quot;&quot;&quot;</span>
+        <span class="s1">index_urls </span><span class="s3">= []</span>
+        <span class="s2">if not </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">options</span><span class="s3">, </span><span class="s5">&quot;no_index&quot;</span><span class="s3">, </span><span class="s2">False</span><span class="s3">):</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">options</span><span class="s3">, </span><span class="s5">&quot;index_url&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">url</span><span class="s3">:</span>
+                <span class="s1">index_urls</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+        <span class="s1">urls </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">options</span><span class="s3">, </span><span class="s5">&quot;extra_index_urls&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">urls</span><span class="s3">:</span>
+            <span class="s1">index_urls</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">urls</span><span class="s3">)</span>
+        <span class="s6"># Return None rather than an empty list</span>
+        <span class="s2">return </span><span class="s1">index_urls </span><span class="s2">or None</span>
+
+    <span class="s2">def </span><span class="s1">get_default_session</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">options</span><span class="s3">: </span><span class="s1">Values</span><span class="s3">) </span><span class="s1">-&gt; PipSession</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Get a default-managed session.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_session </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_session </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">enter_context</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_build_session</span><span class="s3">(</span><span class="s1">options</span><span class="s3">))</span>
+            <span class="s6"># there's no type annotation on requests.Session, so it's</span>
+            <span class="s6"># automatically ContextManager[Any] and self._session becomes Any,</span>
+            <span class="s6"># then https://github.com/python/mypy/issues/7696 kicks in</span>
+            <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_session </span><span class="s2">is not None</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_session</span>
+
+    <span class="s2">def </span><span class="s1">_build_session</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">options</span><span class="s3">: </span><span class="s1">Values</span><span class="s3">,</span>
+        <span class="s1">retries</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; PipSession</span><span class="s3">:</span>
+        <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">network</span><span class="s3">.</span><span class="s1">session </span><span class="s2">import </span><span class="s1">PipSession</span>
+
+        <span class="s1">cache_dir </span><span class="s3">= </span><span class="s1">options</span><span class="s3">.</span><span class="s1">cache_dir</span>
+        <span class="s2">assert not </span><span class="s1">cache_dir </span><span class="s2">or </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isabs</span><span class="s3">(</span><span class="s1">cache_dir</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s5">&quot;legacy-certs&quot; </span><span class="s2">not in </span><span class="s1">options</span><span class="s3">.</span><span class="s1">deprecated_features_enabled</span><span class="s3">:</span>
+            <span class="s1">ssl_context </span><span class="s3">= </span><span class="s1">_create_truststore_ssl_context</span><span class="s3">()</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">ssl_context </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s1">session </span><span class="s3">= </span><span class="s1">PipSession</span><span class="s3">(</span>
+            <span class="s1">cache</span><span class="s3">=</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">cache_dir</span><span class="s3">, </span><span class="s5">&quot;http-v2&quot;</span><span class="s3">) </span><span class="s2">if </span><span class="s1">cache_dir </span><span class="s2">else None</span><span class="s3">,</span>
+            <span class="s1">retries</span><span class="s3">=</span><span class="s1">retries </span><span class="s2">if </span><span class="s1">retries </span><span class="s2">is not None else </span><span class="s1">options</span><span class="s3">.</span><span class="s1">retries</span><span class="s3">,</span>
+            <span class="s1">trusted_hosts</span><span class="s3">=</span><span class="s1">options</span><span class="s3">.</span><span class="s1">trusted_hosts</span><span class="s3">,</span>
+            <span class="s1">index_urls</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_index_urls</span><span class="s3">(</span><span class="s1">options</span><span class="s3">),</span>
+            <span class="s1">ssl_context</span><span class="s3">=</span><span class="s1">ssl_context</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+        <span class="s6"># Handle custom ca-bundles from the user</span>
+        <span class="s2">if </span><span class="s1">options</span><span class="s3">.</span><span class="s1">cert</span><span class="s3">:</span>
+            <span class="s1">session</span><span class="s3">.</span><span class="s1">verify </span><span class="s3">= </span><span class="s1">options</span><span class="s3">.</span><span class="s1">cert</span>
+
+        <span class="s6"># Handle SSL client certificate</span>
+        <span class="s2">if </span><span class="s1">options</span><span class="s3">.</span><span class="s1">client_cert</span><span class="s3">:</span>
+            <span class="s1">session</span><span class="s3">.</span><span class="s1">cert </span><span class="s3">= </span><span class="s1">options</span><span class="s3">.</span><span class="s1">client_cert</span>
+
+        <span class="s6"># Handle timeouts</span>
+        <span class="s2">if </span><span class="s1">options</span><span class="s3">.</span><span class="s1">timeout </span><span class="s2">or </span><span class="s1">timeout</span><span class="s3">:</span>
+            <span class="s1">session</span><span class="s3">.</span><span class="s1">timeout </span><span class="s3">= </span><span class="s1">timeout </span><span class="s2">if </span><span class="s1">timeout </span><span class="s2">is not None else </span><span class="s1">options</span><span class="s3">.</span><span class="s1">timeout</span>
+
+        <span class="s6"># Handle configured proxies</span>
+        <span class="s2">if </span><span class="s1">options</span><span class="s3">.</span><span class="s1">proxy</span><span class="s3">:</span>
+            <span class="s1">session</span><span class="s3">.</span><span class="s1">proxies </span><span class="s3">= {</span>
+                <span class="s5">&quot;http&quot;</span><span class="s3">: </span><span class="s1">options</span><span class="s3">.</span><span class="s1">proxy</span><span class="s3">,</span>
+                <span class="s5">&quot;https&quot;</span><span class="s3">: </span><span class="s1">options</span><span class="s3">.</span><span class="s1">proxy</span><span class="s3">,</span>
+            <span class="s3">}</span>
+            <span class="s1">session</span><span class="s3">.</span><span class="s1">trust_env </span><span class="s3">= </span><span class="s2">False</span>
+            <span class="s1">session</span><span class="s3">.</span><span class="s1">pip_proxy </span><span class="s3">= </span><span class="s1">options</span><span class="s3">.</span><span class="s1">proxy</span>
+
+        <span class="s6"># Determine if we can prompt the user for authentication or not</span>
+        <span class="s1">session</span><span class="s3">.</span><span class="s1">auth</span><span class="s3">.</span><span class="s1">prompting </span><span class="s3">= </span><span class="s2">not </span><span class="s1">options</span><span class="s3">.</span><span class="s1">no_input</span>
+        <span class="s1">session</span><span class="s3">.</span><span class="s1">auth</span><span class="s3">.</span><span class="s1">keyring_provider </span><span class="s3">= </span><span class="s1">options</span><span class="s3">.</span><span class="s1">keyring_provider</span>
+
+        <span class="s2">return </span><span class="s1">session</span>
+
+
+<span class="s2">def </span><span class="s1">_pip_self_version_check</span><span class="s3">(</span><span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">, </span><span class="s1">options</span><span class="s3">: </span><span class="s1">Values</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">self_outdated_check </span><span class="s2">import </span><span class="s1">pip_self_version_check </span><span class="s2">as </span><span class="s1">check</span>
+
+    <span class="s1">check</span><span class="s3">(</span><span class="s1">session</span><span class="s3">, </span><span class="s1">options</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">IndexGroupCommand</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">, </span><span class="s1">SessionCommandMixin</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Abstract base class for commands with the index_group options. 
+ 
+    This also corresponds to the commands that permit the pip version check. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">handle_pip_version_check</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">options</span><span class="s3">: </span><span class="s1">Values</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Do the pip version check if not disabled. 
+ 
+        This overrides the default behavior of not doing the check. 
+        &quot;&quot;&quot;</span>
+        <span class="s6"># Make sure the index_group options are present.</span>
+        <span class="s2">assert </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">options</span><span class="s3">, </span><span class="s5">&quot;no_index&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">options</span><span class="s3">.</span><span class="s1">disable_pip_version_check </span><span class="s2">or </span><span class="s1">options</span><span class="s3">.</span><span class="s1">no_index</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s6"># Otherwise, check if we're using the latest version of pip available.</span>
+            <span class="s1">session </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_build_session</span><span class="s3">(</span>
+                <span class="s1">options</span><span class="s3">,</span>
+                <span class="s1">retries</span><span class="s3">=</span><span class="s4">0</span><span class="s3">,</span>
+                <span class="s1">timeout</span><span class="s3">=</span><span class="s1">min</span><span class="s3">(</span><span class="s4">5</span><span class="s3">, </span><span class="s1">options</span><span class="s3">.</span><span class="s1">timeout</span><span class="s3">),</span>
+            <span class="s3">)</span>
+            <span class="s2">with </span><span class="s1">session</span><span class="s3">:</span>
+                <span class="s1">_pip_self_version_check</span><span class="s3">(</span><span class="s1">session</span><span class="s3">, </span><span class="s1">options</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s5">&quot;There was an error checking the latest version of pip.&quot;</span><span class="s3">)</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;See below for error&quot;</span><span class="s3">, </span><span class="s1">exc_info</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,263 @@
+<html>
+<head>
+<title>_asyncgens.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_asyncgens.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+<span class="s0">import </span><span class="s1">weakref</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">, </span><span class="s1">TypeVar</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">name_asyncgen</span>
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">_run</span>
+
+<span class="s3"># Used to log exceptions in async generator finalizers</span>
+<span class="s1">ASYNCGEN_LOGGER </span><span class="s2">= </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">getLogger</span><span class="s2">(</span><span class="s4">&quot;trio.async_generator_errors&quot;</span><span class="s2">)</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span>
+    <span class="s0">from </span><span class="s1">types </span><span class="s0">import </span><span class="s1">AsyncGeneratorType</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">ParamSpec</span>
+
+    <span class="s1">_P </span><span class="s2">= </span><span class="s1">ParamSpec</span><span class="s2">(</span><span class="s4">&quot;_P&quot;</span><span class="s2">)</span>
+
+    <span class="s1">_WEAK_ASYNC_GEN_SET </span><span class="s2">= </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">WeakSet</span><span class="s2">[</span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">]]</span>
+    <span class="s1">_ASYNC_GEN_SET </span><span class="s2">= </span><span class="s1">set</span><span class="s2">[</span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">]]</span>
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s1">_WEAK_ASYNC_GEN_SET </span><span class="s2">= </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">WeakSet</span>
+    <span class="s1">_ASYNC_GEN_SET </span><span class="s2">= </span><span class="s1">set</span>
+
+<span class="s1">_R </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;_R&quot;</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+<span class="s0">def </span><span class="s1">_call_without_ki_protection</span><span class="s2">(</span>
+    <span class="s1">f</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">_P</span><span class="s2">, </span><span class="s1">_R</span><span class="s2">],</span>
+    <span class="s2">/,</span>
+    <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">_P</span><span class="s2">.</span><span class="s1">args</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">_P</span><span class="s2">.</span><span class="s1">kwargs</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; _R</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">f</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">AsyncGenerators</span><span class="s2">:</span>
+    <span class="s3"># Async generators are added to this set when first iterated. Any</span>
+    <span class="s3"># left after the main task exits will be closed before trio.run()</span>
+    <span class="s3"># returns.  During most of the run, this is a WeakSet so GC works.</span>
+    <span class="s3"># During shutdown, when we're finalizing all the remaining</span>
+    <span class="s3"># asyncgens after the system nursery has been closed, it's a</span>
+    <span class="s3"># regular set so we don't have to deal with GC firing at</span>
+    <span class="s3"># unexpected times.</span>
+    <span class="s1">alive</span><span class="s2">: </span><span class="s1">_WEAK_ASYNC_GEN_SET </span><span class="s2">| </span><span class="s1">_ASYNC_GEN_SET </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">_WEAK_ASYNC_GEN_SET</span><span class="s2">)</span>
+    <span class="s3"># The ids of foreign async generators are added to this set when first</span>
+    <span class="s3"># iterated. Usually it is not safe to refer to ids like this, but because</span>
+    <span class="s3"># we're using a finalizer we can ensure ids in this set do not outlive</span>
+    <span class="s3"># their async generator.</span>
+    <span class="s1">foreign</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">int</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">set</span><span class="s2">)</span>
+
+    <span class="s3"># This collects async generators that get garbage collected during</span>
+    <span class="s3"># the one-tick window between the system nursery closing and the</span>
+    <span class="s3"># init task starting end-of-run asyncgen finalization.</span>
+    <span class="s1">trailing_needs_finalize</span><span class="s2">: </span><span class="s1">_ASYNC_GEN_SET </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">_ASYNC_GEN_SET</span><span class="s2">)</span>
+
+    <span class="s1">prev_hooks</span><span class="s2">: </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">_asyncgen_hooks </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">field</span><span class="s2">(</span><span class="s1">init</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">install_hooks</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">runner</span><span class="s2">: </span><span class="s1">_run</span><span class="s2">.</span><span class="s1">Runner</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">firstiter</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">: </span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">GLOBAL_RUN_CONTEXT</span><span class="s2">, </span><span class="s4">&quot;task&quot;</span><span class="s2">):</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">alive</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># An async generator first iterated outside of a Trio</span>
+                <span class="s3"># task doesn't belong to Trio. Probably we're in guest</span>
+                <span class="s3"># mode and the async generator belongs to our host.</span>
+                <span class="s3"># A strong set of ids is one of the only good places to</span>
+                <span class="s3"># remember this fact, at least until</span>
+                <span class="s3"># https://github.com/python/cpython/issues/85093 is implemented.</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">foreign</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">id</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">))</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">prev_hooks</span><span class="s2">.</span><span class="s1">firstiter </span><span class="s0">is not None</span><span class="s2">:</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">prev_hooks</span><span class="s2">.</span><span class="s1">firstiter</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">finalize_in_trio_context</span><span class="s2">(</span>
+            <span class="s1">agen</span><span class="s2">: </span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">],</span>
+            <span class="s1">agen_name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">runner</span><span class="s2">.</span><span class="s1">spawn_system_task</span><span class="s2">(</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_finalize_one</span><span class="s2">,</span>
+                    <span class="s1">agen</span><span class="s2">,</span>
+                    <span class="s1">agen_name</span><span class="s2">,</span>
+                    <span class="s1">name</span><span class="s2">=</span><span class="s4">f&quot;close asyncgen </span><span class="s0">{</span><span class="s1">agen_name</span><span class="s0">} </span><span class="s4">(abandoned)&quot;</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">RuntimeError</span><span class="s2">:</span>
+                <span class="s3"># There is a one-tick window where the system nursery</span>
+                <span class="s3"># is closed but the init task hasn't yet made</span>
+                <span class="s3"># self.asyncgens a strong set to disable GC. We seem to</span>
+                <span class="s3"># have hit it.</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">trailing_needs_finalize</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">)</span>
+
+        <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+        <span class="s0">def </span><span class="s1">finalizer</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">: </span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">foreign</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">id</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">))</span>
+            <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+                <span class="s1">is_ours </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">is_ours </span><span class="s2">= </span><span class="s0">False</span>
+
+            <span class="s1">agen_name </span><span class="s2">= </span><span class="s1">name_asyncgen</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">is_ours</span><span class="s2">:</span>
+                <span class="s1">runner</span><span class="s2">.</span><span class="s1">entry_queue</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span>
+                    <span class="s1">finalize_in_trio_context</span><span class="s2">,</span>
+                    <span class="s1">agen</span><span class="s2">,</span>
+                    <span class="s1">agen_name</span><span class="s2">,</span>
+                <span class="s2">)</span>
+
+                <span class="s3"># Do this last, because it might raise an exception</span>
+                <span class="s3"># depending on the user's warnings filter. (That</span>
+                <span class="s3"># exception will be printed to the terminal and</span>
+                <span class="s3"># ignored, since we're running in GC context.)</span>
+                <span class="s1">warnings</span><span class="s2">.</span><span class="s1">warn</span><span class="s2">(</span>
+                    <span class="s4">f&quot;Async generator </span><span class="s0">{</span><span class="s1">agen_name</span><span class="s0">!r} </span><span class="s4">was garbage collected before it &quot;</span>
+                    <span class="s4">&quot;had been exhausted. Surround its use in 'async with &quot;</span>
+                    <span class="s4">&quot;aclosing(...):' to ensure that it gets cleaned up as soon as &quot;</span>
+                    <span class="s4">&quot;you're done using it.&quot;</span><span class="s2">,</span>
+                    <span class="s1">ResourceWarning</span><span class="s2">,</span>
+                    <span class="s1">stacklevel</span><span class="s2">=</span><span class="s5">2</span><span class="s2">,</span>
+                    <span class="s1">source</span><span class="s2">=</span><span class="s1">agen</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># Not ours -&gt; forward to the host loop's async generator finalizer</span>
+                <span class="s1">finalizer </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">prev_hooks</span><span class="s2">.</span><span class="s1">finalizer</span>
+                <span class="s0">if </span><span class="s1">finalizer </span><span class="s0">is not None</span><span class="s2">:</span>
+                    <span class="s1">_call_without_ki_protection</span><span class="s2">(</span><span class="s1">finalizer</span><span class="s2">, </span><span class="s1">agen</span><span class="s2">)</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s3"># Host has no finalizer.  Reimplement the default</span>
+                    <span class="s3"># Python behavior with no hooks installed: throw in</span>
+                    <span class="s3"># GeneratorExit, step once, raise RuntimeError if</span>
+                    <span class="s3"># it doesn't exit.</span>
+                    <span class="s1">closer </span><span class="s2">= </span><span class="s1">agen</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+                    <span class="s0">try</span><span class="s2">:</span>
+                        <span class="s3"># If the next thing is a yield, this will raise RuntimeError</span>
+                        <span class="s3"># which we allow to propagate</span>
+                        <span class="s1">_call_without_ki_protection</span><span class="s2">(</span><span class="s1">closer</span><span class="s2">.</span><span class="s1">send</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+                    <span class="s0">except </span><span class="s1">StopIteration</span><span class="s2">:</span>
+                        <span class="s0">pass</span>
+                    <span class="s0">else</span><span class="s2">:</span>
+                        <span class="s3"># If the next thing is an await, we get here. Give a nicer</span>
+                        <span class="s3"># error than the default &quot;async generator ignored GeneratorExit&quot;</span>
+                        <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                            <span class="s4">f&quot;Non-Trio async generator </span><span class="s0">{</span><span class="s1">agen_name</span><span class="s0">!r} </span><span class="s4">awaited something &quot;</span>
+                            <span class="s4">&quot;during finalization; install a finalization hook to &quot;</span>
+                            <span class="s4">&quot;support this, or wrap it in 'async with aclosing(...):'&quot;</span><span class="s2">,</span>
+                        <span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">prev_hooks </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">get_asyncgen_hooks</span><span class="s2">()</span>
+        <span class="s1">sys</span><span class="s2">.</span><span class="s1">set_asyncgen_hooks</span><span class="s2">(</span><span class="s1">firstiter</span><span class="s2">=</span><span class="s1">firstiter</span><span class="s2">, </span><span class="s1">finalizer</span><span class="s2">=</span><span class="s1">finalizer</span><span class="s2">)  </span><span class="s3"># type: ignore[arg-type]  # Finalizer doesn't use AsyncGeneratorType</span>
+
+    <span class="s0">async def </span><span class="s1">finalize_remaining</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">runner</span><span class="s2">: </span><span class="s1">_run</span><span class="s2">.</span><span class="s1">Runner</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># This is called from init after shutting down the system nursery.</span>
+        <span class="s3"># The only tasks running at this point are init and</span>
+        <span class="s3"># the run_sync_soon task, and since the system nursery is closed,</span>
+        <span class="s3"># there's no way for user code to spawn more.</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">() </span><span class="s0">is </span><span class="s1">runner</span><span class="s2">.</span><span class="s1">init_task</span>
+        <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">runner</span><span class="s2">.</span><span class="s1">tasks</span><span class="s2">) == </span><span class="s5">2</span>
+
+        <span class="s3"># To make async generator finalization easier to reason</span>
+        <span class="s3"># about, we'll shut down asyncgen garbage collection by turning</span>
+        <span class="s3"># the alive WeakSet into a regular set.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">alive </span><span class="s2">= </span><span class="s1">set</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">alive</span><span class="s2">)</span>
+
+        <span class="s3"># Process all pending run_sync_soon callbacks, in case one of</span>
+        <span class="s3"># them was an asyncgen finalizer that snuck in under the wire.</span>
+        <span class="s1">runner</span><span class="s2">.</span><span class="s1">entry_queue</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span><span class="s1">runner</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">, </span><span class="s1">runner</span><span class="s2">.</span><span class="s1">init_task</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span>
+            <span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">FAILED</span><span class="s2">,  </span><span class="s3"># pragma: no cover</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">alive</span><span class="s2">.</span><span class="s1">update</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">trailing_needs_finalize</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">trailing_needs_finalize</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+
+        <span class="s3"># None of the still-living tasks use async generators, so</span>
+        <span class="s3"># every async generator must be suspended at a yield point --</span>
+        <span class="s3"># there's no one to be doing the iteration. That's good,</span>
+        <span class="s3"># because aclose() only works on an asyncgen that's suspended</span>
+        <span class="s3"># at a yield point.  (If it's suspended at an event loop trap,</span>
+        <span class="s3"># because someone is in the middle of iterating it, then you</span>
+        <span class="s3"># get a RuntimeError on 3.8+, and a nasty surprise on earlier</span>
+        <span class="s3"># versions due to https://bugs.python.org/issue32526.)</span>
+        <span class="s3">#</span>
+        <span class="s3"># However, once we start aclose() of one async generator, it</span>
+        <span class="s3"># might start fetching the next value from another, thus</span>
+        <span class="s3"># preventing us from closing that other (at least until</span>
+        <span class="s3"># aclose() of the first one is complete).  This constraint</span>
+        <span class="s3"># effectively requires us to finalize the remaining asyncgens</span>
+        <span class="s3"># in arbitrary order, rather than doing all of them at the</span>
+        <span class="s3"># same time. On 3.8+ we could defer any generator with</span>
+        <span class="s3"># ag_running=True to a later batch, but that only catches</span>
+        <span class="s3"># the case where our aclose() starts after the user's</span>
+        <span class="s3"># asend()/etc. If our aclose() starts first, then the</span>
+        <span class="s3"># user's asend()/etc will raise RuntimeError, since they're</span>
+        <span class="s3"># probably not checking ag_running.</span>
+        <span class="s3">#</span>
+        <span class="s3"># It might be possible to allow some parallelized cleanup if</span>
+        <span class="s3"># we can determine that a certain set of asyncgens have no</span>
+        <span class="s3"># interdependencies, using gc.get_referents() and such.</span>
+        <span class="s3"># But just doing one at a time will typically work well enough</span>
+        <span class="s3"># (since each aclose() executes in a cancelled scope) and</span>
+        <span class="s3"># is much easier to reason about.</span>
+
+        <span class="s3"># It's possible that that cleanup code will itself create</span>
+        <span class="s3"># more async generators, so we iterate repeatedly until</span>
+        <span class="s3"># all are gone.</span>
+        <span class="s0">while </span><span class="s1">self</span><span class="s2">.</span><span class="s1">alive</span><span class="s2">:</span>
+            <span class="s1">batch </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">alive</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">alive </span><span class="s2">= </span><span class="s1">_ASYNC_GEN_SET</span><span class="s2">()</span>
+            <span class="s0">for </span><span class="s1">agen </span><span class="s0">in </span><span class="s1">batch</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finalize_one</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">, </span><span class="s1">name_asyncgen</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">sys</span><span class="s2">.</span><span class="s1">set_asyncgen_hooks</span><span class="s2">(*</span><span class="s1">self</span><span class="s2">.</span><span class="s1">prev_hooks</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">_finalize_one</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">agen</span><span class="s2">: </span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">],</span>
+        <span class="s1">name</span><span class="s2">: </span><span class="s1">object</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s3"># This shield ensures that finalize_asyncgen never exits</span>
+            <span class="s3"># with an exception, not even a Cancelled. The inside</span>
+            <span class="s3"># is cancelled so there's no deadlock risk.</span>
+            <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">(</span><span class="s1">shield</span><span class="s2">=</span><span class="s0">True</span><span class="s2">) </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+                <span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+                <span class="s0">await </span><span class="s1">agen</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">BaseException</span><span class="s2">:</span>
+            <span class="s1">ASYNCGEN_LOGGER</span><span class="s2">.</span><span class="s1">exception</span><span class="s2">(</span>
+                <span class="s4">&quot;Exception ignored during finalization of async generator %r -- &quot;</span>
+                <span class="s4">&quot;surround your use of the generator in 'async with aclosing(...):' &quot;</span>
+                <span class="s4">&quot;to raise exceptions like this in the context where they're generated&quot;</span><span class="s2">,</span>
+                <span class="s1">name</span><span class="s2">,</span>
+            <span class="s2">)</span>
+</pre>
+</body>
+</html>

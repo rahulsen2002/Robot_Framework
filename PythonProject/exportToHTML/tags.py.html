@@ -1,0 +1,640 @@
+<html>
+<head>
+<title>tags.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tags.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># This file is dual licensed under the terms of the Apache License, Version</span>
+<span class="s0"># 2.0, and the BSD License. See the LICENSE file in the root of this repository</span>
+<span class="s0"># for complete details.</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">platform</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">struct</span>
+<span class="s2">import </span><span class="s1">subprocess</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">sysconfig</span>
+<span class="s2">from </span><span class="s1">importlib</span><span class="s3">.</span><span class="s1">machinery </span><span class="s2">import </span><span class="s1">EXTENSION_SUFFIXES</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">Iterable</span><span class="s3">,</span>
+    <span class="s1">Iterator</span><span class="s3">,</span>
+    <span class="s1">Sequence</span><span class="s3">,</span>
+    <span class="s1">Tuple</span><span class="s3">,</span>
+    <span class="s1">cast</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">_manylinux</span><span class="s3">, </span><span class="s1">_musllinux</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+<span class="s1">PythonVersion </span><span class="s3">= </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">int</span><span class="s3">]</span>
+<span class="s1">AppleVersion </span><span class="s3">= </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">]</span>
+
+<span class="s1">INTERPRETER_SHORT_NAMES</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = {</span>
+    <span class="s4">&quot;python&quot;</span><span class="s3">: </span><span class="s4">&quot;py&quot;</span><span class="s3">,  </span><span class="s0"># Generic.</span>
+    <span class="s4">&quot;cpython&quot;</span><span class="s3">: </span><span class="s4">&quot;cp&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;pypy&quot;</span><span class="s3">: </span><span class="s4">&quot;pp&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;ironpython&quot;</span><span class="s3">: </span><span class="s4">&quot;ip&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;jython&quot;</span><span class="s3">: </span><span class="s4">&quot;jy&quot;</span><span class="s3">,</span>
+<span class="s3">}</span>
+
+
+<span class="s1">_32_BIT_INTERPRETER </span><span class="s3">= </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">calcsize</span><span class="s3">(</span><span class="s4">&quot;P&quot;</span><span class="s3">) == </span><span class="s5">4</span>
+
+
+<span class="s2">class </span><span class="s1">Tag</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    A representation of the tag triple for a wheel. 
+ 
+    Instances are considered immutable and thus are hashable. Equality checking 
+    is also supported. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s3">= [</span><span class="s4">&quot;_abi&quot;</span><span class="s3">, </span><span class="s4">&quot;_hash&quot;</span><span class="s3">, </span><span class="s4">&quot;_interpreter&quot;</span><span class="s3">, </span><span class="s4">&quot;_platform&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">interpreter</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">abi</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">platform</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_interpreter </span><span class="s3">= </span><span class="s1">interpreter</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_abi </span><span class="s3">= </span><span class="s1">abi</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_platform </span><span class="s3">= </span><span class="s1">platform</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+        <span class="s0"># The __hash__ of every single element in a Set[Tag] will be evaluated each time</span>
+        <span class="s0"># that a set calls its `.disjoint()` method, which may be called hundreds of</span>
+        <span class="s0"># times when scanning a page of links for packages with tags matching that</span>
+        <span class="s0"># Set[Tag]. Pre-computing the value here produces significant speedups for</span>
+        <span class="s0"># downstream consumers.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_hash </span><span class="s3">= </span><span class="s1">hash</span><span class="s3">((</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_interpreter</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_abi</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_platform</span><span class="s3">))</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">interpreter</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_interpreter</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">abi</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_abi</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">platform</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_platform</span>
+
+    <span class="s2">def </span><span class="s1">__eq__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">other</span><span class="s3">: </span><span class="s1">object</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">other</span><span class="s3">, </span><span class="s1">Tag</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s2">return </span><span class="s3">(</span>
+            <span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_hash </span><span class="s3">== </span><span class="s1">other</span><span class="s3">.</span><span class="s1">_hash</span><span class="s3">)  </span><span class="s0"># Short-circuit ASAP for perf reasons.</span>
+            <span class="s2">and </span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_platform </span><span class="s3">== </span><span class="s1">other</span><span class="s3">.</span><span class="s1">_platform</span><span class="s3">)</span>
+            <span class="s2">and </span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_abi </span><span class="s3">== </span><span class="s1">other</span><span class="s3">.</span><span class="s1">_abi</span><span class="s3">)</span>
+            <span class="s2">and </span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_interpreter </span><span class="s3">== </span><span class="s1">other</span><span class="s3">.</span><span class="s1">_interpreter</span><span class="s3">)</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__hash__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_hash</span>
+
+    <span class="s2">def </span><span class="s1">__str__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_interpreter</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_abi</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_platform</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__repr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s4">f&quot;&lt;</span><span class="s2">{</span><span class="s1">self</span><span class="s2">} </span><span class="s4">@ </span><span class="s2">{</span><span class="s1">id</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span><span class="s2">}</span><span class="s4">&gt;&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">parse_tag</span><span class="s3">(</span><span class="s1">tag</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; frozenset</span><span class="s3">[</span><span class="s1">Tag</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Parses the provided tag (e.g. `py3-none-any`) into a frozenset of Tag instances. 
+ 
+    Returning a set is required due to the possibility that the tag is a 
+    compressed tag set. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">tags </span><span class="s3">= </span><span class="s1">set</span><span class="s3">()</span>
+    <span class="s1">interpreters</span><span class="s3">, </span><span class="s1">abis</span><span class="s3">, </span><span class="s1">platforms </span><span class="s3">= </span><span class="s1">tag</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">interpreter </span><span class="s2">in </span><span class="s1">interpreters</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">abi </span><span class="s2">in </span><span class="s1">abis</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">):</span>
+            <span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">):</span>
+                <span class="s1">tags</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s1">abi</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">))</span>
+    <span class="s2">return </span><span class="s1">frozenset</span><span class="s3">(</span><span class="s1">tags</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; int </span><span class="s3">| </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s1">value</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_config_var</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">value </span><span class="s2">is None and </span><span class="s1">warn</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span>
+            <span class="s4">&quot;Config variable '%s' is unset, Python ABI tag may be incorrect&quot;</span><span class="s3">, </span><span class="s1">name</span>
+        <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">value</span>
+
+
+<span class="s2">def </span><span class="s1">_normalize_string</span><span class="s3">(</span><span class="s1">string</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s1">string</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">, </span><span class="s4">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">, </span><span class="s4">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">&quot; &quot;</span><span class="s3">, </span><span class="s4">&quot;_&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_is_threaded_cpython</span><span class="s3">(</span><span class="s1">abis</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Determine if the ABI corresponds to a threaded (`--disable-gil`) build. 
+ 
+    The threaded builds are indicated by a &quot;t&quot; in the abiflags. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">abis</span><span class="s3">) == </span><span class="s5">0</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s0"># expect e.g., cp313</span>
+    <span class="s1">m </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s4">r&quot;cp\d+(.*)&quot;</span><span class="s3">, </span><span class="s1">abis</span><span class="s3">[</span><span class="s5">0</span><span class="s3">])</span>
+    <span class="s2">if not </span><span class="s1">m</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s1">abiflags </span><span class="s3">= </span><span class="s1">m</span><span class="s3">.</span><span class="s1">group</span><span class="s3">(</span><span class="s5">1</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s4">&quot;t&quot; </span><span class="s2">in </span><span class="s1">abiflags</span>
+
+
+<span class="s2">def </span><span class="s1">_abi3_applies</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">: </span><span class="s1">PythonVersion</span><span class="s3">, </span><span class="s1">threading</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Determine if the Python version supports abi3. 
+ 
+    PEP 384 was first implemented in Python 3.2. The threaded (`--disable-gil`) 
+    builds do not support abi3. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">len</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">) &gt; </span><span class="s5">1 </span><span class="s2">and </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">) &gt;= (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">2</span><span class="s3">) </span><span class="s2">and not </span><span class="s1">threading</span>
+
+
+<span class="s2">def </span><span class="s1">_cpython_abis</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">: </span><span class="s1">PythonVersion</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">py_version </span><span class="s3">= </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">)  </span><span class="s0"># To allow for version comparison.</span>
+    <span class="s1">abis </span><span class="s3">= []</span>
+    <span class="s1">version </span><span class="s3">= </span><span class="s1">_version_nodot</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">])</span>
+    <span class="s1">threading </span><span class="s3">= </span><span class="s1">debug </span><span class="s3">= </span><span class="s1">pymalloc </span><span class="s3">= </span><span class="s1">ucs4 </span><span class="s3">= </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">with_debug </span><span class="s3">= </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s4">&quot;Py_DEBUG&quot;</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">)</span>
+    <span class="s1">has_refcount </span><span class="s3">= </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">, </span><span class="s4">&quot;gettotalrefcount&quot;</span><span class="s3">)</span>
+    <span class="s0"># Windows doesn't set Py_DEBUG, so checking for support of debug-compiled</span>
+    <span class="s0"># extension modules is the best option.</span>
+    <span class="s0"># https://github.com/pypa/pip/issues/3383#issuecomment-173267692</span>
+    <span class="s1">has_ext </span><span class="s3">= </span><span class="s4">&quot;_d.pyd&quot; </span><span class="s2">in </span><span class="s1">EXTENSION_SUFFIXES</span>
+    <span class="s2">if </span><span class="s1">with_debug </span><span class="s2">or </span><span class="s3">(</span><span class="s1">with_debug </span><span class="s2">is None and </span><span class="s3">(</span><span class="s1">has_refcount </span><span class="s2">or </span><span class="s1">has_ext</span><span class="s3">)):</span>
+        <span class="s1">debug </span><span class="s3">= </span><span class="s4">&quot;d&quot;</span>
+    <span class="s2">if </span><span class="s1">py_version </span><span class="s3">&gt;= (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">13</span><span class="s3">) </span><span class="s2">and </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s4">&quot;Py_GIL_DISABLED&quot;</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">):</span>
+        <span class="s1">threading </span><span class="s3">= </span><span class="s4">&quot;t&quot;</span>
+    <span class="s2">if </span><span class="s1">py_version </span><span class="s3">&lt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">8</span><span class="s3">):</span>
+        <span class="s1">with_pymalloc </span><span class="s3">= </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s4">&quot;WITH_PYMALLOC&quot;</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">with_pymalloc </span><span class="s2">or </span><span class="s1">with_pymalloc </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">pymalloc </span><span class="s3">= </span><span class="s4">&quot;m&quot;</span>
+        <span class="s2">if </span><span class="s1">py_version </span><span class="s3">&lt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">3</span><span class="s3">):</span>
+            <span class="s1">unicode_size </span><span class="s3">= </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s4">&quot;Py_UNICODE_SIZE&quot;</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">unicode_size </span><span class="s3">== </span><span class="s5">4 </span><span class="s2">or </span><span class="s3">(</span>
+                <span class="s1">unicode_size </span><span class="s2">is None and </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">maxunicode </span><span class="s3">== </span><span class="s5">0x10FFFF</span>
+            <span class="s3">):</span>
+                <span class="s1">ucs4 </span><span class="s3">= </span><span class="s4">&quot;u&quot;</span>
+    <span class="s2">elif </span><span class="s1">debug</span><span class="s3">:</span>
+        <span class="s0"># Debug builds can also load &quot;normal&quot; extension modules.</span>
+        <span class="s0"># We can also assume no UCS-4 or pymalloc requirement.</span>
+        <span class="s1">abis</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">f&quot;cp</span><span class="s2">{</span><span class="s1">version</span><span class="s2">}{</span><span class="s1">threading</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+    <span class="s1">abis</span><span class="s3">.</span><span class="s1">insert</span><span class="s3">(</span><span class="s5">0</span><span class="s3">, </span><span class="s4">f&quot;cp</span><span class="s2">{</span><span class="s1">version</span><span class="s2">}{</span><span class="s1">threading</span><span class="s2">}{</span><span class="s1">debug</span><span class="s2">}{</span><span class="s1">pymalloc</span><span class="s2">}{</span><span class="s1">ucs4</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">abis</span>
+
+
+<span class="s2">def </span><span class="s1">cpython_tags</span><span class="s3">(</span>
+    <span class="s1">python_version</span><span class="s3">: </span><span class="s1">PythonVersion </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">abis</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">platforms</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">*,</span>
+    <span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">Tag</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Yields the tags for a CPython interpreter. 
+ 
+    The tags consist of: 
+    - cp&lt;python_version&gt;-&lt;abi&gt;-&lt;platform&gt; 
+    - cp&lt;python_version&gt;-abi3-&lt;platform&gt; 
+    - cp&lt;python_version&gt;-none-&lt;platform&gt; 
+    - cp&lt;less than python_version&gt;-abi3-&lt;platform&gt;  # Older Python versions down to 3.2. 
+ 
+    If python_version only specifies a major version then user-provided ABIs and 
+    the 'none' ABItag will be used. 
+ 
+    If 'abi3' or 'none' are specified in 'abis' then they will be yielded at 
+    their normal position and not at the beginning. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">python_version</span><span class="s3">:</span>
+        <span class="s1">python_version </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">]</span>
+
+    <span class="s1">interpreter </span><span class="s3">= </span><span class="s4">f&quot;cp</span><span class="s2">{</span><span class="s1">_version_nodot</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">])</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+    <span class="s2">if </span><span class="s1">abis </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">) &gt; </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s1">abis </span><span class="s3">= </span><span class="s1">_cpython_abis</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">abis </span><span class="s3">= []</span>
+    <span class="s1">abis </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">abis</span><span class="s3">)</span>
+    <span class="s0"># 'abi3' and 'none' are explicitly handled later.</span>
+    <span class="s2">for </span><span class="s1">explicit_abi </span><span class="s2">in </span><span class="s3">(</span><span class="s4">&quot;abi3&quot;</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">abis</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">explicit_abi</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+            <span class="s2">pass</span>
+
+    <span class="s1">platforms </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">platforms </span><span class="s2">or </span><span class="s1">platform_tags</span><span class="s3">())</span>
+    <span class="s2">for </span><span class="s1">abi </span><span class="s2">in </span><span class="s1">abis</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s1">abi</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">)</span>
+
+    <span class="s1">threading </span><span class="s3">= </span><span class="s1">_is_threaded_cpython</span><span class="s3">(</span><span class="s1">abis</span><span class="s3">)</span>
+    <span class="s1">use_abi3 </span><span class="s3">= </span><span class="s1">_abi3_applies</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">, </span><span class="s1">threading</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">use_abi3</span><span class="s3">:</span>
+        <span class="s2">yield from </span><span class="s3">(</span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s4">&quot;abi3&quot;</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">) </span><span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">)</span>
+    <span class="s2">yield from </span><span class="s3">(</span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">) </span><span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">use_abi3</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">minor_version </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">[</span><span class="s5">1</span><span class="s3">] - </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">:</span>
+                <span class="s1">version </span><span class="s3">= </span><span class="s1">_version_nodot</span><span class="s3">((</span><span class="s1">python_version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s1">minor_version</span><span class="s3">))</span>
+                <span class="s1">interpreter </span><span class="s3">= </span><span class="s4">f&quot;cp</span><span class="s2">{</span><span class="s1">version</span><span class="s2">}</span><span class="s4">&quot;</span>
+                <span class="s2">yield </span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s4">&quot;abi3&quot;</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_generic_abi</span><span class="s3">() </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Return the ABI tag based on EXT_SUFFIX. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># The following are examples of `EXT_SUFFIX`.</span>
+    <span class="s0"># We want to keep the parts which are related to the ABI and remove the</span>
+    <span class="s0"># parts which are related to the platform:</span>
+    <span class="s0"># - linux:   '.cpython-310-x86_64-linux-gnu.so' =&gt; cp310</span>
+    <span class="s0"># - mac:     '.cpython-310-darwin.so'           =&gt; cp310</span>
+    <span class="s0"># - win:     '.cp310-win_amd64.pyd'             =&gt; cp310</span>
+    <span class="s0"># - win:     '.pyd'                             =&gt; cp37 (uses _cpython_abis())</span>
+    <span class="s0"># - pypy:    '.pypy38-pp73-x86_64-linux-gnu.so' =&gt; pypy38_pp73</span>
+    <span class="s0"># - graalpy: '.graalpy-38-native-x86_64-darwin.dylib'</span>
+    <span class="s0">#                                               =&gt; graalpy_38_native</span>
+
+    <span class="s1">ext_suffix </span><span class="s3">= </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s4">&quot;EXT_SUFFIX&quot;</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">ext_suffix</span><span class="s3">, </span><span class="s1">str</span><span class="s3">) </span><span class="s2">or </span><span class="s1">ext_suffix</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] != </span><span class="s4">&quot;.&quot;</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">SystemError</span><span class="s3">(</span><span class="s4">&quot;invalid sysconfig.get_config_var('EXT_SUFFIX')&quot;</span><span class="s3">)</span>
+    <span class="s1">parts </span><span class="s3">= </span><span class="s1">ext_suffix</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">parts</span><span class="s3">) &lt; </span><span class="s5">3</span><span class="s3">:</span>
+        <span class="s0"># CPython3.7 and earlier uses &quot;.pyd&quot; on Windows.</span>
+        <span class="s2">return </span><span class="s1">_cpython_abis</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">])</span>
+    <span class="s1">soabi </span><span class="s3">= </span><span class="s1">parts</span><span class="s3">[</span><span class="s5">1</span><span class="s3">]</span>
+    <span class="s2">if </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;cpython&quot;</span><span class="s3">):</span>
+        <span class="s0"># non-windows</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s4">&quot;cp&quot; </span><span class="s3">+ </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">)[</span><span class="s5">1</span><span class="s3">]</span>
+    <span class="s2">elif </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;cp&quot;</span><span class="s3">):</span>
+        <span class="s0"># windows</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">)[</span><span class="s5">0</span><span class="s3">]</span>
+    <span class="s2">elif </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;pypy&quot;</span><span class="s3">):</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s4">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">)[:</span><span class="s5">2</span><span class="s3">])</span>
+    <span class="s2">elif </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;graalpy&quot;</span><span class="s3">):</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s4">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">)[:</span><span class="s5">3</span><span class="s3">])</span>
+    <span class="s2">elif </span><span class="s1">soabi</span><span class="s3">:</span>
+        <span class="s0"># pyston, ironpython, others?</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s1">soabi</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+    <span class="s2">return </span><span class="s3">[</span><span class="s1">_normalize_string</span><span class="s3">(</span><span class="s1">abi</span><span class="s3">)]</span>
+
+
+<span class="s2">def </span><span class="s1">generic_tags</span><span class="s3">(</span>
+    <span class="s1">interpreter</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">abis</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">platforms</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">*,</span>
+    <span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">Tag</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Yields the tags for a generic interpreter. 
+ 
+    The tags consist of: 
+    - &lt;interpreter&gt;-&lt;abi&gt;-&lt;platform&gt; 
+ 
+    The &quot;none&quot; ABI will be added if it was not explicitly provided. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">interpreter</span><span class="s3">:</span>
+        <span class="s1">interp_name </span><span class="s3">= </span><span class="s1">interpreter_name</span><span class="s3">()</span>
+        <span class="s1">interp_version </span><span class="s3">= </span><span class="s1">interpreter_version</span><span class="s3">(</span><span class="s1">warn</span><span class="s3">=</span><span class="s1">warn</span><span class="s3">)</span>
+        <span class="s1">interpreter </span><span class="s3">= </span><span class="s4">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">([</span><span class="s1">interp_name</span><span class="s3">, </span><span class="s1">interp_version</span><span class="s3">])</span>
+    <span class="s2">if </span><span class="s1">abis </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">abis </span><span class="s3">= </span><span class="s1">_generic_abi</span><span class="s3">()</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">abis </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">abis</span><span class="s3">)</span>
+    <span class="s1">platforms </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">platforms </span><span class="s2">or </span><span class="s1">platform_tags</span><span class="s3">())</span>
+    <span class="s2">if </span><span class="s4">&quot;none&quot; </span><span class="s2">not in </span><span class="s1">abis</span><span class="s3">:</span>
+        <span class="s1">abis</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;none&quot;</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">abi </span><span class="s2">in </span><span class="s1">abis</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s1">abi</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_py_interpreter_range</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">: </span><span class="s1">PythonVersion</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Yields Python versions in descending order. 
+ 
+    After the latest version, the major-only version will be yielded, and then 
+    all previous versions of that major version. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">) &gt; </span><span class="s5">1</span><span class="s3">:</span>
+        <span class="s2">yield </span><span class="s4">f&quot;py</span><span class="s2">{</span><span class="s1">_version_nodot</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">])</span><span class="s2">}</span><span class="s4">&quot;</span>
+    <span class="s2">yield </span><span class="s4">f&quot;py</span><span class="s2">{</span><span class="s1">py_version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">]</span><span class="s2">}</span><span class="s4">&quot;</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">) &gt; </span><span class="s5">1</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">minor </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">py_version</span><span class="s3">[</span><span class="s5">1</span><span class="s3">] - </span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s2">yield </span><span class="s4">f&quot;py</span><span class="s2">{</span><span class="s1">_version_nodot</span><span class="s3">((</span><span class="s1">py_version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s1">minor</span><span class="s3">))</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">compatible_tags</span><span class="s3">(</span>
+    <span class="s1">python_version</span><span class="s3">: </span><span class="s1">PythonVersion </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">interpreter</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">platforms</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">Tag</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Yields the sequence of tags that are compatible with a specific version of Python. 
+ 
+    The tags consist of: 
+    - py*-none-&lt;platform&gt; 
+    - &lt;interpreter&gt;-none-any  # ... if `interpreter` is provided. 
+    - py*-none-any 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">python_version</span><span class="s3">:</span>
+        <span class="s1">python_version </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">]</span>
+    <span class="s1">platforms </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">platforms </span><span class="s2">or </span><span class="s1">platform_tags</span><span class="s3">())</span>
+    <span class="s2">for </span><span class="s1">version </span><span class="s2">in </span><span class="s1">_py_interpreter_range</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">platform_ </span><span class="s2">in </span><span class="s1">platforms</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">version</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s1">platform_</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">interpreter</span><span class="s3">:</span>
+        <span class="s2">yield </span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s4">&quot;any&quot;</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">version </span><span class="s2">in </span><span class="s1">_py_interpreter_range</span><span class="s3">(</span><span class="s1">python_version</span><span class="s3">):</span>
+        <span class="s2">yield </span><span class="s1">Tag</span><span class="s3">(</span><span class="s1">version</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">, </span><span class="s4">&quot;any&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_mac_arch</span><span class="s3">(</span><span class="s1">arch</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">is_32bit</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s1">_32_BIT_INTERPRETER</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s2">if not </span><span class="s1">is_32bit</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">arch</span>
+
+    <span class="s2">if </span><span class="s1">arch</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;ppc&quot;</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s4">&quot;ppc&quot;</span>
+
+    <span class="s2">return </span><span class="s4">&quot;i386&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_mac_binary_formats</span><span class="s3">(</span><span class="s1">version</span><span class="s3">: </span><span class="s1">AppleVersion</span><span class="s3">, </span><span class="s1">cpu_arch</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">formats </span><span class="s3">= [</span><span class="s1">cpu_arch</span><span class="s3">]</span>
+    <span class="s2">if </span><span class="s1">cpu_arch </span><span class="s3">== </span><span class="s4">&quot;x86_64&quot;</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s3">&lt; (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">4</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s3">[]</span>
+        <span class="s1">formats</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span><span class="s4">&quot;intel&quot;</span><span class="s3">, </span><span class="s4">&quot;fat64&quot;</span><span class="s3">, </span><span class="s4">&quot;fat32&quot;</span><span class="s3">])</span>
+
+    <span class="s2">elif </span><span class="s1">cpu_arch </span><span class="s3">== </span><span class="s4">&quot;i386&quot;</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s3">&lt; (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">4</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s3">[]</span>
+        <span class="s1">formats</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span><span class="s4">&quot;intel&quot;</span><span class="s3">, </span><span class="s4">&quot;fat32&quot;</span><span class="s3">, </span><span class="s4">&quot;fat&quot;</span><span class="s3">])</span>
+
+    <span class="s2">elif </span><span class="s1">cpu_arch </span><span class="s3">== </span><span class="s4">&quot;ppc64&quot;</span><span class="s3">:</span>
+        <span class="s0"># TODO: Need to care about 32-bit PPC for ppc64 through 10.2?</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s3">&gt; (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">5</span><span class="s3">) </span><span class="s2">or </span><span class="s1">version </span><span class="s3">&lt; (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">4</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s3">[]</span>
+        <span class="s1">formats</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;fat64&quot;</span><span class="s3">)</span>
+
+    <span class="s2">elif </span><span class="s1">cpu_arch </span><span class="s3">== </span><span class="s4">&quot;ppc&quot;</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s3">&gt; (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">6</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s3">[]</span>
+        <span class="s1">formats</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">([</span><span class="s4">&quot;fat32&quot;</span><span class="s3">, </span><span class="s4">&quot;fat&quot;</span><span class="s3">])</span>
+
+    <span class="s2">if </span><span class="s1">cpu_arch </span><span class="s2">in </span><span class="s3">{</span><span class="s4">&quot;arm64&quot;</span><span class="s3">, </span><span class="s4">&quot;x86_64&quot;</span><span class="s3">}:</span>
+        <span class="s1">formats</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;universal2&quot;</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">cpu_arch </span><span class="s2">in </span><span class="s3">{</span><span class="s4">&quot;x86_64&quot;</span><span class="s3">, </span><span class="s4">&quot;i386&quot;</span><span class="s3">, </span><span class="s4">&quot;ppc64&quot;</span><span class="s3">, </span><span class="s4">&quot;ppc&quot;</span><span class="s3">, </span><span class="s4">&quot;intel&quot;</span><span class="s3">}:</span>
+        <span class="s1">formats</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;universal&quot;</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">formats</span>
+
+
+<span class="s2">def </span><span class="s1">mac_platforms</span><span class="s3">(</span>
+    <span class="s1">version</span><span class="s3">: </span><span class="s1">AppleVersion </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">, </span><span class="s1">arch</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Yields the platform tags for a macOS system. 
+ 
+    The `version` parameter is a two-item tuple specifying the macOS version to 
+    generate platform tags for. The `arch` parameter is the CPU architecture to 
+    generate platform tags for. Both parameters default to the appropriate value 
+    for the current system. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">version_str</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">cpu_arch </span><span class="s3">= </span><span class="s1">platform</span><span class="s3">.</span><span class="s1">mac_ver</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">version </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s4">&quot;AppleVersion&quot;</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">int</span><span class="s3">, </span><span class="s1">version_str</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)[:</span><span class="s5">2</span><span class="s3">])))</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s3">== (</span><span class="s5">10</span><span class="s3">, </span><span class="s5">16</span><span class="s3">):</span>
+            <span class="s0"># When built against an older macOS SDK, Python will report macOS 10.16</span>
+            <span class="s0"># instead of the real version.</span>
+            <span class="s1">version_str </span><span class="s3">= </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span>
+                <span class="s3">[</span>
+                    <span class="s1">sys</span><span class="s3">.</span><span class="s1">executable</span><span class="s3">,</span>
+                    <span class="s4">&quot;-sS&quot;</span><span class="s3">,</span>
+                    <span class="s4">&quot;-c&quot;</span><span class="s3">,</span>
+                    <span class="s4">&quot;import platform; print(platform.mac_ver()[0])&quot;</span><span class="s3">,</span>
+                <span class="s3">],</span>
+                <span class="s1">check</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+                <span class="s1">env</span><span class="s3">={</span><span class="s4">&quot;SYSTEM_VERSION_COMPAT&quot;</span><span class="s3">: </span><span class="s4">&quot;0&quot;</span><span class="s3">},</span>
+                <span class="s1">stdout</span><span class="s3">=</span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">PIPE</span><span class="s3">,</span>
+                <span class="s1">text</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">).</span><span class="s1">stdout</span>
+            <span class="s1">version </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s4">&quot;AppleVersion&quot;</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">int</span><span class="s3">, </span><span class="s1">version_str</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)[:</span><span class="s5">2</span><span class="s3">])))</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s1">version</span>
+    <span class="s2">if </span><span class="s1">arch </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">arch </span><span class="s3">= </span><span class="s1">_mac_arch</span><span class="s3">(</span><span class="s1">cpu_arch</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">arch </span><span class="s3">= </span><span class="s1">arch</span>
+
+    <span class="s2">if </span><span class="s3">(</span><span class="s5">10</span><span class="s3">, </span><span class="s5">0</span><span class="s3">) &lt;= </span><span class="s1">version </span><span class="s2">and </span><span class="s1">version </span><span class="s3">&lt; (</span><span class="s5">11</span><span class="s3">, </span><span class="s5">0</span><span class="s3">):</span>
+        <span class="s0"># Prior to Mac OS 11, each yearly release of Mac OS bumped the</span>
+        <span class="s0"># &quot;minor&quot; version number.  The major version was always 10.</span>
+        <span class="s1">major_version </span><span class="s3">= </span><span class="s5">10</span>
+        <span class="s2">for </span><span class="s1">minor_version </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">version</span><span class="s3">[</span><span class="s5">1</span><span class="s3">], -</span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s1">compat_version </span><span class="s3">= </span><span class="s1">major_version</span><span class="s3">, </span><span class="s1">minor_version</span>
+            <span class="s1">binary_formats </span><span class="s3">= </span><span class="s1">_mac_binary_formats</span><span class="s3">(</span><span class="s1">compat_version</span><span class="s3">, </span><span class="s1">arch</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">binary_format </span><span class="s2">in </span><span class="s1">binary_formats</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s4">f&quot;macosx_</span><span class="s2">{</span><span class="s1">major_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">minor_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">binary_format</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+    <span class="s2">if </span><span class="s1">version </span><span class="s3">&gt;= (</span><span class="s5">11</span><span class="s3">, </span><span class="s5">0</span><span class="s3">):</span>
+        <span class="s0"># Starting with Mac OS 11, each yearly release bumps the major version</span>
+        <span class="s0"># number.   The minor versions are now the midyear updates.</span>
+        <span class="s1">minor_version </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s2">for </span><span class="s1">major_version </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s5">10</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s1">compat_version </span><span class="s3">= </span><span class="s1">major_version</span><span class="s3">, </span><span class="s1">minor_version</span>
+            <span class="s1">binary_formats </span><span class="s3">= </span><span class="s1">_mac_binary_formats</span><span class="s3">(</span><span class="s1">compat_version</span><span class="s3">, </span><span class="s1">arch</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">binary_format </span><span class="s2">in </span><span class="s1">binary_formats</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s4">f&quot;macosx_</span><span class="s2">{</span><span class="s1">major_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">minor_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">binary_format</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+    <span class="s2">if </span><span class="s1">version </span><span class="s3">&gt;= (</span><span class="s5">11</span><span class="s3">, </span><span class="s5">0</span><span class="s3">):</span>
+        <span class="s0"># Mac OS 11 on x86_64 is compatible with binaries from previous releases.</span>
+        <span class="s0"># Arm64 support was introduced in 11.0, so no Arm binaries from previous</span>
+        <span class="s0"># releases exist.</span>
+        <span class="s0">#</span>
+        <span class="s0"># However, the &quot;universal2&quot; binary format can have a</span>
+        <span class="s0"># macOS version earlier than 11.0 when the x86_64 part of the binary supports</span>
+        <span class="s0"># that version of macOS.</span>
+        <span class="s1">major_version </span><span class="s3">= </span><span class="s5">10</span>
+        <span class="s2">if </span><span class="s1">arch </span><span class="s3">== </span><span class="s4">&quot;x86_64&quot;</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">minor_version </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s5">16</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+                <span class="s1">compat_version </span><span class="s3">= </span><span class="s1">major_version</span><span class="s3">, </span><span class="s1">minor_version</span>
+                <span class="s1">binary_formats </span><span class="s3">= </span><span class="s1">_mac_binary_formats</span><span class="s3">(</span><span class="s1">compat_version</span><span class="s3">, </span><span class="s1">arch</span><span class="s3">)</span>
+                <span class="s2">for </span><span class="s1">binary_format </span><span class="s2">in </span><span class="s1">binary_formats</span><span class="s3">:</span>
+                    <span class="s2">yield </span><span class="s4">f&quot;macosx_</span><span class="s2">{</span><span class="s1">major_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">minor_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">binary_format</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">minor_version </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s5">16</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+                <span class="s1">compat_version </span><span class="s3">= </span><span class="s1">major_version</span><span class="s3">, </span><span class="s1">minor_version</span>
+                <span class="s1">binary_format </span><span class="s3">= </span><span class="s4">&quot;universal2&quot;</span>
+                <span class="s2">yield </span><span class="s4">f&quot;macosx_</span><span class="s2">{</span><span class="s1">major_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">minor_version</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">binary_format</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">ios_platforms</span><span class="s3">(</span>
+    <span class="s1">version</span><span class="s3">: </span><span class="s1">AppleVersion </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">, </span><span class="s1">multiarch</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Yields the platform tags for an iOS system. 
+ 
+    :param version: A two-item tuple specifying the iOS version to generate 
+        platform tags for. Defaults to the current iOS version. 
+    :param multiarch: The CPU architecture+ABI to generate platform tags for - 
+        (the value used by `sys.implementation._multiarch` e.g., 
+        `arm64_iphoneos` or `x84_64_iphonesimulator`). Defaults to the current 
+        multiarch value. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">version </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s0"># if iOS is the current platform, ios_ver *must* be defined. However,</span>
+        <span class="s0"># it won't exist for CPython versions before 3.13, which causes a mypy</span>
+        <span class="s0"># error.</span>
+        <span class="s1">_</span><span class="s3">, </span><span class="s1">release</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">= </span><span class="s1">platform</span><span class="s3">.</span><span class="s1">ios_ver</span><span class="s3">()  </span><span class="s0"># type: ignore[attr-defined, unused-ignore]</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s4">&quot;AppleVersion&quot;</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">int</span><span class="s3">, </span><span class="s1">release</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)[:</span><span class="s5">2</span><span class="s3">])))</span>
+
+    <span class="s2">if </span><span class="s1">multiarch </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">multiarch </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">implementation</span><span class="s3">.</span><span class="s1">_multiarch</span>
+    <span class="s1">multiarch </span><span class="s3">= </span><span class="s1">multiarch</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">, </span><span class="s4">&quot;_&quot;</span><span class="s3">)</span>
+
+    <span class="s1">ios_platform_template </span><span class="s3">= </span><span class="s4">&quot;ios_{major}_{minor}_{multiarch}&quot;</span>
+
+    <span class="s0"># Consider any iOS major.minor version from the version requested, down to</span>
+    <span class="s0"># 12.0. 12.0 is the first iOS version that is known to have enough features</span>
+    <span class="s0"># to support CPython. Consider every possible minor release up to X.9. There</span>
+    <span class="s0"># highest the minor has ever gone is 8 (14.8 and 15.8) but having some extra</span>
+    <span class="s0"># candidates that won't ever match doesn't really hurt, and it saves us from</span>
+    <span class="s0"># having to keep an explicit list of known iOS versions in the code. Return</span>
+    <span class="s0"># the results descending order of version number.</span>
+
+    <span class="s0"># If the requested major version is less than 12, there won't be any matches.</span>
+    <span class="s2">if </span><span class="s1">version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &lt; </span><span class="s5">12</span><span class="s3">:</span>
+        <span class="s2">return</span>
+
+    <span class="s0"># Consider the actual X.Y version that was requested.</span>
+    <span class="s2">yield </span><span class="s1">ios_platform_template</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+        <span class="s1">major</span><span class="s3">=</span><span class="s1">version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s1">minor</span><span class="s3">=</span><span class="s1">version</span><span class="s3">[</span><span class="s5">1</span><span class="s3">], </span><span class="s1">multiarch</span><span class="s3">=</span><span class="s1">multiarch</span>
+    <span class="s3">)</span>
+
+    <span class="s0"># Consider every minor version from X.0 to the minor version prior to the</span>
+    <span class="s0"># version requested by the platform.</span>
+    <span class="s2">for </span><span class="s1">minor </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">version</span><span class="s3">[</span><span class="s5">1</span><span class="s3">] - </span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+        <span class="s2">yield </span><span class="s1">ios_platform_template</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+            <span class="s1">major</span><span class="s3">=</span><span class="s1">version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s1">minor</span><span class="s3">=</span><span class="s1">minor</span><span class="s3">, </span><span class="s1">multiarch</span><span class="s3">=</span><span class="s1">multiarch</span>
+        <span class="s3">)</span>
+
+    <span class="s2">for </span><span class="s1">major </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] - </span><span class="s5">1</span><span class="s3">, </span><span class="s5">11</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">minor </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s5">9</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s2">yield </span><span class="s1">ios_platform_template</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                <span class="s1">major</span><span class="s3">=</span><span class="s1">major</span><span class="s3">, </span><span class="s1">minor</span><span class="s3">=</span><span class="s1">minor</span><span class="s3">, </span><span class="s1">multiarch</span><span class="s3">=</span><span class="s1">multiarch</span>
+            <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_linux_platforms</span><span class="s3">(</span><span class="s1">is_32bit</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s1">_32_BIT_INTERPRETER</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">linux </span><span class="s3">= </span><span class="s1">_normalize_string</span><span class="s3">(</span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_platform</span><span class="s3">())</span>
+    <span class="s2">if not </span><span class="s1">linux</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;linux_&quot;</span><span class="s3">):</span>
+        <span class="s0"># we should never be here, just yield the sysconfig one and return</span>
+        <span class="s2">yield </span><span class="s1">linux</span>
+        <span class="s2">return</span>
+    <span class="s2">if </span><span class="s1">is_32bit</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">linux </span><span class="s3">== </span><span class="s4">&quot;linux_x86_64&quot;</span><span class="s3">:</span>
+            <span class="s1">linux </span><span class="s3">= </span><span class="s4">&quot;linux_i686&quot;</span>
+        <span class="s2">elif </span><span class="s1">linux </span><span class="s3">== </span><span class="s4">&quot;linux_aarch64&quot;</span><span class="s3">:</span>
+            <span class="s1">linux </span><span class="s3">= </span><span class="s4">&quot;linux_armv8l&quot;</span>
+    <span class="s1">_</span><span class="s3">, </span><span class="s1">arch </span><span class="s3">= </span><span class="s1">linux</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;_&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+    <span class="s1">archs </span><span class="s3">= {</span><span class="s4">&quot;armv8l&quot;</span><span class="s3">: [</span><span class="s4">&quot;armv8l&quot;</span><span class="s3">, </span><span class="s4">&quot;armv7l&quot;</span><span class="s3">]}.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">arch</span><span class="s3">, [</span><span class="s1">arch</span><span class="s3">])</span>
+    <span class="s2">yield from </span><span class="s1">_manylinux</span><span class="s3">.</span><span class="s1">platform_tags</span><span class="s3">(</span><span class="s1">archs</span><span class="s3">)</span>
+    <span class="s2">yield from </span><span class="s1">_musllinux</span><span class="s3">.</span><span class="s1">platform_tags</span><span class="s3">(</span><span class="s1">archs</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">arch </span><span class="s2">in </span><span class="s1">archs</span><span class="s3">:</span>
+        <span class="s2">yield </span><span class="s4">f&quot;linux_</span><span class="s2">{</span><span class="s1">arch</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_generic_platforms</span><span class="s3">() </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s2">yield </span><span class="s1">_normalize_string</span><span class="s3">(</span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_platform</span><span class="s3">())</span>
+
+
+<span class="s2">def </span><span class="s1">platform_tags</span><span class="s3">() </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Provides the platform tags for this installation. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">platform</span><span class="s3">.</span><span class="s1">system</span><span class="s3">() == </span><span class="s4">&quot;Darwin&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">mac_platforms</span><span class="s3">()</span>
+    <span class="s2">elif </span><span class="s1">platform</span><span class="s3">.</span><span class="s1">system</span><span class="s3">() == </span><span class="s4">&quot;iOS&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">ios_platforms</span><span class="s3">()</span>
+    <span class="s2">elif </span><span class="s1">platform</span><span class="s3">.</span><span class="s1">system</span><span class="s3">() == </span><span class="s4">&quot;Linux&quot;</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">_linux_platforms</span><span class="s3">()</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">_generic_platforms</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">interpreter_name</span><span class="s3">() </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Returns the name of the running interpreter. 
+ 
+    Some implementations have a reserved, two-letter abbreviation which will 
+    be returned when appropriate. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">name </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">implementation</span><span class="s3">.</span><span class="s1">name</span>
+    <span class="s2">return </span><span class="s1">INTERPRETER_SHORT_NAMES</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">name</span><span class="s3">) </span><span class="s2">or </span><span class="s1">name</span>
+
+
+<span class="s2">def </span><span class="s1">interpreter_version</span><span class="s3">(*, </span><span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Returns the version of the running interpreter. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">version </span><span class="s3">= </span><span class="s1">_get_config_var</span><span class="s3">(</span><span class="s4">&quot;py_version_nodot&quot;</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">=</span><span class="s1">warn</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">version</span><span class="s3">:</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">version</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s1">_version_nodot</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">])</span>
+    <span class="s2">return </span><span class="s1">version</span>
+
+
+<span class="s2">def </span><span class="s1">_version_nodot</span><span class="s3">(</span><span class="s1">version</span><span class="s3">: </span><span class="s1">PythonVersion</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s4">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">str</span><span class="s3">, </span><span class="s1">version</span><span class="s3">))</span>
+
+
+<span class="s2">def </span><span class="s1">sys_tags</span><span class="s3">(*, </span><span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">Tag</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Returns the sequence of tag triples for the running interpreter. 
+ 
+    The order of the sequence corresponds to priority order for the 
+    interpreter, from most to least important. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">interp_name </span><span class="s3">= </span><span class="s1">interpreter_name</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">interp_name </span><span class="s3">== </span><span class="s4">&quot;cp&quot;</span><span class="s3">:</span>
+        <span class="s2">yield from </span><span class="s1">cpython_tags</span><span class="s3">(</span><span class="s1">warn</span><span class="s3">=</span><span class="s1">warn</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">yield from </span><span class="s1">generic_tags</span><span class="s3">()</span>
+
+    <span class="s2">if </span><span class="s1">interp_name </span><span class="s3">== </span><span class="s4">&quot;pp&quot;</span><span class="s3">:</span>
+        <span class="s1">interp </span><span class="s3">= </span><span class="s4">&quot;pp3&quot;</span>
+    <span class="s2">elif </span><span class="s1">interp_name </span><span class="s3">== </span><span class="s4">&quot;cp&quot;</span><span class="s3">:</span>
+        <span class="s1">interp </span><span class="s3">= </span><span class="s4">&quot;cp&quot; </span><span class="s3">+ </span><span class="s1">interpreter_version</span><span class="s3">(</span><span class="s1">warn</span><span class="s3">=</span><span class="s1">warn</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">interp </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">yield from </span><span class="s1">compatible_tags</span><span class="s3">(</span><span class="s1">interpreter</span><span class="s3">=</span><span class="s1">interp</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

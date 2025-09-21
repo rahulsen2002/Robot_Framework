@@ -1,0 +1,269 @@
+<html>
+<head>
+<title>check_type_completeness.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #5f826b; font-style: italic;}
+.s3 { color: #cf8e6d;}
+.s4 { color: #bcbec4;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+check_type_completeness.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#!/usr/bin/env python3</span>
+<span class="s2">&quot;&quot;&quot;This is a file that wraps calls to `pyright --verifytypes`, achieving two things: 
+1. give an error if docstrings are missing. 
+    pyright will give a number of missing docstrings, and error messages, but not exit with a non-zero value. 
+2. filter out specific errors we don't care about. 
+    this is largely due to 1, but also because Trio does some very complex stuff and --verifytypes has few to no ways of ignoring specific errors. 
+ 
+If this check is giving you false alarms, you can ignore them by adding logic to `has_docstring_at_runtime`, in the main loop in `check_type`, or by updating the json file. 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">annotations</span>
+
+<span class="s0"># this file is not run as part of the tests, instead it's run standalone from check.sh</span>
+<span class="s3">import </span><span class="s1">argparse</span>
+<span class="s3">import </span><span class="s1">json</span>
+<span class="s3">import </span><span class="s1">subprocess</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">pathlib </span><span class="s3">import </span><span class="s1">Path</span>
+
+<span class="s3">import </span><span class="s1">trio</span>
+<span class="s3">import </span><span class="s1">trio</span><span class="s4">.</span><span class="s1">testing</span>
+
+<span class="s0"># not needed if everything is working, but if somebody does something to generate</span>
+<span class="s0"># tons of errors, we can be nice and stop them from getting 3*tons of output</span>
+<span class="s1">printed_diagnostics</span><span class="s4">: </span><span class="s1">set</span><span class="s4">[</span><span class="s1">str</span><span class="s4">] = </span><span class="s1">set</span><span class="s4">()</span>
+
+
+<span class="s0"># TODO: consider checking manually without `--ignoreexternal`, and/or</span>
+<span class="s0"># removing it from the below call later on.</span>
+<span class="s3">def </span><span class="s1">run_pyright</span><span class="s4">(</span><span class="s1">platform</span><span class="s4">: </span><span class="s1">str</span><span class="s4">) </span><span class="s1">-&gt; subprocess</span><span class="s4">.</span><span class="s1">CompletedProcess</span><span class="s4">[</span><span class="s1">bytes</span><span class="s4">]:</span>
+    <span class="s3">return </span><span class="s1">subprocess</span><span class="s4">.</span><span class="s1">run</span><span class="s4">(</span>
+        <span class="s4">[</span>
+            <span class="s5">&quot;pyright&quot;</span><span class="s4">,</span>
+            <span class="s0"># Specify a platform and version to keep imported modules consistent.</span>
+            <span class="s5">f&quot;--pythonplatform=</span><span class="s3">{</span><span class="s1">platform</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;--pythonversion=3.9&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;--verifytypes=trio&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;--outputjson&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;--ignoreexternal&quot;</span><span class="s4">,</span>
+        <span class="s4">],</span>
+        <span class="s1">capture_output</span><span class="s4">=</span><span class="s3">True</span><span class="s4">,</span>
+    <span class="s4">)</span>
+
+
+<span class="s3">def </span><span class="s1">has_docstring_at_runtime</span><span class="s4">(</span><span class="s1">name</span><span class="s4">: </span><span class="s1">str</span><span class="s4">) </span><span class="s1">-&gt; bool</span><span class="s4">:</span>
+    <span class="s2">&quot;&quot;&quot;Pyright gives us an object identifier of xx.yy.zz 
+    This function tries to decompose that into its constituent parts, such that we 
+    can resolve it, in order to check whether it has a `__doc__` at runtime and 
+    verifytypes misses it because we're doing overly fancy stuff. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># This assert is solely for stopping isort from removing our imports of trio &amp; trio.testing</span>
+    <span class="s0"># It could also be done with isort:skip, but that'd also disable import sorting and the like.</span>
+    <span class="s3">assert </span><span class="s1">trio</span><span class="s4">.</span><span class="s1">testing </span><span class="s3">is not None</span>
+
+    <span class="s0"># figure out what part of the name is the module, so we can &quot;import&quot; it</span>
+    <span class="s1">name_parts </span><span class="s4">= </span><span class="s1">name</span><span class="s4">.</span><span class="s1">split</span><span class="s4">(</span><span class="s5">&quot;.&quot;</span><span class="s4">)</span>
+    <span class="s3">assert </span><span class="s1">name_parts</span><span class="s4">[</span><span class="s6">0</span><span class="s4">] == </span><span class="s5">&quot;trio&quot;</span>
+    <span class="s3">if </span><span class="s1">name_parts</span><span class="s4">[</span><span class="s6">1</span><span class="s4">] == </span><span class="s5">&quot;tests&quot;</span><span class="s4">:</span>
+        <span class="s3">return True</span>
+
+    <span class="s0"># traverse down the remaining identifiers with getattr</span>
+    <span class="s1">obj </span><span class="s4">= </span><span class="s1">trio</span>
+    <span class="s3">try</span><span class="s4">:</span>
+        <span class="s3">for </span><span class="s1">obj_name </span><span class="s3">in </span><span class="s1">name_parts</span><span class="s4">[</span><span class="s6">1</span><span class="s4">:]:</span>
+            <span class="s1">obj </span><span class="s4">= </span><span class="s1">getattr</span><span class="s4">(</span><span class="s1">obj</span><span class="s4">, </span><span class="s1">obj_name</span><span class="s4">)</span>
+    <span class="s3">except </span><span class="s1">AttributeError </span><span class="s3">as </span><span class="s1">exc</span><span class="s4">:</span>
+        <span class="s0"># asynciowrapper does funky getattr stuff</span>
+        <span class="s3">if </span><span class="s5">&quot;AsyncIOWrapper&quot; </span><span class="s3">in </span><span class="s1">str</span><span class="s4">(</span><span class="s1">exc</span><span class="s4">) </span><span class="s3">or </span><span class="s1">name </span><span class="s3">in </span><span class="s4">(</span>
+            <span class="s0"># Symbols not existing on all platforms, so we can't dynamically inspect them.</span>
+            <span class="s0"># Manually confirmed to have docstrings but pyright doesn't see them due to</span>
+            <span class="s0"># export shenanigans. TODO: actually manually confirm that.</span>
+            <span class="s0"># In theory we could verify these at runtime, probably by running the script separately</span>
+            <span class="s0"># on separate platforms. It might also be a decent idea to work the other way around,</span>
+            <span class="s0"># a la test_static_tool_sees_class_members</span>
+            <span class="s0"># darwin</span>
+            <span class="s5">&quot;trio.lowlevel.current_kqueue&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.monitor_kevent&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.wait_kevent&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._core._io_kqueue._KqueueStatistics&quot;</span><span class="s4">,</span>
+            <span class="s0"># windows</span>
+            <span class="s5">&quot;trio._socket.SocketType.share&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._core._io_windows._WindowsStatistics&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._core._windows_cffi.Handle&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.current_iocp&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.monitor_completion_key&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.readinto_overlapped&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.register_with_iocp&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.wait_overlapped&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.write_overlapped&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.lowlevel.WaitForSingleObject&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio.socket.fromshare&quot;</span><span class="s4">,</span>
+            <span class="s0"># linux</span>
+            <span class="s0"># this test will fail on linux, but I don't develop on linux. So the next</span>
+            <span class="s0"># person to do so is very welcome to open a pull request and populate with</span>
+            <span class="s0"># objects</span>
+            <span class="s0"># TODO: these are erroring on all platforms, why?</span>
+            <span class="s5">&quot;trio._highlevel_generic.StapledStream.send_stream&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._highlevel_generic.StapledStream.receive_stream&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._ssl.SSLStream.transport_stream&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._file_io._HasFileNo&quot;</span><span class="s4">,</span>
+            <span class="s5">&quot;trio._file_io._HasFileNo.fileno&quot;</span><span class="s4">,</span>
+        <span class="s4">):</span>
+            <span class="s3">return True</span>
+
+        <span class="s3">else</span><span class="s4">:</span>
+            <span class="s1">print</span><span class="s4">(</span>
+                <span class="s5">f&quot;Pyright sees </span><span class="s3">{</span><span class="s1">name</span><span class="s3">} </span><span class="s5">at runtime, but unable to getattr(</span><span class="s3">{</span><span class="s1">obj</span><span class="s4">.</span><span class="s1">__name__</span><span class="s3">}</span><span class="s5">, </span><span class="s3">{</span><span class="s1">obj_name</span><span class="s3">}</span><span class="s5">).&quot;</span><span class="s4">,</span>
+                <span class="s1">file</span><span class="s4">=</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">,</span>
+            <span class="s4">)</span>
+            <span class="s3">return False</span>
+    <span class="s3">return </span><span class="s1">bool</span><span class="s4">(</span><span class="s1">obj</span><span class="s4">.</span><span class="s1">__doc__</span><span class="s4">)</span>
+
+
+<span class="s3">def </span><span class="s1">check_type</span><span class="s4">(</span>
+    <span class="s1">platform</span><span class="s4">: </span><span class="s1">str</span><span class="s4">,</span>
+    <span class="s1">full_diagnostics_file</span><span class="s4">: </span><span class="s1">Path </span><span class="s4">| </span><span class="s3">None</span><span class="s4">,</span>
+    <span class="s1">expected_errors</span><span class="s4">: </span><span class="s1">list</span><span class="s4">[</span><span class="s1">object</span><span class="s4">],</span>
+<span class="s4">) </span><span class="s1">-&gt; list</span><span class="s4">[</span><span class="s1">object</span><span class="s4">]:</span>
+    <span class="s0"># convince isort we use the trio import</span>
+    <span class="s3">assert </span><span class="s1">trio </span><span class="s3">is not None</span>
+
+    <span class="s0"># run pyright, load output into json</span>
+    <span class="s1">res </span><span class="s4">= </span><span class="s1">run_pyright</span><span class="s4">(</span><span class="s1">platform</span><span class="s4">)</span>
+    <span class="s1">current_result </span><span class="s4">= </span><span class="s1">json</span><span class="s4">.</span><span class="s1">loads</span><span class="s4">(</span><span class="s1">res</span><span class="s4">.</span><span class="s1">stdout</span><span class="s4">)</span>
+
+    <span class="s3">if </span><span class="s1">res</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">:</span>
+        <span class="s1">print</span><span class="s4">(</span><span class="s1">res</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">, </span><span class="s1">file</span><span class="s4">=</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">)</span>
+
+    <span class="s3">if </span><span class="s1">full_diagnostics_file</span><span class="s4">:</span>
+        <span class="s3">with </span><span class="s1">open</span><span class="s4">(</span><span class="s1">full_diagnostics_file</span><span class="s4">, </span><span class="s5">&quot;a&quot;</span><span class="s4">) </span><span class="s3">as </span><span class="s1">f</span><span class="s4">:</span>
+            <span class="s1">json</span><span class="s4">.</span><span class="s1">dump</span><span class="s4">(</span><span class="s1">current_result</span><span class="s4">, </span><span class="s1">f</span><span class="s4">, </span><span class="s1">sort_keys</span><span class="s4">=</span><span class="s3">True</span><span class="s4">, </span><span class="s1">indent</span><span class="s4">=</span><span class="s6">4</span><span class="s4">)</span>
+
+    <span class="s1">errors </span><span class="s4">= []</span>
+
+    <span class="s3">for </span><span class="s1">symbol </span><span class="s3">in </span><span class="s1">current_result</span><span class="s4">[</span><span class="s5">&quot;typeCompleteness&quot;</span><span class="s4">][</span><span class="s5">&quot;symbols&quot;</span><span class="s4">]:</span>
+        <span class="s1">diagnostics </span><span class="s4">= </span><span class="s1">symbol</span><span class="s4">[</span><span class="s5">&quot;diagnostics&quot;</span><span class="s4">]</span>
+        <span class="s1">name </span><span class="s4">= </span><span class="s1">symbol</span><span class="s4">[</span><span class="s5">&quot;name&quot;</span><span class="s4">]</span>
+        <span class="s3">for </span><span class="s1">diagnostic </span><span class="s3">in </span><span class="s1">diagnostics</span><span class="s4">:</span>
+            <span class="s1">message </span><span class="s4">= </span><span class="s1">diagnostic</span><span class="s4">[</span><span class="s5">&quot;message&quot;</span><span class="s4">]</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s4">(</span>
+                <span class="s5">&quot;trio._path.PosixPath&quot;</span><span class="s4">,</span>
+                <span class="s5">&quot;trio._path.WindowsPath&quot;</span><span class="s4">,</span>
+            <span class="s4">) </span><span class="s3">and </span><span class="s1">message</span><span class="s4">.</span><span class="s1">startswith</span><span class="s4">(</span><span class="s5">&quot;Type of base class &quot;</span><span class="s4">):</span>
+                <span class="s3">continue</span>
+
+            <span class="s3">if </span><span class="s1">name</span><span class="s4">.</span><span class="s1">startswith</span><span class="s4">(</span><span class="s5">&quot;trio._path.Path&quot;</span><span class="s4">):</span>
+                <span class="s3">if </span><span class="s1">message</span><span class="s4">.</span><span class="s1">startswith</span><span class="s4">(</span><span class="s5">&quot;No docstring found for&quot;</span><span class="s4">):</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if </span><span class="s1">message</span><span class="s4">.</span><span class="s1">startswith</span><span class="s4">(</span>
+                    <span class="s5">&quot;Type is missing type annotation and could be inferred differently by type checkers&quot;</span><span class="s4">,</span>
+                <span class="s4">):</span>
+                    <span class="s3">continue</span>
+
+            <span class="s0"># ignore errors about missing docstrings if they're available at runtime</span>
+            <span class="s3">if </span><span class="s1">message</span><span class="s4">.</span><span class="s1">startswith</span><span class="s4">(</span><span class="s5">&quot;No docstring found for&quot;</span><span class="s4">):</span>
+                <span class="s3">if </span><span class="s1">has_docstring_at_runtime</span><span class="s4">(</span><span class="s1">symbol</span><span class="s4">[</span><span class="s5">&quot;name&quot;</span><span class="s4">]):</span>
+                    <span class="s3">continue</span>
+            <span class="s3">else</span><span class="s4">:</span>
+                <span class="s0"># Missing docstring messages include the name of the object.</span>
+                <span class="s0"># Other errors don't, so we add it.</span>
+                <span class="s1">message </span><span class="s4">= </span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">name</span><span class="s3">}</span><span class="s5">: </span><span class="s3">{</span><span class="s1">message</span><span class="s3">}</span><span class="s5">&quot;</span>
+            <span class="s3">if </span><span class="s1">message </span><span class="s3">not in </span><span class="s1">expected_errors </span><span class="s3">and </span><span class="s1">message </span><span class="s3">not in </span><span class="s1">printed_diagnostics</span><span class="s4">:</span>
+                <span class="s1">print</span><span class="s4">(</span><span class="s5">f&quot;new error: </span><span class="s3">{</span><span class="s1">message</span><span class="s3">}</span><span class="s5">&quot;</span><span class="s4">, </span><span class="s1">file</span><span class="s4">=</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">)</span>
+            <span class="s1">errors</span><span class="s4">.</span><span class="s1">append</span><span class="s4">(</span><span class="s1">message</span><span class="s4">)</span>
+            <span class="s1">printed_diagnostics</span><span class="s4">.</span><span class="s1">add</span><span class="s4">(</span><span class="s1">message</span><span class="s4">)</span>
+
+        <span class="s3">continue</span>
+
+    <span class="s3">return </span><span class="s1">errors</span>
+
+
+<span class="s3">def </span><span class="s1">main</span><span class="s4">(</span><span class="s1">args</span><span class="s4">: </span><span class="s1">argparse</span><span class="s4">.</span><span class="s1">Namespace</span><span class="s4">) </span><span class="s1">-&gt; int</span><span class="s4">:</span>
+    <span class="s3">if </span><span class="s1">args</span><span class="s4">.</span><span class="s1">full_diagnostics_file</span><span class="s4">:</span>
+        <span class="s1">full_diagnostics_file </span><span class="s4">= </span><span class="s1">Path</span><span class="s4">(</span><span class="s1">args</span><span class="s4">.</span><span class="s1">full_diagnostics_file</span><span class="s4">)</span>
+        <span class="s1">full_diagnostics_file</span><span class="s4">.</span><span class="s1">write_text</span><span class="s4">(</span><span class="s5">&quot;&quot;</span><span class="s4">)</span>
+    <span class="s3">else</span><span class="s4">:</span>
+        <span class="s1">full_diagnostics_file </span><span class="s4">= </span><span class="s3">None</span>
+
+    <span class="s1">errors_by_platform_file </span><span class="s4">= </span><span class="s1">Path</span><span class="s4">(</span><span class="s1">__file__</span><span class="s4">).</span><span class="s1">parent </span><span class="s4">/ </span><span class="s5">&quot;_check_type_completeness.json&quot;</span>
+    <span class="s3">if </span><span class="s1">errors_by_platform_file</span><span class="s4">.</span><span class="s1">exists</span><span class="s4">():</span>
+        <span class="s3">with </span><span class="s1">open</span><span class="s4">(</span><span class="s1">errors_by_platform_file</span><span class="s4">) </span><span class="s3">as </span><span class="s1">f</span><span class="s4">:</span>
+            <span class="s1">errors_by_platform </span><span class="s4">= </span><span class="s1">json</span><span class="s4">.</span><span class="s1">load</span><span class="s4">(</span><span class="s1">f</span><span class="s4">)</span>
+    <span class="s3">else</span><span class="s4">:</span>
+        <span class="s1">errors_by_platform </span><span class="s4">= {</span><span class="s5">&quot;Linux&quot;</span><span class="s4">: [], </span><span class="s5">&quot;Windows&quot;</span><span class="s4">: [], </span><span class="s5">&quot;Darwin&quot;</span><span class="s4">: [], </span><span class="s5">&quot;all&quot;</span><span class="s4">: []}</span>
+
+    <span class="s1">changed </span><span class="s4">= </span><span class="s3">False</span>
+    <span class="s3">for </span><span class="s1">platform </span><span class="s3">in </span><span class="s5">&quot;Linux&quot;</span><span class="s4">, </span><span class="s5">&quot;Windows&quot;</span><span class="s4">, </span><span class="s5">&quot;Darwin&quot;</span><span class="s4">:</span>
+        <span class="s1">platform_errors </span><span class="s4">= </span><span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s1">platform</span><span class="s4">] + </span><span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s5">&quot;all&quot;</span><span class="s4">]</span>
+        <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;*&quot; </span><span class="s4">* </span><span class="s6">20</span><span class="s4">, </span><span class="s5">f&quot;</span><span class="s3">\n</span><span class="s5">Checking </span><span class="s3">{</span><span class="s1">platform</span><span class="s3">}</span><span class="s5">...&quot;</span><span class="s4">)</span>
+        <span class="s1">errors </span><span class="s4">= </span><span class="s1">check_type</span><span class="s4">(</span><span class="s1">platform</span><span class="s4">, </span><span class="s1">full_diagnostics_file</span><span class="s4">, </span><span class="s1">platform_errors</span><span class="s4">)</span>
+
+        <span class="s1">new_errors </span><span class="s4">= [</span><span class="s1">e </span><span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">errors </span><span class="s3">if </span><span class="s1">e </span><span class="s3">not in </span><span class="s1">platform_errors</span><span class="s4">]</span>
+        <span class="s1">missing_errors </span><span class="s4">= [</span><span class="s1">e </span><span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">platform_errors </span><span class="s3">if </span><span class="s1">e </span><span class="s3">not in </span><span class="s1">errors</span><span class="s4">]</span>
+
+        <span class="s3">if </span><span class="s1">new_errors</span><span class="s4">:</span>
+            <span class="s1">print</span><span class="s4">(</span>
+                <span class="s5">f&quot;New errors introduced in `pyright --verifytypes`. Fix them, or ignore them by modifying </span><span class="s3">{</span><span class="s1">errors_by_platform_file</span><span class="s3">}</span><span class="s5">, either manually or with '--overwrite-file'.&quot;</span><span class="s4">,</span>
+                <span class="s1">file</span><span class="s4">=</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">,</span>
+            <span class="s4">)</span>
+            <span class="s1">changed </span><span class="s4">= </span><span class="s3">True</span>
+        <span class="s3">if </span><span class="s1">missing_errors</span><span class="s4">:</span>
+            <span class="s1">print</span><span class="s4">(</span>
+                <span class="s5">f&quot;Congratulations, you have resolved existing errors! Please remove them from </span><span class="s3">{</span><span class="s1">errors_by_platform_file</span><span class="s3">}</span><span class="s5">, either manually or with '--overwrite-file'.&quot;</span><span class="s4">,</span>
+                <span class="s1">file</span><span class="s4">=</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">,</span>
+            <span class="s4">)</span>
+            <span class="s1">changed </span><span class="s4">= </span><span class="s3">True</span>
+            <span class="s1">print</span><span class="s4">(</span><span class="s1">missing_errors</span><span class="s4">, </span><span class="s1">file</span><span class="s4">=</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">stderr</span><span class="s4">)</span>
+
+        <span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s1">platform</span><span class="s4">] = </span><span class="s1">errors</span>
+    <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;*&quot; </span><span class="s4">* </span><span class="s6">20</span><span class="s4">)</span>
+
+    <span class="s0"># cut down the size of the json file by a lot, and make it easier to parse for</span>
+    <span class="s0"># humans, by moving errors that appear on all platforms to a separate category</span>
+    <span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s5">&quot;all&quot;</span><span class="s4">] = []</span>
+    <span class="s3">for </span><span class="s1">e </span><span class="s3">in </span><span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s5">&quot;Linux&quot;</span><span class="s4">].</span><span class="s1">copy</span><span class="s4">():</span>
+        <span class="s3">if </span><span class="s1">e </span><span class="s3">in </span><span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s5">&quot;Darwin&quot;</span><span class="s4">] </span><span class="s3">and </span><span class="s1">e </span><span class="s3">in </span><span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s5">&quot;Windows&quot;</span><span class="s4">]:</span>
+            <span class="s3">for </span><span class="s1">platform </span><span class="s3">in </span><span class="s5">&quot;Linux&quot;</span><span class="s4">, </span><span class="s5">&quot;Windows&quot;</span><span class="s4">, </span><span class="s5">&quot;Darwin&quot;</span><span class="s4">:</span>
+                <span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s1">platform</span><span class="s4">].</span><span class="s1">remove</span><span class="s4">(</span><span class="s1">e</span><span class="s4">)</span>
+            <span class="s1">errors_by_platform</span><span class="s4">[</span><span class="s5">&quot;all&quot;</span><span class="s4">].</span><span class="s1">append</span><span class="s4">(</span><span class="s1">e</span><span class="s4">)</span>
+
+    <span class="s3">if </span><span class="s1">changed </span><span class="s3">and </span><span class="s1">args</span><span class="s4">.</span><span class="s1">overwrite_file</span><span class="s4">:</span>
+        <span class="s3">with </span><span class="s1">open</span><span class="s4">(</span><span class="s1">errors_by_platform_file</span><span class="s4">, </span><span class="s5">&quot;w&quot;</span><span class="s4">) </span><span class="s3">as </span><span class="s1">f</span><span class="s4">:</span>
+            <span class="s1">json</span><span class="s4">.</span><span class="s1">dump</span><span class="s4">(</span><span class="s1">errors_by_platform</span><span class="s4">, </span><span class="s1">f</span><span class="s4">, </span><span class="s1">indent</span><span class="s4">=</span><span class="s6">4</span><span class="s4">, </span><span class="s1">sort_keys</span><span class="s4">=</span><span class="s3">True</span><span class="s4">)</span>
+            <span class="s0"># newline at end of file</span>
+            <span class="s1">f</span><span class="s4">.</span><span class="s1">write</span><span class="s4">(</span><span class="s5">&quot;</span><span class="s3">\n</span><span class="s5">&quot;</span><span class="s4">)</span>
+
+    <span class="s0"># True -&gt; 1 -&gt; non-zero exit value -&gt; error</span>
+    <span class="s3">return </span><span class="s1">changed</span>
+
+
+<span class="s1">parser </span><span class="s4">= </span><span class="s1">argparse</span><span class="s4">.</span><span class="s1">ArgumentParser</span><span class="s4">()</span>
+<span class="s1">parser</span><span class="s4">.</span><span class="s1">add_argument</span><span class="s4">(</span>
+    <span class="s5">&quot;--overwrite-file&quot;</span><span class="s4">,</span>
+    <span class="s1">action</span><span class="s4">=</span><span class="s5">&quot;store_true&quot;</span><span class="s4">,</span>
+    <span class="s1">default</span><span class="s4">=</span><span class="s3">False</span><span class="s4">,</span>
+    <span class="s1">help</span><span class="s4">=</span><span class="s5">&quot;Use this flag to overwrite the current stored results. Either in CI together with a diff check, or to avoid having to manually correct it.&quot;</span><span class="s4">,</span>
+<span class="s4">)</span>
+<span class="s1">parser</span><span class="s4">.</span><span class="s1">add_argument</span><span class="s4">(</span>
+    <span class="s5">&quot;--full-diagnostics-file&quot;</span><span class="s4">,</span>
+    <span class="s1">type</span><span class="s4">=</span><span class="s1">Path</span><span class="s4">,</span>
+    <span class="s1">default</span><span class="s4">=</span><span class="s3">None</span><span class="s4">,</span>
+    <span class="s1">help</span><span class="s4">=</span><span class="s5">&quot;Use this for debugging, it will dump the output of all three pyright runs by platform into this file.&quot;</span><span class="s4">,</span>
+<span class="s4">)</span>
+<span class="s1">args </span><span class="s4">= </span><span class="s1">parser</span><span class="s4">.</span><span class="s1">parse_args</span><span class="s4">()</span>
+
+<span class="s3">assert </span><span class="s1">__name__ </span><span class="s4">== </span><span class="s5">&quot;__main__&quot;</span><span class="s4">, </span><span class="s5">&quot;This script should be run standalone&quot;</span>
+<span class="s1">sys</span><span class="s4">.</span><span class="s1">exit</span><span class="s4">(</span><span class="s1">main</span><span class="s4">(</span><span class="s1">args</span><span class="s4">))</span>
+</pre>
+</body>
+</html>

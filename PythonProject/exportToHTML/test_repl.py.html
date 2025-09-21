@@ -1,0 +1,265 @@
+<html>
+<head>
+<title>test_repl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #7a7e85;}
+.s6 { color: #a5c261;}
+.s7 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_repl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Protocol</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">import </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span>
+
+
+<span class="s0">class </span><span class="s1">RawInput</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">__call__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">prompt</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s3">&quot;&quot;</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+
+
+<span class="s0">def </span><span class="s1">build_raw_input</span><span class="s2">(</span><span class="s1">cmds</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; RawInput</span><span class="s2">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Pass in a list of strings. 
+    Returns a callable that returns each string, each time its called 
+    When there are not more strings to return, raise EOFError 
+    &quot;&quot;&quot;</span>
+    <span class="s1">cmds_iter </span><span class="s2">= </span><span class="s1">iter</span><span class="s2">(</span><span class="s1">cmds</span><span class="s2">)</span>
+    <span class="s1">prompts </span><span class="s2">= []</span>
+
+    <span class="s0">def </span><span class="s1">_raw_helper</span><span class="s2">(</span><span class="s1">prompt</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s3">&quot;&quot;</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">prompts</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">prompt</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">next</span><span class="s2">(</span><span class="s1">cmds_iter</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">StopIteration</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">EOFError </span><span class="s0">from None</span>
+
+    <span class="s0">return </span><span class="s1">_raw_helper</span>
+
+
+<span class="s0">def </span><span class="s1">test_build_raw_input</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4">&quot;&quot;&quot;Quick test of our helper function.&quot;&quot;&quot;</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">([</span><span class="s3">&quot;cmd1&quot;</span><span class="s2">])</span>
+    <span class="s0">assert </span><span class="s1">raw_input</span><span class="s2">() == </span><span class="s3">&quot;cmd1&quot;</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">EOFError</span><span class="s2">):</span>
+        <span class="s1">raw_input</span><span class="s2">()</span>
+
+
+<span class="s5"># In 3.10 or later, types.FunctionType (used internally) will automatically</span>
+<span class="s5"># attach __builtins__ to the function objects. However we need to explicitly</span>
+<span class="s5"># include it for 3.9 support</span>
+<span class="s0">def </span><span class="s1">build_locals</span><span class="s2">() </span><span class="s1">-&gt; dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">object</span><span class="s2">]:</span>
+    <span class="s0">return </span><span class="s2">{</span><span class="s3">&quot;__builtins__&quot;</span><span class="s2">: </span><span class="s1">__builtins__</span><span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_basic_interaction</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Run some basic commands through the interpreter while capturing stdout. 
+    Ensure that the interpreted prints the expected results. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s5"># evaluate simple expression and recall the value</span>
+            <span class="s3">&quot;x = 1&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print(f'{x=}')&quot;</span><span class="s2">,</span>
+            <span class="s5"># Literal gets printed</span>
+            <span class="s3">&quot;'hello'&quot;</span><span class="s2">,</span>
+            <span class="s5"># define and call sync function</span>
+            <span class="s3">&quot;def func():&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  print(x + 1)&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;func()&quot;</span><span class="s2">,</span>
+            <span class="s5"># define and call async function</span>
+            <span class="s3">&quot;async def afunc():&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  return 4&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;await afunc()&quot;</span><span class="s2">,</span>
+            <span class="s5"># import works</span>
+            <span class="s3">&quot;import sys&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;sys.stdout.write('hello stdout</span><span class="s0">\\</span><span class="s3">n')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">_err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">out</span><span class="s2">.</span><span class="s1">splitlines</span><span class="s2">() == [</span><span class="s3">&quot;x=1&quot;</span><span class="s2">, </span><span class="s3">&quot;'hello'&quot;</span><span class="s2">, </span><span class="s3">&quot;2&quot;</span><span class="s2">, </span><span class="s3">&quot;4&quot;</span><span class="s2">, </span><span class="s3">&quot;hello stdout&quot;</span><span class="s2">, </span><span class="s3">&quot;13&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_system_exits_quit_interpreter</span><span class="s2">(</span><span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s3">&quot;raise SystemExit&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">SystemExit</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_KI_interrupts</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s3">&quot;import signal, trio, trio.lowlevel&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;async def f():&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  trio.lowlevel.spawn_system_task(&quot;</span>
+            <span class="s3">&quot;    trio.to_thread.run_sync,&quot;</span>
+            <span class="s3">&quot;    signal.raise_signal, signal.SIGINT,&quot;</span>
+            <span class="s3">&quot;  )&quot;</span><span class="s2">,  </span><span class="s5"># just awaiting this kills the test runner?!</span>
+            <span class="s3">&quot;  await trio.sleep_forever()&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  print('should not see this')&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;await f()&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print('AFTER KeyboardInterrupt')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s3">&quot;KeyboardInterrupt&quot; </span><span class="s0">in </span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;should&quot; </span><span class="s0">not in </span><span class="s1">out</span>
+    <span class="s0">assert </span><span class="s3">&quot;AFTER KeyboardInterrupt&quot; </span><span class="s0">in </span><span class="s1">out</span>
+
+
+<span class="s0">async def </span><span class="s1">test_system_exits_in_exc_group</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s3">&quot;import sys&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;if sys.version_info &lt; (3, 11):&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  from exceptiongroup import BaseExceptionGroup&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;raise BaseExceptionGroup('', [RuntimeError(), SystemExit()])&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print('AFTER BaseExceptionGroup')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">_err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s5"># assert that raise SystemExit in an exception group</span>
+    <span class="s5"># doesn't quit</span>
+    <span class="s0">assert </span><span class="s3">&quot;AFTER BaseExceptionGroup&quot; </span><span class="s0">in </span><span class="s1">out</span>
+
+
+<span class="s0">async def </span><span class="s1">test_system_exits_in_nested_exc_group</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s3">&quot;import sys&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;if sys.version_info &lt; (3, 11):&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  from exceptiongroup import BaseExceptionGroup&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;raise BaseExceptionGroup(&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  '', [BaseExceptionGroup('', [RuntimeError(), SystemExit()])])&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print('AFTER BaseExceptionGroup')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">_err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s5"># assert that raise SystemExit in an exception group</span>
+    <span class="s5"># doesn't quit</span>
+    <span class="s0">assert </span><span class="s3">&quot;AFTER BaseExceptionGroup&quot; </span><span class="s0">in </span><span class="s1">out</span>
+
+
+<span class="s0">async def </span><span class="s1">test_base_exception_captured</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s5"># The statement after raise should still get executed</span>
+            <span class="s3">&quot;raise BaseException&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print('AFTER BaseException')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s3">&quot;_threads.py&quot; </span><span class="s0">not in </span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;_repl.py&quot; </span><span class="s0">not in </span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;AFTER BaseException&quot; </span><span class="s0">in </span><span class="s1">out</span>
+
+
+<span class="s0">async def </span><span class="s1">test_exc_group_captured</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s5"># The statement after raise should still get executed</span>
+            <span class="s3">&quot;raise ExceptionGroup('', [KeyError()])&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print('AFTER ExceptionGroup')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">_err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s3">&quot;AFTER ExceptionGroup&quot; </span><span class="s0">in </span><span class="s1">out</span>
+
+
+<span class="s0">async def </span><span class="s1">test_base_exception_capture_from_coroutine</span><span class="s2">(</span>
+    <span class="s1">capsys</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">=</span><span class="s1">build_locals</span><span class="s2">())</span>
+    <span class="s1">raw_input </span><span class="s2">= </span><span class="s1">build_raw_input</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s3">&quot;async def async_func_raises_base_exception():&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;  raise BaseException&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s5"># This will raise, but the statement after should still</span>
+            <span class="s5"># be executed</span>
+            <span class="s3">&quot;await async_func_raises_base_exception()&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;print('AFTER BaseException')&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s3">&quot;raw_input&quot;</span><span class="s2">, </span><span class="s1">raw_input</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_repl</span><span class="s2">.</span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">)</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">err </span><span class="s2">= </span><span class="s1">capsys</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s3">&quot;_threads.py&quot; </span><span class="s0">not in </span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;_repl.py&quot; </span><span class="s0">not in </span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;AFTER BaseException&quot; </span><span class="s0">in </span><span class="s1">out</span>
+
+
+<span class="s0">def </span><span class="s1">test_main_entrypoint</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Basic smoke test when running via the package __main__ entrypoint. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">repl </span><span class="s2">= </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">run</span><span class="s2">([</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">executable</span><span class="s2">, </span><span class="s3">&quot;-m&quot;</span><span class="s2">, </span><span class="s3">&quot;trio&quot;</span><span class="s2">], </span><span class="s1">input</span><span class="s2">=</span><span class="s6">b&quot;exit()&quot;</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">repl</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s7">0</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,258 @@
+<html>
+<head>
+<title>spinners.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #2aacb8;}
+.s5 { color: #7a7e85;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+spinners.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Generator</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">IO</span><span class="s2">, </span><span class="s1">Final</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">rich</span><span class="s2">.</span><span class="s1">console </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">Console</span><span class="s2">,</span>
+    <span class="s1">ConsoleOptions</span><span class="s2">,</span>
+    <span class="s1">RenderableType</span><span class="s2">,</span>
+    <span class="s1">RenderResult</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">rich</span><span class="s2">.</span><span class="s1">live </span><span class="s0">import </span><span class="s1">Live</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">rich</span><span class="s2">.</span><span class="s1">measure </span><span class="s0">import </span><span class="s1">Measurement</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">rich</span><span class="s2">.</span><span class="s1">text </span><span class="s0">import </span><span class="s1">Text</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">compat </span><span class="s0">import </span><span class="s1">WINDOWS</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">logging </span><span class="s0">import </span><span class="s1">get_console</span><span class="s2">, </span><span class="s1">get_indentation</span>
+
+<span class="s1">logger </span><span class="s2">= </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">getLogger</span><span class="s2">(</span><span class="s1">__name__</span><span class="s2">)</span>
+
+<span class="s1">SPINNER_CHARS</span><span class="s2">: </span><span class="s1">Final </span><span class="s2">= </span><span class="s3">r&quot;-\|/&quot;</span>
+<span class="s1">SPINS_PER_SECOND</span><span class="s2">: </span><span class="s1">Final </span><span class="s2">= </span><span class="s4">8</span>
+
+
+<span class="s0">class </span><span class="s1">SpinnerInterface</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">spin</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">finish</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">final_status</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">InteractiveSpinner</span><span class="s2">(</span><span class="s1">SpinnerInterface</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">message</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">file</span><span class="s2">: </span><span class="s1">IO</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">spin_chars</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">SPINNER_CHARS</span><span class="s2">,</span>
+        <span class="s5"># Empirically, 8 updates/second looks nice</span>
+        <span class="s1">min_update_interval_seconds</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s4">1 </span><span class="s2">/ </span><span class="s1">SPINS_PER_SECOND</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_message </span><span class="s2">= </span><span class="s1">message</span>
+        <span class="s0">if </span><span class="s1">file </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">file </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file </span><span class="s2">= </span><span class="s1">file</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_rate_limiter </span><span class="s2">= </span><span class="s1">RateLimiter</span><span class="s2">(</span><span class="s1">min_update_interval_seconds</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_finished </span><span class="s2">= </span><span class="s0">False</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_spin_cycle </span><span class="s2">= </span><span class="s1">itertools</span><span class="s2">.</span><span class="s1">cycle</span><span class="s2">(</span><span class="s1">spin_chars</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s3">&quot; &quot; </span><span class="s2">* </span><span class="s1">get_indentation</span><span class="s2">() + </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_message </span><span class="s2">+ </span><span class="s3">&quot; ... &quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_width </span><span class="s2">= </span><span class="s4">0</span>
+
+    <span class="s0">def </span><span class="s1">_write</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">status</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span>
+        <span class="s5"># Erase what we wrote before by backspacing to the beginning, writing</span>
+        <span class="s5"># spaces to overwrite the old text, and then backspacing again</span>
+        <span class="s1">backup </span><span class="s2">= </span><span class="s3">&quot;</span><span class="s0">\b</span><span class="s3">&quot; </span><span class="s2">* </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_width</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">backup </span><span class="s2">+ </span><span class="s3">&quot; &quot; </span><span class="s2">* </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_width </span><span class="s2">+ </span><span class="s1">backup</span><span class="s2">)</span>
+        <span class="s5"># Now we have a blank slate to add our status</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">status</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_width </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">status</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_rate_limiter</span><span class="s2">.</span><span class="s1">reset</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">spin</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate_limiter</span><span class="s2">.</span><span class="s1">ready</span><span class="s2">():</span>
+            <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_write</span><span class="s2">(</span><span class="s1">next</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_spin_cycle</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">finish</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">final_status</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_write</span><span class="s2">(</span><span class="s1">final_status</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_file</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_finished </span><span class="s2">= </span><span class="s0">True</span>
+
+
+<span class="s5"># Used for dumb terminals, non-interactive installs (no tty), etc.</span>
+<span class="s5"># We still print updates occasionally (once every 60 seconds by default) to</span>
+<span class="s5"># act as a keep-alive for systems like Travis-CI that take lack-of-output as</span>
+<span class="s5"># an indication that a task has frozen.</span>
+<span class="s0">class </span><span class="s1">NonInteractiveSpinner</span><span class="s2">(</span><span class="s1">SpinnerInterface</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">message</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">min_update_interval_seconds</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s4">60.0</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_message </span><span class="s2">= </span><span class="s1">message</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_finished </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_rate_limiter </span><span class="s2">= </span><span class="s1">RateLimiter</span><span class="s2">(</span><span class="s1">min_update_interval_seconds</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_update</span><span class="s2">(</span><span class="s3">&quot;started&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_update</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">status</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_rate_limiter</span><span class="s2">.</span><span class="s1">reset</span><span class="s2">()</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s3">&quot;%s: %s&quot;</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_message</span><span class="s2">, </span><span class="s1">status</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">spin</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate_limiter</span><span class="s2">.</span><span class="s1">ready</span><span class="s2">():</span>
+            <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_update</span><span class="s2">(</span><span class="s3">&quot;still running...&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">finish</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">final_status</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_update</span><span class="s2">(</span><span class="s3">f&quot;finished with status '</span><span class="s0">{</span><span class="s1">final_status</span><span class="s0">}</span><span class="s3">'&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_finished </span><span class="s2">= </span><span class="s0">True</span>
+
+
+<span class="s0">class </span><span class="s1">RateLimiter</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">min_update_interval_seconds</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_min_update_interval_seconds </span><span class="s2">= </span><span class="s1">min_update_interval_seconds</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_last_update</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s4">0</span>
+
+    <span class="s0">def </span><span class="s1">ready</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s1">now </span><span class="s2">= </span><span class="s1">time</span><span class="s2">.</span><span class="s1">time</span><span class="s2">()</span>
+        <span class="s1">delta </span><span class="s2">= </span><span class="s1">now </span><span class="s2">- </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_last_update</span>
+        <span class="s0">return </span><span class="s1">delta </span><span class="s2">&gt;= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_min_update_interval_seconds</span>
+
+    <span class="s0">def </span><span class="s1">reset</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_last_update </span><span class="s2">= </span><span class="s1">time</span><span class="s2">.</span><span class="s1">time</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">open_spinner</span><span class="s2">(</span><span class="s1">message</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">SpinnerInterface</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s5"># Interactive spinner goes directly to sys.stdout rather than being routed</span>
+    <span class="s5"># through the logging system, but it acts like it has level INFO,</span>
+    <span class="s5"># i.e. it's only displayed if we're at level INFO or better.</span>
+    <span class="s5"># Non-interactive spinner goes through the logging system, so it is always</span>
+    <span class="s5"># in sync with logging configuration.</span>
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">isatty</span><span class="s2">() </span><span class="s0">and </span><span class="s1">logger</span><span class="s2">.</span><span class="s1">getEffectiveLevel</span><span class="s2">() &lt;= </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">INFO</span><span class="s2">:</span>
+        <span class="s1">spinner</span><span class="s2">: </span><span class="s1">SpinnerInterface </span><span class="s2">= </span><span class="s1">InteractiveSpinner</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">spinner </span><span class="s2">= </span><span class="s1">NonInteractiveSpinner</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">hidden_cursor</span><span class="s2">(</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">):</span>
+            <span class="s0">yield </span><span class="s1">spinner</span>
+    <span class="s0">except </span><span class="s1">KeyboardInterrupt</span><span class="s2">:</span>
+        <span class="s1">spinner</span><span class="s2">.</span><span class="s1">finish</span><span class="s2">(</span><span class="s3">&quot;canceled&quot;</span><span class="s2">)</span>
+        <span class="s0">raise</span>
+    <span class="s0">except </span><span class="s1">Exception</span><span class="s2">:</span>
+        <span class="s1">spinner</span><span class="s2">.</span><span class="s1">finish</span><span class="s2">(</span><span class="s3">&quot;error&quot;</span><span class="s2">)</span>
+        <span class="s0">raise</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">spinner</span><span class="s2">.</span><span class="s1">finish</span><span class="s2">(</span><span class="s3">&quot;done&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">_PipRichSpinner</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Custom rich spinner that matches the style of the legacy spinners. 
+ 
+    (*) Updates will be handled in a background thread by a rich live panel 
+        which will call render() automatically at the appropriate time. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">label</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">label </span><span class="s2">= </span><span class="s1">label</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_spin_cycle </span><span class="s2">= </span><span class="s1">itertools</span><span class="s2">.</span><span class="s1">cycle</span><span class="s2">(</span><span class="s1">SPINNER_CHARS</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_spinner_text </span><span class="s2">= </span><span class="s3">&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_finished </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_indent </span><span class="s2">= </span><span class="s1">get_indentation</span><span class="s2">() * </span><span class="s3">&quot; &quot;</span>
+
+    <span class="s0">def </span><span class="s1">__rich_console__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">console</span><span class="s2">: </span><span class="s1">Console</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">ConsoleOptions</span>
+    <span class="s2">) </span><span class="s1">-&gt; RenderResult</span><span class="s2">:</span>
+        <span class="s0">yield </span><span class="s1">self</span><span class="s2">.</span><span class="s1">render</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__rich_measure__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">console</span><span class="s2">: </span><span class="s1">Console</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">ConsoleOptions</span>
+    <span class="s2">) </span><span class="s1">-&gt; Measurement</span><span class="s2">:</span>
+        <span class="s1">text </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">render</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s1">Measurement</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">console</span><span class="s2">, </span><span class="s1">options</span><span class="s2">, </span><span class="s1">text</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">render</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; RenderableType</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_finished</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_spinner_text </span><span class="s2">= </span><span class="s1">next</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_spin_cycle</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">Text</span><span class="s2">.</span><span class="s1">assemble</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_indent</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">label</span><span class="s2">, </span><span class="s3">&quot; ... &quot;</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_spinner_text</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">finish</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">status</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Stop spinning and set a final status message.&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_spinner_text </span><span class="s2">= </span><span class="s1">status</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_finished </span><span class="s2">= </span><span class="s0">True</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">open_rich_spinner</span><span class="s2">(</span><span class="s1">label</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">console</span><span class="s2">: </span><span class="s1">Console </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">if not </span><span class="s1">logger</span><span class="s2">.</span><span class="s1">isEnabledFor</span><span class="s2">(</span><span class="s1">logging</span><span class="s2">.</span><span class="s1">INFO</span><span class="s2">):</span>
+        <span class="s5"># Don't show spinner if --quiet is given.</span>
+        <span class="s0">yield</span>
+        <span class="s0">return</span>
+
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">console </span><span class="s0">or </span><span class="s1">get_console</span><span class="s2">()</span>
+    <span class="s1">spinner </span><span class="s2">= </span><span class="s1">_PipRichSpinner</span><span class="s2">(</span><span class="s1">label</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">Live</span><span class="s2">(</span><span class="s1">spinner</span><span class="s2">, </span><span class="s1">refresh_per_second</span><span class="s2">=</span><span class="s1">SPINS_PER_SECOND</span><span class="s2">, </span><span class="s1">console</span><span class="s2">=</span><span class="s1">console</span><span class="s2">):</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">except </span><span class="s1">KeyboardInterrupt</span><span class="s2">:</span>
+            <span class="s1">spinner</span><span class="s2">.</span><span class="s1">finish</span><span class="s2">(</span><span class="s3">&quot;canceled&quot;</span><span class="s2">)</span>
+            <span class="s0">raise</span>
+        <span class="s0">except </span><span class="s1">Exception</span><span class="s2">:</span>
+            <span class="s1">spinner</span><span class="s2">.</span><span class="s1">finish</span><span class="s2">(</span><span class="s3">&quot;error&quot;</span><span class="s2">)</span>
+            <span class="s0">raise</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">spinner</span><span class="s2">.</span><span class="s1">finish</span><span class="s2">(</span><span class="s3">&quot;done&quot;</span><span class="s2">)</span>
+
+
+<span class="s1">HIDE_CURSOR </span><span class="s2">= </span><span class="s3">&quot;</span><span class="s0">\x1b</span><span class="s3">[?25l&quot;</span>
+<span class="s1">SHOW_CURSOR </span><span class="s2">= </span><span class="s3">&quot;</span><span class="s0">\x1b</span><span class="s3">[?25h&quot;</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">hidden_cursor</span><span class="s2">(</span><span class="s1">file</span><span class="s2">: </span><span class="s1">IO</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s5"># The Windows terminal does not support the hide/show cursor ANSI codes,</span>
+    <span class="s5"># even via colorama. So don't even try.</span>
+    <span class="s0">if </span><span class="s1">WINDOWS</span><span class="s2">:</span>
+        <span class="s0">yield</span>
+    <span class="s5"># We don't want to clutter the output with control characters if we're</span>
+    <span class="s5"># writing to a file, or if the user is running with --quiet.</span>
+    <span class="s5"># See https://github.com/pypa/pip/issues/3418</span>
+    <span class="s0">elif not </span><span class="s1">file</span><span class="s2">.</span><span class="s1">isatty</span><span class="s2">() </span><span class="s0">or </span><span class="s1">logger</span><span class="s2">.</span><span class="s1">getEffectiveLevel</span><span class="s2">() &gt; </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">INFO</span><span class="s2">:</span>
+        <span class="s0">yield</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">HIDE_CURSOR</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">SHOW_CURSOR</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

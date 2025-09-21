@@ -1,0 +1,254 @@
+<html>
+<head>
+<title>cache.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cache.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">textwrap</span>
+<span class="s0">from </span><span class="s1">optparse </span><span class="s0">import </span><span class="s1">Values</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Callable</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">cli</span><span class="s2">.</span><span class="s1">base_command </span><span class="s0">import </span><span class="s1">Command</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">cli</span><span class="s2">.</span><span class="s1">status_codes </span><span class="s0">import </span><span class="s1">ERROR</span><span class="s2">, </span><span class="s1">SUCCESS</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">exceptions </span><span class="s0">import </span><span class="s1">CommandError</span><span class="s2">, </span><span class="s1">PipError</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils </span><span class="s0">import </span><span class="s1">filesystem</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">logging </span><span class="s0">import </span><span class="s1">getLogger</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">misc </span><span class="s0">import </span><span class="s1">format_size</span>
+
+<span class="s1">logger </span><span class="s2">= </span><span class="s1">getLogger</span><span class="s2">(</span><span class="s1">__name__</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">CacheCommand</span><span class="s2">(</span><span class="s1">Command</span><span class="s2">):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Inspect and manage pip's wheel cache. 
+ 
+    Subcommands: 
+ 
+    - dir: Show the cache directory. 
+    - info: Show information about the cache. 
+    - list: List filenames of packages stored in the cache. 
+    - remove: Remove one or more package from the cache. 
+    - purge: Remove all items from the cache. 
+ 
+    ``&lt;pattern&gt;`` can be a glob expression or a package name. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">ignore_require_venv </span><span class="s2">= </span><span class="s0">True</span>
+    <span class="s1">usage </span><span class="s2">= </span><span class="s4">&quot;&quot;&quot; 
+        %prog dir 
+        %prog info 
+        %prog list [&lt;pattern&gt;] [--format=[human, abspath]] 
+        %prog remove &lt;pattern&gt; 
+        %prog purge 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">add_options</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">cmd_opts</span><span class="s2">.</span><span class="s1">add_option</span><span class="s2">(</span>
+            <span class="s4">&quot;--format&quot;</span><span class="s2">,</span>
+            <span class="s1">action</span><span class="s2">=</span><span class="s4">&quot;store&quot;</span><span class="s2">,</span>
+            <span class="s1">dest</span><span class="s2">=</span><span class="s4">&quot;list_format&quot;</span><span class="s2">,</span>
+            <span class="s1">default</span><span class="s2">=</span><span class="s4">&quot;human&quot;</span><span class="s2">,</span>
+            <span class="s1">choices</span><span class="s2">=(</span><span class="s4">&quot;human&quot;</span><span class="s2">, </span><span class="s4">&quot;abspath&quot;</span><span class="s2">),</span>
+            <span class="s1">help</span><span class="s2">=</span><span class="s4">&quot;Select the output format among: human (default) or abspath&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">parser</span><span class="s2">.</span><span class="s1">insert_option_group</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">cmd_opts</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">handler_map</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Values</span><span class="s2">, </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]], </span><span class="s0">None</span><span class="s2">]]:</span>
+        <span class="s0">return </span><span class="s2">{</span>
+            <span class="s4">&quot;dir&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">get_cache_dir</span><span class="s2">,</span>
+            <span class="s4">&quot;info&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">get_cache_info</span><span class="s2">,</span>
+            <span class="s4">&quot;list&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">list_cache_items</span><span class="s2">,</span>
+            <span class="s4">&quot;remove&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">remove_cache_items</span><span class="s2">,</span>
+            <span class="s4">&quot;purge&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">purge_cache</span><span class="s2">,</span>
+        <span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">run</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">args</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s1">handler_map </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">handler_map</span><span class="s2">()</span>
+
+        <span class="s0">if not </span><span class="s1">options</span><span class="s2">.</span><span class="s1">cache_dir</span><span class="s2">:</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">error</span><span class="s2">(</span><span class="s4">&quot;pip cache commands can not function since cache is disabled.&quot;</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">ERROR</span>
+
+        <span class="s6"># Determine action</span>
+        <span class="s0">if not </span><span class="s1">args </span><span class="s0">or </span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] </span><span class="s0">not in </span><span class="s1">handler_map</span><span class="s2">:</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">error</span><span class="s2">(</span>
+                <span class="s4">&quot;Need an action (%s) to perform.&quot;</span><span class="s2">,</span>
+                <span class="s4">&quot;, &quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">handler_map</span><span class="s2">)),</span>
+            <span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">ERROR</span>
+
+        <span class="s1">action </span><span class="s2">= </span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]</span>
+
+        <span class="s6"># Error handling happens here, not in the action-handlers.</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">handler_map</span><span class="s2">[</span><span class="s1">action</span><span class="s2">](</span><span class="s1">options</span><span class="s2">, </span><span class="s1">args</span><span class="s2">[</span><span class="s5">1</span><span class="s2">:])</span>
+        <span class="s0">except </span><span class="s1">PipError </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">error</span><span class="s2">(</span><span class="s1">e</span><span class="s2">.</span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">])</span>
+            <span class="s0">return </span><span class="s1">ERROR</span>
+
+        <span class="s0">return </span><span class="s1">SUCCESS</span>
+
+    <span class="s0">def </span><span class="s1">get_cache_dir</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">args</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">args</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">CommandError</span><span class="s2">(</span><span class="s4">&quot;Too many arguments&quot;</span><span class="s2">)</span>
+
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s1">options</span><span class="s2">.</span><span class="s1">cache_dir</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">get_cache_info</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">args</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">args</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">CommandError</span><span class="s2">(</span><span class="s4">&quot;Too many arguments&quot;</span><span class="s2">)</span>
+
+        <span class="s1">num_http_files </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_find_http_files</span><span class="s2">(</span><span class="s1">options</span><span class="s2">))</span>
+        <span class="s1">num_packages </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_find_wheels</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;*&quot;</span><span class="s2">))</span>
+
+        <span class="s1">http_cache_location </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;http-v2&quot;</span><span class="s2">)</span>
+        <span class="s1">old_http_cache_location </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;http&quot;</span><span class="s2">)</span>
+        <span class="s1">wheels_cache_location </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;wheels&quot;</span><span class="s2">)</span>
+        <span class="s1">http_cache_size </span><span class="s2">= </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">format_size</span><span class="s2">(</span>
+            <span class="s1">filesystem</span><span class="s2">.</span><span class="s1">directory_size</span><span class="s2">(</span><span class="s1">http_cache_location</span><span class="s2">)</span>
+            <span class="s2">+ </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">directory_size</span><span class="s2">(</span><span class="s1">old_http_cache_location</span><span class="s2">)</span>
+        <span class="s2">)</span>
+        <span class="s1">wheels_cache_size </span><span class="s2">= </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">format_directory_size</span><span class="s2">(</span><span class="s1">wheels_cache_location</span><span class="s2">)</span>
+
+        <span class="s1">message </span><span class="s2">= (</span>
+            <span class="s1">textwrap</span><span class="s2">.</span><span class="s1">dedent</span><span class="s2">(</span>
+                <span class="s4">&quot;&quot;&quot; 
+                    Package index page cache location (pip v23.3+): {http_cache_location} 
+                    Package index page cache location (older pips): {old_http_cache_location} 
+                    Package index page cache size: {http_cache_size} 
+                    Number of HTTP files: {num_http_files} 
+                    Locally built wheels location: {wheels_cache_location} 
+                    Locally built wheels size: {wheels_cache_size} 
+                    Number of locally built wheels: {package_count} 
+                &quot;&quot;&quot;  </span><span class="s6"># noqa: E501</span>
+            <span class="s2">)</span>
+            <span class="s2">.</span><span class="s1">format</span><span class="s2">(</span>
+                <span class="s1">http_cache_location</span><span class="s2">=</span><span class="s1">http_cache_location</span><span class="s2">,</span>
+                <span class="s1">old_http_cache_location</span><span class="s2">=</span><span class="s1">old_http_cache_location</span><span class="s2">,</span>
+                <span class="s1">http_cache_size</span><span class="s2">=</span><span class="s1">http_cache_size</span><span class="s2">,</span>
+                <span class="s1">num_http_files</span><span class="s2">=</span><span class="s1">num_http_files</span><span class="s2">,</span>
+                <span class="s1">wheels_cache_location</span><span class="s2">=</span><span class="s1">wheels_cache_location</span><span class="s2">,</span>
+                <span class="s1">package_count</span><span class="s2">=</span><span class="s1">num_packages</span><span class="s2">,</span>
+                <span class="s1">wheels_cache_size</span><span class="s2">=</span><span class="s1">wheels_cache_size</span><span class="s2">,</span>
+            <span class="s2">)</span>
+            <span class="s2">.</span><span class="s1">strip</span><span class="s2">()</span>
+        <span class="s2">)</span>
+
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s1">message</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">list_cache_items</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">args</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">args</span><span class="s2">) &gt; </span><span class="s5">1</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">CommandError</span><span class="s2">(</span><span class="s4">&quot;Too many arguments&quot;</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">args</span><span class="s2">:</span>
+            <span class="s1">pattern </span><span class="s2">= </span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">pattern </span><span class="s2">= </span><span class="s4">&quot;*&quot;</span>
+
+        <span class="s1">files </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_find_wheels</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s1">pattern</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">options</span><span class="s2">.</span><span class="s1">list_format </span><span class="s2">== </span><span class="s4">&quot;human&quot;</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">format_for_human</span><span class="s2">(</span><span class="s1">files</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">format_for_abspath</span><span class="s2">(</span><span class="s1">files</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">format_for_human</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">files</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">files</span><span class="s2">:</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s4">&quot;No locally built wheels cached.&quot;</span><span class="s2">)</span>
+            <span class="s0">return</span>
+
+        <span class="s1">results </span><span class="s2">= []</span>
+        <span class="s0">for </span><span class="s1">filename </span><span class="s0">in </span><span class="s1">files</span><span class="s2">:</span>
+            <span class="s1">wheel </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">filename</span><span class="s2">)</span>
+            <span class="s1">size </span><span class="s2">= </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">format_file_size</span><span class="s2">(</span><span class="s1">filename</span><span class="s2">)</span>
+            <span class="s1">results</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">f&quot; - </span><span class="s0">{</span><span class="s1">wheel</span><span class="s0">} </span><span class="s4">(</span><span class="s0">{</span><span class="s1">size</span><span class="s0">}</span><span class="s4">)&quot;</span><span class="s2">)</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s4">&quot;Cache contents:</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">results</span><span class="s2">)))</span>
+
+    <span class="s0">def </span><span class="s1">format_for_abspath</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">files</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">files</span><span class="s2">:</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">files</span><span class="s2">)))</span>
+
+    <span class="s0">def </span><span class="s1">remove_cache_items</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">args</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">args</span><span class="s2">) &gt; </span><span class="s5">1</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">CommandError</span><span class="s2">(</span><span class="s4">&quot;Too many arguments&quot;</span><span class="s2">)</span>
+
+        <span class="s0">if not </span><span class="s1">args</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">CommandError</span><span class="s2">(</span><span class="s4">&quot;Please provide a pattern&quot;</span><span class="s2">)</span>
+
+        <span class="s1">files </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_find_wheels</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">])</span>
+
+        <span class="s1">no_matching_msg </span><span class="s2">= </span><span class="s4">&quot;No matching packages&quot;</span>
+        <span class="s0">if </span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] == </span><span class="s4">&quot;*&quot;</span><span class="s2">:</span>
+            <span class="s6"># Only fetch http files if no specific pattern given</span>
+            <span class="s1">files </span><span class="s2">+= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_find_http_files</span><span class="s2">(</span><span class="s1">options</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s6"># Add the pattern to the log message</span>
+            <span class="s1">no_matching_msg </span><span class="s2">+= </span><span class="s4">f' for pattern &quot;</span><span class="s0">{</span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]</span><span class="s0">}</span><span class="s4">&quot;'</span>
+
+        <span class="s0">if not </span><span class="s1">files</span><span class="s2">:</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span><span class="s1">no_matching_msg</span><span class="s2">)</span>
+
+        <span class="s1">bytes_removed </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">filename </span><span class="s0">in </span><span class="s1">files</span><span class="s2">:</span>
+            <span class="s1">bytes_removed </span><span class="s2">+= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">stat</span><span class="s2">(</span><span class="s1">filename</span><span class="s2">).</span><span class="s1">st_size</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">unlink</span><span class="s2">(</span><span class="s1">filename</span><span class="s2">)</span>
+            <span class="s1">logger</span><span class="s2">.</span><span class="s1">verbose</span><span class="s2">(</span><span class="s4">&quot;Removed %s&quot;</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">)</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s4">&quot;Files removed: %s (%s)&quot;</span><span class="s2">, </span><span class="s1">len</span><span class="s2">(</span><span class="s1">files</span><span class="s2">), </span><span class="s1">format_size</span><span class="s2">(</span><span class="s1">bytes_removed</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">purge_cache</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">args</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">args</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">CommandError</span><span class="s2">(</span><span class="s4">&quot;Too many arguments&quot;</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">remove_cache_items</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, [</span><span class="s4">&quot;*&quot;</span><span class="s2">])</span>
+
+    <span class="s0">def </span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">subdir</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">options</span><span class="s2">.</span><span class="s1">cache_dir</span><span class="s2">, </span><span class="s1">subdir</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_find_http_files</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s1">old_http_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;http&quot;</span><span class="s2">)</span>
+        <span class="s1">new_http_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;http-v2&quot;</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">find_files</span><span class="s2">(</span><span class="s1">old_http_dir</span><span class="s2">, </span><span class="s4">&quot;*&quot;</span><span class="s2">) + </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">find_files</span><span class="s2">(</span>
+            <span class="s1">new_http_dir</span><span class="s2">, </span><span class="s4">&quot;*&quot;</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_find_wheels</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">: </span><span class="s1">Values</span><span class="s2">, </span><span class="s1">pattern</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s1">wheel_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_cache_dir</span><span class="s2">(</span><span class="s1">options</span><span class="s2">, </span><span class="s4">&quot;wheels&quot;</span><span class="s2">)</span>
+
+        <span class="s6"># The wheel filename format, as specified in PEP 427, is:</span>
+        <span class="s6">#     {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl</span>
+        <span class="s6">#</span>
+        <span class="s6"># Additionally, non-alphanumeric values in the distribution are</span>
+        <span class="s6"># normalized to underscores (_), meaning hyphens can never occur</span>
+        <span class="s6"># before `-{version}`.</span>
+        <span class="s6">#</span>
+        <span class="s6"># Given that information:</span>
+        <span class="s6"># - If the pattern we're given contains a hyphen (-), the user is</span>
+        <span class="s6">#   providing at least the version. Thus, we can just append `*.whl`</span>
+        <span class="s6">#   to match the rest of it.</span>
+        <span class="s6"># - If the pattern we're given doesn't contain a hyphen (-), the</span>
+        <span class="s6">#   user is only providing the name. Thus, we append `-*.whl` to</span>
+        <span class="s6">#   match the hyphen before the version, followed by anything else.</span>
+        <span class="s6">#</span>
+        <span class="s6"># PEP 427: https://www.python.org/dev/peps/pep-0427/</span>
+        <span class="s1">pattern </span><span class="s2">= </span><span class="s1">pattern </span><span class="s2">+ (</span><span class="s4">&quot;*.whl&quot; </span><span class="s0">if </span><span class="s4">&quot;-&quot; </span><span class="s0">in </span><span class="s1">pattern </span><span class="s0">else </span><span class="s4">&quot;-*.whl&quot;</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">filesystem</span><span class="s2">.</span><span class="s1">find_files</span><span class="s2">(</span><span class="s1">wheel_dir</span><span class="s2">, </span><span class="s1">pattern</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

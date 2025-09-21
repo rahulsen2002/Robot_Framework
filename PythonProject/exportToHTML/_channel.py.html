@@ -1,0 +1,609 @@
+<html>
+<head>
+<title>_channel.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_channel.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">OrderedDict</span><span class="s2">, </span><span class="s1">deque</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncGenerator</span><span class="s2">, </span><span class="s1">Callable  </span><span class="s3"># noqa: TC003  # Needed for Sphinx</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">AbstractAsyncContextManager</span><span class="s2">, </span><span class="s1">asynccontextmanager</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">wraps</span>
+<span class="s0">from </span><span class="s1">math </span><span class="s0">import </span><span class="s1">inf</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Generic</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+<span class="s0">from </span><span class="s1">outcome </span><span class="s0">import </span><span class="s1">Error</span><span class="s2">, </span><span class="s1">Value</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">ReceiveChannel</span><span class="s2">, </span><span class="s1">ReceiveType</span><span class="s2">, </span><span class="s1">SendChannel</span><span class="s2">, </span><span class="s1">SendType</span><span class="s2">, </span><span class="s1">T</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_core </span><span class="s0">import </span><span class="s1">Abort</span><span class="s2">, </span><span class="s1">RaiseCancelT</span><span class="s2">, </span><span class="s1">Task</span><span class="s2">, </span><span class="s1">enable_ki_protection</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">MultipleExceptionError</span><span class="s2">,</span>
+    <span class="s1">NoPublicConstructor</span><span class="s2">,</span>
+    <span class="s1">final</span><span class="s2">,</span>
+    <span class="s1">generic_function</span><span class="s2">,</span>
+    <span class="s1">raise_single_exception_from_group</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&lt; (</span><span class="s4">3</span><span class="s2">, </span><span class="s4">11</span><span class="s2">):</span>
+    <span class="s0">from </span><span class="s1">exceptiongroup </span><span class="s0">import </span><span class="s1">BaseExceptionGroup</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">types </span><span class="s0">import </span><span class="s1">TracebackType</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">ParamSpec</span><span class="s2">, </span><span class="s1">Self</span>
+
+    <span class="s1">P </span><span class="s2">= </span><span class="s1">ParamSpec</span><span class="s2">(</span><span class="s5">&quot;P&quot;</span><span class="s2">)</span>
+<span class="s0">elif </span><span class="s5">&quot;sphinx&quot; </span><span class="s0">in </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">modules</span><span class="s2">:</span>
+    <span class="s3"># P needs to exist for Sphinx to parse the type hints successfully.</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">ParamSpec</span>
+    <span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:</span>
+        <span class="s1">P </span><span class="s2">= ...  </span><span class="s3"># This is valid in Callable, though not correct</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">P </span><span class="s2">= </span><span class="s1">ParamSpec</span><span class="s2">(</span><span class="s5">&quot;P&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_open_memory_channel</span><span class="s2">(</span>
+    <span class="s1">max_buffer_size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">float</span><span class="s2">,  </span><span class="s3"># noqa: PYI041</span>
+<span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">MemorySendChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">], </span><span class="s1">MemoryReceiveChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]]:</span>
+    <span class="s6">&quot;&quot;&quot;Open a channel for passing objects between tasks within a process. 
+ 
+    Memory channels are lightweight, cheap to allocate, and entirely 
+    in-memory. They don't involve any operating-system resources, or any kind 
+    of serialization. They just pass Python objects directly between tasks 
+    (with a possible stop in an internal buffer along the way). 
+ 
+    Channel objects can be closed by calling `~trio.abc.AsyncResource.aclose` 
+    or using ``async with``. They are *not* automatically closed when garbage 
+    collected. Closing memory channels isn't mandatory, but it is generally a 
+    good idea, because it helps avoid situations where tasks get stuck waiting 
+    on a channel when there's no-one on the other side. See 
+    :ref:`channel-shutdown` for details. 
+ 
+    Memory channel operations are all atomic with respect to 
+    cancellation, either `~trio.abc.ReceiveChannel.receive` will 
+    successfully return an object, or it will raise :exc:`Cancelled` 
+    while leaving the channel unchanged. 
+ 
+    Args: 
+      max_buffer_size (int or math.inf): The maximum number of items that can 
+        be buffered in the channel before :meth:`~trio.abc.SendChannel.send` 
+        blocks. Choosing a sensible value here is important to ensure that 
+        backpressure is communicated promptly and avoid unnecessary latency; 
+        see :ref:`channel-buffering` for more details. If in doubt, use 0. 
+ 
+    Returns: 
+      A pair ``(send_channel, receive_channel)``. If you have 
+      trouble remembering which order these go in, remember: data 
+      flows from left → right. 
+ 
+    In addition to the standard channel methods, all memory channel objects 
+    provide a ``statistics()`` method, which returns an object with the 
+    following fields: 
+ 
+    * ``current_buffer_used``: The number of items currently stored in the 
+      channel buffer. 
+    * ``max_buffer_size``: The maximum number of items allowed in the buffer, 
+      as passed to :func:`open_memory_channel`. 
+    * ``open_send_channels``: The number of open 
+      :class:`MemorySendChannel` endpoints pointing to this channel. 
+      Initially 1, but can be increased by 
+      :meth:`MemorySendChannel.clone`. 
+    * ``open_receive_channels``: Likewise, but for open 
+      :class:`MemoryReceiveChannel` endpoints. 
+    * ``tasks_waiting_send``: The number of tasks blocked in ``send`` on this 
+      channel (summing over all clones). 
+    * ``tasks_waiting_receive``: The number of tasks blocked in ``receive`` on 
+      this channel (summing over all clones). 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">max_buffer_size </span><span class="s2">!= </span><span class="s1">inf </span><span class="s0">and not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">max_buffer_size</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s5">&quot;max_buffer_size must be an integer or math.inf&quot;</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">max_buffer_size </span><span class="s2">&lt; </span><span class="s4">0</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s5">&quot;max_buffer_size must be &gt;= 0&quot;</span><span class="s2">)</span>
+    <span class="s1">state</span><span class="s2">: </span><span class="s1">MemoryChannelState</span><span class="s2">[</span><span class="s1">T</span><span class="s2">] = </span><span class="s1">MemoryChannelState</span><span class="s2">(</span><span class="s1">max_buffer_size</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s2">(</span>
+        <span class="s1">MemorySendChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">].</span><span class="s1">_create</span><span class="s2">(</span><span class="s1">state</span><span class="s2">),</span>
+        <span class="s1">MemoryReceiveChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">].</span><span class="s1">_create</span><span class="s2">(</span><span class="s1">state</span><span class="s2">),</span>
+    <span class="s2">)</span>
+
+
+<span class="s3"># This workaround requires python3.9+, once older python versions are not supported</span>
+<span class="s3"># or there's a better way of achieving type-checking on a generic factory function,</span>
+<span class="s3"># it could replace the normal function header</span>
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s3"># written as a class so you can say open_memory_channel[int](5)</span>
+    <span class="s0">class </span><span class="s1">open_memory_channel</span><span class="s2">(</span><span class="s1">tuple</span><span class="s2">[</span><span class="s5">&quot;MemorySendChannel[T]&quot;</span><span class="s2">, </span><span class="s5">&quot;MemoryReceiveChannel[T]&quot;</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">__new__</span><span class="s2">(  </span><span class="s3"># type: ignore[misc]  # &quot;must return a subtype&quot;</span>
+            <span class="s1">cls</span><span class="s2">,</span>
+            <span class="s1">max_buffer_size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">float</span><span class="s2">,  </span><span class="s3"># noqa: PYI041</span>
+        <span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">MemorySendChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">], </span><span class="s1">MemoryReceiveChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]]:</span>
+            <span class="s0">return </span><span class="s1">_open_memory_channel</span><span class="s2">(</span><span class="s1">max_buffer_size</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">max_buffer_size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># noqa: PYI041</span>
+            <span class="s2">...</span>
+
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s3"># apply the generic_function decorator to make open_memory_channel indexable</span>
+    <span class="s3"># so it's valid to say e.g. ``open_memory_channel[bytes](5)`` at runtime</span>
+    <span class="s1">open_memory_channel </span><span class="s2">= </span><span class="s1">generic_function</span><span class="s2">(</span><span class="s1">_open_memory_channel</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">frozen</span>
+<span class="s0">class </span><span class="s1">MemoryChannelStatistics</span><span class="s2">:</span>
+    <span class="s1">current_buffer_used</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">max_buffer_size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">float</span>
+    <span class="s1">open_send_channels</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">open_receive_channels</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">tasks_waiting_send</span><span class="s2">: </span><span class="s1">int</span>
+    <span class="s1">tasks_waiting_receive</span><span class="s2">: </span><span class="s1">int</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span>
+<span class="s0">class </span><span class="s1">MemoryChannelState</span><span class="s2">(</span><span class="s1">Generic</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]):</span>
+    <span class="s1">max_buffer_size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">float</span>
+    <span class="s1">data</span><span class="s2">: </span><span class="s1">deque</span><span class="s2">[</span><span class="s1">T</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">deque</span><span class="s2">)</span>
+    <span class="s3"># Counts of open endpoints using this state</span>
+    <span class="s1">open_send_channels</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s4">0</span>
+    <span class="s1">open_receive_channels</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s4">0</span>
+    <span class="s3"># {task: value}</span>
+    <span class="s1">send_tasks</span><span class="s2">: </span><span class="s1">OrderedDict</span><span class="s2">[</span><span class="s1">Task</span><span class="s2">, </span><span class="s1">T</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">OrderedDict</span><span class="s2">)</span>
+    <span class="s3"># {task: None}</span>
+    <span class="s1">receive_tasks</span><span class="s2">: </span><span class="s1">OrderedDict</span><span class="s2">[</span><span class="s1">Task</span><span class="s2">, </span><span class="s0">None</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">OrderedDict</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">statistics</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; MemoryChannelStatistics</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">MemoryChannelStatistics</span><span class="s2">(</span>
+            <span class="s1">current_buffer_used</span><span class="s2">=</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">data</span><span class="s2">),</span>
+            <span class="s1">max_buffer_size</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">max_buffer_size</span><span class="s2">,</span>
+            <span class="s1">open_send_channels</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">open_send_channels</span><span class="s2">,</span>
+            <span class="s1">open_receive_channels</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">open_receive_channels</span><span class="s2">,</span>
+            <span class="s1">tasks_waiting_send</span><span class="s2">=</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">),</span>
+            <span class="s1">tasks_waiting_receive</span><span class="s2">=</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">),</span>
+        <span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">repr</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">MemorySendChannel</span><span class="s2">(</span><span class="s1">SendChannel</span><span class="s2">[</span><span class="s1">SendType</span><span class="s2">], </span><span class="s1">metaclass</span><span class="s2">=</span><span class="s1">NoPublicConstructor</span><span class="s2">):</span>
+    <span class="s1">_state</span><span class="s2">: </span><span class="s1">MemoryChannelState</span><span class="s2">[</span><span class="s1">SendType</span><span class="s2">]</span>
+    <span class="s1">_closed</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s3"># This is just the tasks waiting on *this* object. As compared to</span>
+    <span class="s3"># self._state.send_tasks, which includes tasks from this object and</span>
+    <span class="s3"># all clones.</span>
+    <span class="s1">_tasks</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">Task</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">set</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__attrs_post_init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_send_channels </span><span class="s2">+= </span><span class="s4">1</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s5">f&quot;&lt;send channel at </span><span class="s0">{</span><span class="s1">id</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span><span class="s0">:</span><span class="s5">#x</span><span class="s0">}</span><span class="s5">, using buffer at </span><span class="s0">{</span><span class="s1">id</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">)</span><span class="s0">:</span><span class="s5">#x</span><span class="s0">}</span><span class="s5">&gt;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">statistics</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; MemoryChannelStatistics</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Returns a `MemoryChannelStatistics` for the memory channel this is 
+        associated with.&quot;&quot;&quot;</span>
+        <span class="s3"># XX should we also report statistics specific to this object?</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">statistics</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">send_nowait</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">SendType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Like `~trio.abc.SendChannel.send`, but if the channel's buffer is 
+        full, raises `WouldBlock` instead of blocking. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_receive_channels </span><span class="s2">== </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">:</span>
+            <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span>
+            <span class="s1">task</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">.</span><span class="s1">popitem</span><span class="s2">(</span><span class="s1">last</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+            <span class="s1">task</span><span class="s2">.</span><span class="s1">custom_sleep_data</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">Value</span><span class="s2">(</span><span class="s1">value</span><span class="s2">))</span>
+        <span class="s0">elif </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span><span class="s2">) &lt; </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">max_buffer_size</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">value</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">WouldBlock</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">send</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">SendType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;See `SendChannel.send &lt;trio.abc.SendChannel.send&gt;`. 
+ 
+        Memory channels allow multiple tasks to call `send` at the same time. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint_if_cancelled</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">send_nowait</span><span class="s2">(</span><span class="s1">value</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">WouldBlock</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">cancel_shielded_checkpoint</span><span class="s2">()</span>
+            <span class="s0">return</span>
+
+        <span class="s1">task </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">[</span><span class="s1">task</span><span class="s2">] = </span><span class="s1">value</span>
+        <span class="s1">task</span><span class="s2">.</span><span class="s1">custom_sleep_data </span><span class="s2">= </span><span class="s1">self</span>
+
+        <span class="s0">def </span><span class="s1">abort_fn</span><span class="s2">(</span><span class="s1">_</span><span class="s2">: </span><span class="s1">RaiseCancelT</span><span class="s2">) </span><span class="s1">-&gt; Abort</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+            <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">[</span><span class="s1">task</span><span class="s2">]</span>
+            <span class="s0">return </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">SUCCEEDED</span>
+
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s1">abort_fn</span><span class="s2">)</span>
+
+    <span class="s3"># Return type must be stringified or use a TypeVar</span>
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">clone</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; MemorySendChannel</span><span class="s2">[</span><span class="s1">SendType</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Clone this send channel object. 
+ 
+        This returns a new `MemorySendChannel` object, which acts as a 
+        duplicate of the original: sending on the new object does exactly the 
+        same thing as sending on the old object. (If you're familiar with 
+        `os.dup`, then this is a similar idea.) 
+ 
+        However, closing one of the objects does not close the other, and 
+        receivers don't get `EndOfChannel` until *all* clones have been 
+        closed. 
+ 
+        This is useful for communication patterns that involve multiple 
+        producers all sending objects to the same destination. If you give 
+        each producer its own clone of the `MemorySendChannel`, and then make 
+        sure to close each `MemorySendChannel` when it's finished, receivers 
+        will automatically get notified when all producers are finished. See 
+        :ref:`channel-mpmc` for examples. 
+ 
+        Raises: 
+          trio.ClosedResourceError: if you already closed this 
+              `MemorySendChannel` object. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span>
+        <span class="s0">return </span><span class="s1">MemorySendChannel</span><span class="s2">.</span><span class="s1">_create</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__exit__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">exc_value</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">traceback</span><span class="s2">: </span><span class="s1">TracebackType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Close this send channel object synchronously. 
+ 
+        All channel objects have an asynchronous `~.AsyncResource.aclose` method. 
+        Memory channels can also be closed synchronously. This has the same 
+        effect on the channel and other tasks using it, but `close` is not a 
+        trio checkpoint. This simplifies cleaning up in cancelled tasks. 
+ 
+        Using ``with send_channel:`` will close the channel object on leaving 
+        the with block. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_closed </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">for </span><span class="s1">task </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">:</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">Error</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">()))</span>
+            <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">[</span><span class="s1">task</span><span class="s2">]</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_send_channels </span><span class="s2">-= </span><span class="s4">1</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_send_channels </span><span class="s2">== </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span>
+            <span class="s0">for </span><span class="s1">task </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">:</span>
+                <span class="s1">task</span><span class="s2">.</span><span class="s1">custom_sleep_data</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+                <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">Error</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">EndOfChannel</span><span class="s2">()))</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Close this send channel object asynchronously. 
+ 
+        See `MemorySendChannel.close`.&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">repr</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">MemoryReceiveChannel</span><span class="s2">(</span><span class="s1">ReceiveChannel</span><span class="s2">[</span><span class="s1">ReceiveType</span><span class="s2">], </span><span class="s1">metaclass</span><span class="s2">=</span><span class="s1">NoPublicConstructor</span><span class="s2">):</span>
+    <span class="s1">_state</span><span class="s2">: </span><span class="s1">MemoryChannelState</span><span class="s2">[</span><span class="s1">ReceiveType</span><span class="s2">]</span>
+    <span class="s1">_closed</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">_tasks</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">Task</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">set</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__attrs_post_init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_receive_channels </span><span class="s2">+= </span><span class="s4">1</span>
+
+    <span class="s0">def </span><span class="s1">statistics</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; MemoryChannelStatistics</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Returns a `MemoryChannelStatistics` for the memory channel this is 
+        associated with.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">statistics</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s2">(</span>
+            <span class="s5">f&quot;&lt;receive channel at </span><span class="s0">{</span><span class="s1">id</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span><span class="s0">:</span><span class="s5">#x</span><span class="s0">}</span><span class="s5">, using buffer at </span><span class="s0">{</span><span class="s1">id</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">)</span><span class="s0">:</span><span class="s5">#x</span><span class="s0">}</span><span class="s5">&gt;&quot;</span>
+        <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">receive_nowait</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; ReceiveType</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Like `~trio.abc.ReceiveChannel.receive`, but if there's nothing 
+        ready to receive, raises `WouldBlock` instead of blocking. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">:</span>
+            <span class="s1">task</span><span class="s2">, </span><span class="s1">value </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">.</span><span class="s1">popitem</span><span class="s2">(</span><span class="s1">last</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+            <span class="s1">task</span><span class="s2">.</span><span class="s1">custom_sleep_data</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">value</span><span class="s2">)</span>
+            <span class="s3"># Fall through</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span><span class="s2">.</span><span class="s1">popleft</span><span class="s2">()</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_send_channels</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">EndOfChannel</span>
+        <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">WouldBlock</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">receive</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; ReceiveType</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;See `ReceiveChannel.receive &lt;trio.abc.ReceiveChannel.receive&gt;`. 
+ 
+        Memory channels allow multiple tasks to call `receive` at the same 
+        time. The first task will get the first item sent, the second task 
+        will get the second item sent, and so on. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint_if_cancelled</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">value </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">receive_nowait</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">WouldBlock</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">cancel_shielded_checkpoint</span><span class="s2">()</span>
+            <span class="s0">return </span><span class="s1">value</span>
+
+        <span class="s1">task </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">[</span><span class="s1">task</span><span class="s2">] = </span><span class="s0">None</span>
+        <span class="s1">task</span><span class="s2">.</span><span class="s1">custom_sleep_data </span><span class="s2">= </span><span class="s1">self</span>
+
+        <span class="s0">def </span><span class="s1">abort_fn</span><span class="s2">(</span><span class="s1">_</span><span class="s2">: </span><span class="s1">RaiseCancelT</span><span class="s2">) </span><span class="s1">-&gt; Abort</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+            <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">[</span><span class="s1">task</span><span class="s2">]</span>
+            <span class="s0">return </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">SUCCEEDED</span>
+
+        <span class="s3"># Not strictly guaranteed to return ReceiveType, but will do so unless</span>
+        <span class="s3"># you intentionally reschedule with a bad value.</span>
+        <span class="s0">return await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s1">abort_fn</span><span class="s2">)  </span><span class="s3"># type: ignore[no-any-return]</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">clone</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; MemoryReceiveChannel</span><span class="s2">[</span><span class="s1">ReceiveType</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Clone this receive channel object. 
+ 
+        This returns a new `MemoryReceiveChannel` object, which acts as a 
+        duplicate of the original: receiving on the new object does exactly 
+        the same thing as receiving on the old object. 
+ 
+        However, closing one of the objects does not close the other, and the 
+        underlying channel is not closed until all clones are closed. (If 
+        you're familiar with `os.dup`, then this is a similar idea.) 
+ 
+        This is useful for communication patterns that involve multiple 
+        consumers all receiving objects from the same underlying channel. See 
+        :ref:`channel-mpmc` for examples. 
+ 
+        .. warning:: The clones all share the same underlying channel. 
+           Whenever a clone :meth:`receive`\\s a value, it is removed from the 
+           channel and the other clones do *not* receive that value. If you 
+           want to send multiple copies of the same stream of values to 
+           multiple destinations, like :func:`itertools.tee`, then you need to 
+           find some other solution; this method does *not* do that. 
+ 
+        Raises: 
+          trio.ClosedResourceError: if you already closed this 
+              `MemoryReceiveChannel` object. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span>
+        <span class="s0">return </span><span class="s1">MemoryReceiveChannel</span><span class="s2">.</span><span class="s1">_create</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__exit__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">exc_value</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">traceback</span><span class="s2">: </span><span class="s1">TracebackType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Close this receive channel object synchronously. 
+ 
+        All channel objects have an asynchronous `~.AsyncResource.aclose` method. 
+        Memory channels can also be closed synchronously. This has the same 
+        effect on the channel and other tasks using it, but `close` is not a 
+        trio checkpoint. This simplifies cleaning up in cancelled tasks. 
+ 
+        Using ``with receive_channel:`` will close the channel object on 
+        leaving the with block. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_closed </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">for </span><span class="s1">task </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">:</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">Error</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">()))</span>
+            <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span><span class="s2">[</span><span class="s1">task</span><span class="s2">]</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_receive_channels </span><span class="s2">-= </span><span class="s4">1</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">open_receive_channels </span><span class="s2">== </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">receive_tasks</span>
+            <span class="s0">for </span><span class="s1">task </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">:</span>
+                <span class="s1">task</span><span class="s2">.</span><span class="s1">custom_sleep_data</span><span class="s2">.</span><span class="s1">_tasks</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">task</span><span class="s2">)</span>
+                <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">Error</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError</span><span class="s2">()))</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">send_tasks</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_state</span><span class="s2">.</span><span class="s1">data</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Close this receive channel object asynchronously. 
+ 
+        See `MemoryReceiveChannel.close`.&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">RecvChanWrapper</span><span class="s2">(</span><span class="s1">ReceiveChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">recv_chan</span><span class="s2">: </span><span class="s1">MemoryReceiveChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">], </span><span class="s1">send_semaphore</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Semaphore</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_recv_chan </span><span class="s2">= </span><span class="s1">recv_chan</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_send_semaphore </span><span class="s2">= </span><span class="s1">send_semaphore</span>
+
+    <span class="s0">async def </span><span class="s1">receive</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; T</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_send_semaphore</span><span class="s2">.</span><span class="s1">release</span><span class="s2">()</span>
+        <span class="s0">return await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_recv_chan</span><span class="s2">.</span><span class="s1">receive</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_recv_chan</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__exit__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">exc_value</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">traceback</span><span class="s2">: </span><span class="s1">TracebackType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_recv_chan</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">as_safe_channel</span><span class="s2">(</span>
+    <span class="s1">fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">AsyncGenerator</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]],</span>
+<span class="s2">) </span><span class="s1">-&gt; Callable</span><span class="s2">[</span><span class="s1">P</span><span class="s2">, </span><span class="s1">AbstractAsyncContextManager</span><span class="s2">[</span><span class="s1">ReceiveChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]]]:</span>
+    <span class="s6">&quot;&quot;&quot;Decorate an async generator function to make it cancellation-safe. 
+ 
+    The ``yield`` keyword offers a very convenient way to write iterators... 
+    which makes it really unfortunate that async generators are so difficult 
+    to call correctly.  Yielding from the inside of a cancel scope or a nursery 
+    to the outside `violates structured concurrency &lt;https://xkcd.com/292/&gt;`_ 
+    with consequences explained in :pep:`789`.  Even then, resource cleanup 
+    errors remain common (:pep:`533`) unless you wrap every call in 
+    :func:`~contextlib.aclosing`. 
+ 
+    This decorator gives you the best of both worlds: with careful exception 
+    handling and a background task we preserve structured concurrency by 
+    offering only the safe interface, and you can still write your iterables 
+    with the convenience of ``yield``.  For example:: 
+ 
+        @as_safe_channel 
+        async def my_async_iterable(arg, *, kwarg=True): 
+            while ...: 
+                item = await ... 
+                yield item 
+ 
+        async with my_async_iterable(...) as recv_chan: 
+            async for item in recv_chan: 
+                ... 
+ 
+    While the combined async-with-async-for can be inconvenient at first, 
+    the context manager is indispensable for both correctness and for prompt 
+    cleanup of resources. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Perhaps a future PEP will adopt `async with for` syntax, like</span>
+    <span class="s3"># https://coconut.readthedocs.io/en/master/DOCS.html#async-with-for</span>
+
+    <span class="s2">@</span><span class="s1">asynccontextmanager</span>
+    <span class="s2">@</span><span class="s1">wraps</span><span class="s2">(</span><span class="s1">fn</span><span class="s2">)</span>
+    <span class="s0">async def </span><span class="s1">context_manager</span><span class="s2">(</span>
+        <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">P</span><span class="s2">.</span><span class="s1">kwargs</span>
+    <span class="s2">) </span><span class="s1">-&gt; AsyncGenerator</span><span class="s2">[</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_channel</span><span class="s2">.</span><span class="s1">RecvChanWrapper</span><span class="s2">[</span><span class="s1">T</span><span class="s2">], </span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s1">send_chan</span><span class="s2">, </span><span class="s1">recv_chan </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_memory_channel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">](</span><span class="s4">0</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">(</span><span class="s1">strict_exception_groups</span><span class="s2">=</span><span class="s0">True</span><span class="s2">) </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+                <span class="s1">agen </span><span class="s2">= </span><span class="s1">fn</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+                <span class="s1">send_semaphore </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Semaphore</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)</span>
+                <span class="s3"># `nursery.start` to make sure that we will clean up send_chan &amp; agen</span>
+                <span class="s3"># If this errors we don't close `recv_chan`, but the caller</span>
+                <span class="s3"># never gets access to it, so that's not a problem.</span>
+                <span class="s0">await </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">start</span><span class="s2">(</span>
+                    <span class="s1">_move_elems_to_channel</span><span class="s2">, </span><span class="s1">agen</span><span class="s2">, </span><span class="s1">send_chan</span><span class="s2">, </span><span class="s1">send_semaphore</span>
+                <span class="s2">)</span>
+                <span class="s3"># `async with recv_chan` could eat exceptions, so use sync cm</span>
+                <span class="s0">with </span><span class="s1">RecvChanWrapper</span><span class="s2">(</span><span class="s1">recv_chan</span><span class="s2">, </span><span class="s1">send_semaphore</span><span class="s2">) </span><span class="s0">as </span><span class="s1">wrapped_recv_chan</span><span class="s2">:</span>
+                    <span class="s0">yield </span><span class="s1">wrapped_recv_chan</span>
+                <span class="s3"># User has exited context manager, cancel to immediately close the</span>
+                <span class="s3"># abandoned generator if it's still alive.</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">BaseExceptionGroup </span><span class="s0">as </span><span class="s1">eg</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">raise_single_exception_from_group</span><span class="s2">(</span><span class="s1">eg</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">MultipleExceptionError</span><span class="s2">:</span>
+                <span class="s3"># In case user has except* we make it possible for them to handle the</span>
+                <span class="s3"># exceptions.</span>
+                <span class="s0">raise </span><span class="s1">BaseExceptionGroup</span><span class="s2">(</span>
+                    <span class="s5">&quot;Encountered exception during cleanup of generator object, as well as exception in the contextmanager body - unable to unwrap.&quot;</span><span class="s2">,</span>
+                    <span class="s2">[</span><span class="s1">eg</span><span class="s2">],</span>
+                <span class="s2">) </span><span class="s0">from None</span>
+
+    <span class="s0">async def </span><span class="s1">_move_elems_to_channel</span><span class="s2">(</span>
+        <span class="s1">agen</span><span class="s2">: </span><span class="s1">AsyncGenerator</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s0">None</span><span class="s2">],</span>
+        <span class="s1">send_chan</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">MemorySendChannel</span><span class="s2">[</span><span class="s1">T</span><span class="s2">],</span>
+        <span class="s1">send_semaphore</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Semaphore</span><span class="s2">,</span>
+        <span class="s1">task_status</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">TaskStatus</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># `async with send_chan` will eat exceptions,</span>
+        <span class="s3"># see https://github.com/python-trio/trio/issues/1559</span>
+        <span class="s0">with </span><span class="s1">send_chan</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">task_status</span><span class="s2">.</span><span class="s1">started</span><span class="s2">()</span>
+                <span class="s0">while True</span><span class="s2">:</span>
+                    <span class="s3"># wait for receiver to call next on the aiter</span>
+                    <span class="s0">await </span><span class="s1">send_semaphore</span><span class="s2">.</span><span class="s1">acquire</span><span class="s2">()</span>
+                    <span class="s0">try</span><span class="s2">:</span>
+                        <span class="s1">value </span><span class="s2">= </span><span class="s0">await </span><span class="s1">agen</span><span class="s2">.</span><span class="s1">__anext__</span><span class="s2">()</span>
+                    <span class="s0">except </span><span class="s1">StopAsyncIteration</span><span class="s2">:</span>
+                        <span class="s0">return</span>
+                    <span class="s3"># Send the value to the channel</span>
+                    <span class="s0">await </span><span class="s1">send_chan</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">value</span><span class="s2">)</span>
+            <span class="s0">finally</span><span class="s2">:</span>
+                <span class="s3"># replace try-finally with contextlib.aclosing once python39 is dropped</span>
+                <span class="s0">await </span><span class="s1">agen</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+    <span class="s0">return </span><span class="s1">context_manager</span>
+</pre>
+</body>
+</html>

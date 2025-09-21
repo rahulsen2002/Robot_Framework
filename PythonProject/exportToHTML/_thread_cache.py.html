@@ -1,0 +1,338 @@
+<html>
+<head>
+<title>_thread_cache.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_thread_cache.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">ctypes</span>
+<span class="s0">import </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">util</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">traceback</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">itertools </span><span class="s0">import </span><span class="s1">count</span>
+<span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">Lock</span><span class="s2">, </span><span class="s1">Thread</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Generic</span><span class="s2">, </span><span class="s1">TypeVar</span>
+
+<span class="s0">import </span><span class="s1">outcome</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span>
+
+<span class="s1">RetT </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;RetT&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_to_os_thread_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+    <span class="s4"># ctypes handles the trailing \00</span>
+    <span class="s0">return </span><span class="s1">name</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s3">&quot;ascii&quot;</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">=</span><span class="s3">&quot;replace&quot;</span><span class="s2">)[:</span><span class="s5">15</span><span class="s2">]</span>
+
+
+<span class="s4"># used to construct the method used to set os thread name, or None, depending on platform.</span>
+<span class="s4"># called once on import</span>
+<span class="s0">def </span><span class="s1">get_os_thread_name_func</span><span class="s2">() </span><span class="s1">-&gt; Callable</span><span class="s2">[[</span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">, </span><span class="s1">str</span><span class="s2">], </span><span class="s0">None</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">namefunc</span><span class="s2">(</span>
+        <span class="s1">setname</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">], </span><span class="s1">int</span><span class="s2">],</span>
+        <span class="s1">ident</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># Thread.ident is None &quot;if it has not been started&quot;. Unclear if that can happen</span>
+        <span class="s4"># with current usage.</span>
+        <span class="s0">if </span><span class="s1">ident </span><span class="s0">is not None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s1">setname</span><span class="s2">(</span><span class="s1">ident</span><span class="s2">, </span><span class="s1">_to_os_thread_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">))</span>
+
+    <span class="s4"># namefunc on Mac also takes an ident, even if pthread_setname_np doesn't/can't use it</span>
+    <span class="s4"># so the caller don't need to care about platform.</span>
+    <span class="s0">def </span><span class="s1">darwin_namefunc</span><span class="s2">(</span>
+        <span class="s1">setname</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">bytes</span><span class="s2">], </span><span class="s1">int</span><span class="s2">],</span>
+        <span class="s1">ident</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># I don't know if Mac can rename threads that hasn't been started, but default</span>
+        <span class="s4"># to no to be on the safe side.</span>
+        <span class="s0">if </span><span class="s1">ident </span><span class="s0">is not None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s1">setname</span><span class="s2">(</span><span class="s1">_to_os_thread_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">))</span>
+
+    <span class="s4"># find the pthread library</span>
+    <span class="s4"># this will fail on windows and musl</span>
+    <span class="s1">libpthread_path </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">util</span><span class="s2">.</span><span class="s1">find_library</span><span class="s2">(</span><span class="s3">&quot;pthread&quot;</span><span class="s2">)</span>
+    <span class="s0">if not </span><span class="s1">libpthread_path</span><span class="s2">:</span>
+        <span class="s4"># musl includes pthread functions directly in libc.so</span>
+        <span class="s4"># (but note that find_library(&quot;c&quot;) does not work on musl,</span>
+        <span class="s4">#  see: https://github.com/python/cpython/issues/65821)</span>
+        <span class="s4"># so try that library instead</span>
+        <span class="s4"># if it doesn't exist, CDLL() will fail below</span>
+        <span class="s1">libpthread_path </span><span class="s2">= </span><span class="s3">&quot;libc.so&quot;</span>
+
+    <span class="s4"># Sometimes windows can find the path, but gives a permission error when</span>
+    <span class="s4"># accessing it. Catching a wider exception in case of more esoteric errors.</span>
+    <span class="s4"># https://github.com/python-trio/trio/issues/2688</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">libpthread </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">CDLL</span><span class="s2">(</span><span class="s1">libpthread_path</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">Exception</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">return None</span>
+
+    <span class="s4"># get the setname method from it</span>
+    <span class="s4"># afaik this should never fail</span>
+    <span class="s1">pthread_setname_np </span><span class="s2">= </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">libpthread</span><span class="s2">, </span><span class="s3">&quot;pthread_setname_np&quot;</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">pthread_setname_np </span><span class="s0">is None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">return None</span>
+
+    <span class="s4"># specify function prototype</span>
+    <span class="s1">pthread_setname_np</span><span class="s2">.</span><span class="s1">restype </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_int</span>
+
+    <span class="s4"># on mac OSX pthread_setname_np does not take a thread id,</span>
+    <span class="s4"># it only lets threads name themselves, which is not a problem for us.</span>
+    <span class="s4"># Just need to make sure to call it correctly</span>
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;darwin&quot;</span><span class="s2">:</span>
+        <span class="s1">pthread_setname_np</span><span class="s2">.</span><span class="s1">argtypes </span><span class="s2">= [</span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_char_p</span><span class="s2">]</span>
+        <span class="s0">return </span><span class="s1">partial</span><span class="s2">(</span><span class="s1">darwin_namefunc</span><span class="s2">, </span><span class="s1">pthread_setname_np</span><span class="s2">)</span>
+
+    <span class="s4"># otherwise assume linux parameter conventions. Should also work on *BSD</span>
+    <span class="s1">pthread_setname_np</span><span class="s2">.</span><span class="s1">argtypes </span><span class="s2">= [</span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_void_p</span><span class="s2">, </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_char_p</span><span class="s2">]</span>
+    <span class="s0">return </span><span class="s1">partial</span><span class="s2">(</span><span class="s1">namefunc</span><span class="s2">, </span><span class="s1">pthread_setname_np</span><span class="s2">)</span>
+
+
+<span class="s4"># construct os thread name method</span>
+<span class="s1">set_os_thread_name </span><span class="s2">= </span><span class="s1">get_os_thread_name_func</span><span class="s2">()</span>
+
+<span class="s4"># The &quot;thread cache&quot; is a simple unbounded thread pool, i.e., it automatically</span>
+<span class="s4"># spawns as many threads as needed to handle all the requests its given. Its</span>
+<span class="s4"># only purpose is to cache worker threads so that they don't have to be</span>
+<span class="s4"># started from scratch every time we want to delegate some work to a thread.</span>
+<span class="s4"># It's expected that some higher-level code will track how many threads are in</span>
+<span class="s4"># use to avoid overwhelming the system (e.g. the limiter= argument to</span>
+<span class="s4"># trio.to_thread.run_sync).</span>
+<span class="s4">#</span>
+<span class="s4"># To maximize sharing, there's only one thread cache per process, even if you</span>
+<span class="s4"># have multiple calls to trio.run.</span>
+<span class="s4">#</span>
+<span class="s4"># Guarantees:</span>
+<span class="s4">#</span>
+<span class="s4"># It's safe to call start_thread_soon simultaneously from</span>
+<span class="s4"># multiple threads.</span>
+<span class="s4">#</span>
+<span class="s4"># Idle threads are chosen in LIFO order, i.e. we *don't* spread work evenly</span>
+<span class="s4"># over all threads. Instead we try to let some threads do most of the work</span>
+<span class="s4"># while others sit idle as much as possible. Compared to FIFO, this has better</span>
+<span class="s4"># memory cache behavior, and it makes it easier to detect when we have too</span>
+<span class="s4"># many threads, so idle ones can exit.</span>
+<span class="s4">#</span>
+<span class="s4"># This code assumes that 'dict' has the following properties:</span>
+<span class="s4">#</span>
+<span class="s4"># - __setitem__, __delitem__, and popitem are all thread-safe and atomic with</span>
+<span class="s4">#   respect to each other. This is guaranteed by the GIL.</span>
+<span class="s4">#</span>
+<span class="s4"># - popitem returns the most-recently-added item (i.e., __setitem__ + popitem</span>
+<span class="s4">#   give you a LIFO queue). This relies on dicts being insertion-ordered, like</span>
+<span class="s4">#   they are in py36+.</span>
+
+<span class="s4"># How long a thread will idle waiting for new work before gives up and exits.</span>
+<span class="s4"># This value is pretty arbitrary; I don't think it matters too much.</span>
+<span class="s1">IDLE_TIMEOUT </span><span class="s2">= </span><span class="s5">10  </span><span class="s4"># seconds</span>
+
+<span class="s1">name_counter </span><span class="s2">= </span><span class="s1">count</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">WorkerThread</span><span class="s2">(</span><span class="s1">Generic</span><span class="s2">[</span><span class="s1">RetT</span><span class="s2">]):</span>
+    <span class="s1">__slots__ </span><span class="s2">= (</span><span class="s3">&quot;_default_name&quot;</span><span class="s2">, </span><span class="s3">&quot;_job&quot;</span><span class="s2">, </span><span class="s3">&quot;_thread&quot;</span><span class="s2">, </span><span class="s3">&quot;_thread_cache&quot;</span><span class="s2">, </span><span class="s3">&quot;_worker_lock&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">thread_cache</span><span class="s2">: </span><span class="s1">ThreadCache</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_job</span><span class="s2">: (</span>
+            <span class="s1">tuple</span><span class="s2">[</span>
+                <span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">RetT</span><span class="s2">],</span>
+                <span class="s1">Callable</span><span class="s2">[[</span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">RetT</span><span class="s2">]], </span><span class="s1">object</span><span class="s2">],</span>
+                <span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s2">]</span>
+            <span class="s2">| </span><span class="s0">None</span>
+        <span class="s2">) = </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_thread_cache </span><span class="s2">= </span><span class="s1">thread_cache</span>
+        <span class="s4"># This Lock is used in an unconventional way.</span>
+        <span class="s4">#</span>
+        <span class="s4"># &quot;Unlocked&quot; means we have a pending job that's been assigned to us;</span>
+        <span class="s4"># &quot;locked&quot; means that we don't.</span>
+        <span class="s4">#</span>
+        <span class="s4"># Initially we have no job, so it starts out in locked state.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_worker_lock </span><span class="s2">= </span><span class="s1">Lock</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_worker_lock</span><span class="s2">.</span><span class="s1">acquire</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_default_name </span><span class="s2">= </span><span class="s3">f&quot;Trio thread </span><span class="s0">{</span><span class="s1">next</span><span class="s2">(</span><span class="s1">name_counter</span><span class="s2">)</span><span class="s0">}</span><span class="s3">&quot;</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_thread </span><span class="s2">= </span><span class="s1">Thread</span><span class="s2">(</span><span class="s1">target</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_work</span><span class="s2">, </span><span class="s1">name</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_default_name</span><span class="s2">, </span><span class="s1">daemon</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">set_os_thread_name</span><span class="s2">:</span>
+            <span class="s1">set_os_thread_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_default_name</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_thread</span><span class="s2">.</span><span class="s1">start</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">_handle_job</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># Handle job in a separate method to ensure user-created</span>
+        <span class="s4"># objects are cleaned up in a consistent manner.</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_job </span><span class="s0">is not None</span>
+        <span class="s1">fn</span><span class="s2">, </span><span class="s1">deliver</span><span class="s2">, </span><span class="s1">name </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_job</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_job </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s4"># set name</span>
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_thread</span><span class="s2">.</span><span class="s1">name </span><span class="s2">= </span><span class="s1">name</span>
+            <span class="s0">if </span><span class="s1">set_os_thread_name</span><span class="s2">:</span>
+                <span class="s1">set_os_thread_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+        <span class="s1">result </span><span class="s2">= </span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">capture</span><span class="s2">(</span><span class="s1">fn</span><span class="s2">)</span>
+
+        <span class="s4"># reset name if it was changed</span>
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_thread</span><span class="s2">.</span><span class="s1">name </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_default_name</span>
+            <span class="s0">if </span><span class="s1">set_os_thread_name</span><span class="s2">:</span>
+                <span class="s1">set_os_thread_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_default_name</span><span class="s2">)</span>
+
+        <span class="s4"># Tell the cache that we're available to be assigned a new</span>
+        <span class="s4"># job. We do this *before* calling 'deliver', so that if</span>
+        <span class="s4"># 'deliver' triggers a new job, it can be assigned to us</span>
+        <span class="s4"># instead of spawning a new thread.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_thread_cache</span><span class="s2">.</span><span class="s1">_idle_workers</span><span class="s2">[</span><span class="s1">self</span><span class="s2">] = </span><span class="s0">None</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">deliver</span><span class="s2">(</span><span class="s1">result</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">BaseException </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;Exception while delivering result of thread&quot;</span><span class="s2">, </span><span class="s1">file</span><span class="s2">=</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">)</span>
+            <span class="s1">traceback</span><span class="s2">.</span><span class="s1">print_exception</span><span class="s2">(</span><span class="s1">type</span><span class="s2">(</span><span class="s1">e</span><span class="s2">), </span><span class="s1">e</span><span class="s2">, </span><span class="s1">e</span><span class="s2">.</span><span class="s1">__traceback__</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_work</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_worker_lock</span><span class="s2">.</span><span class="s1">acquire</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s1">IDLE_TIMEOUT</span><span class="s2">):</span>
+                <span class="s4"># We got a job</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_job</span><span class="s2">()</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s4"># Timeout acquiring lock, so we can probably exit. But,</span>
+                <span class="s4"># there's a race condition: we might be assigned a job *just*</span>
+                <span class="s4"># as we're about to exit. So we have to check.</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_thread_cache</span><span class="s2">.</span><span class="s1">_idle_workers</span><span class="s2">[</span><span class="s1">self</span><span class="s2">]</span>
+                <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+                    <span class="s4"># Someone else removed us from the idle worker queue, so</span>
+                    <span class="s4"># they must be in the process of assigning us a job - loop</span>
+                    <span class="s4"># around and wait for it.</span>
+                    <span class="s0">continue</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s4"># We successfully removed ourselves from the idle</span>
+                    <span class="s4"># worker queue, so no more jobs are incoming; it's safe to</span>
+                    <span class="s4"># exit.</span>
+                    <span class="s0">return</span>
+
+
+<span class="s0">class </span><span class="s1">ThreadCache</span><span class="s2">:</span>
+    <span class="s1">__slots__ </span><span class="s2">= (</span><span class="s3">&quot;_idle_workers&quot;</span><span class="s2">,)</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_idle_workers</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">WorkerThread</span><span class="s2">[</span><span class="s1">Any</span><span class="s2">], </span><span class="s0">None</span><span class="s2">] = {}  </span><span class="s4"># type: ignore[explicit-any]</span>
+
+    <span class="s0">def </span><span class="s1">start_thread_soon</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">RetT</span><span class="s2">],</span>
+        <span class="s1">deliver</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">RetT</span><span class="s2">]], </span><span class="s1">object</span><span class="s2">],</span>
+        <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">worker</span><span class="s2">: </span><span class="s1">WorkerThread</span><span class="s2">[</span><span class="s1">RetT</span><span class="s2">]</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">worker</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_idle_workers</span><span class="s2">.</span><span class="s1">popitem</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+            <span class="s1">worker </span><span class="s2">= </span><span class="s1">WorkerThread</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span>
+        <span class="s1">worker</span><span class="s2">.</span><span class="s1">_job </span><span class="s2">= (</span><span class="s1">fn</span><span class="s2">, </span><span class="s1">deliver</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+        <span class="s1">worker</span><span class="s2">.</span><span class="s1">_worker_lock</span><span class="s2">.</span><span class="s1">release</span><span class="s2">()</span>
+
+
+<span class="s1">THREAD_CACHE </span><span class="s2">= </span><span class="s1">ThreadCache</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">start_thread_soon</span><span class="s2">(</span>
+    <span class="s1">fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">RetT</span><span class="s2">],</span>
+    <span class="s1">deliver</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">RetT</span><span class="s2">]], </span><span class="s1">object</span><span class="s2">],</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Runs ``deliver(outcome.capture(fn))`` in a worker thread. 
+ 
+    Generally ``fn`` does some blocking work, and ``deliver`` delivers the 
+    result back to whoever is interested. 
+ 
+    This is a low-level, no-frills interface, very similar to using 
+    `threading.Thread` to spawn a thread directly. The main difference is 
+    that this function tries to reuse threads when possible, so it can be 
+    a bit faster than `threading.Thread`. 
+ 
+    Worker threads have the `~threading.Thread.daemon` flag set, which means 
+    that if your main thread exits, worker threads will automatically be 
+    killed. If you want to make sure that your ``fn`` runs to completion, then 
+    you should make sure that the main thread remains alive until ``deliver`` 
+    is called. 
+ 
+    It is safe to call this function simultaneously from multiple threads. 
+ 
+    Args: 
+ 
+        fn (sync function): Performs arbitrary blocking work. 
+ 
+        deliver (sync function): Takes the `outcome.Outcome` of ``fn``, and 
+          delivers it. *Must not block.* 
+ 
+    Because worker threads are cached and reused for multiple calls, neither 
+    function should mutate thread-level state, like `threading.local` objects 
+    – or if they do, they should be careful to revert their changes before 
+    returning. 
+ 
+    Note: 
+ 
+        The split between ``fn`` and ``deliver`` serves two purposes. First, 
+        it's convenient, since most callers need something like this anyway. 
+ 
+        Second, it avoids a small race condition that could cause too many 
+        threads to be spawned. Consider a program that wants to run several 
+        jobs sequentially on a thread, so the main thread submits a job, waits 
+        for it to finish, submits another job, etc. In theory, this program 
+        should only need one worker thread. But what could happen is: 
+ 
+        1. Worker thread: First job finishes, and calls ``deliver``. 
+ 
+        2. Main thread: receives notification that the job finished, and calls 
+           ``start_thread_soon``. 
+ 
+        3. Main thread: sees that no worker threads are marked idle, so spawns 
+           a second worker thread. 
+ 
+        4. Original worker thread: marks itself as idle. 
+ 
+        To avoid this, threads mark themselves as idle *before* calling 
+        ``deliver``. 
+ 
+        Is this potential extra thread a major problem? Maybe not, but it's 
+        easy enough to avoid, and we figure that if the user is trying to 
+        limit how many threads they're using then it's polite to respect that. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">THREAD_CACHE</span><span class="s2">.</span><span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">fn</span><span class="s2">, </span><span class="s1">deliver</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">clear_worker_threads</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># This is OK because the child process does not actually have any</span>
+    <span class="s4"># worker threads. Additionally, while WorkerThread keeps a strong</span>
+    <span class="s4"># reference and so would get affected, the only place those are</span>
+    <span class="s4"># stored is here.</span>
+    <span class="s1">THREAD_CACHE</span><span class="s2">.</span><span class="s1">_idle_workers</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+
+
+<span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">os</span><span class="s2">, </span><span class="s3">&quot;register_at_fork&quot;</span><span class="s2">):</span>
+    <span class="s1">os</span><span class="s2">.</span><span class="s1">register_at_fork</span><span class="s2">(</span><span class="s1">after_in_child</span><span class="s2">=</span><span class="s1">clear_worker_threads</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

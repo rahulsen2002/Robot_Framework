@@ -1,0 +1,376 @@
+<html>
+<head>
+<title>test_archive_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_archive_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Tests for distutils.archive_util.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">tarfile</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">archive_util</span>
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">archive_util </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">ARCHIVE_FORMATS</span><span class="s3">,</span>
+    <span class="s1">check_archive_formats</span><span class="s3">,</span>
+    <span class="s1">make_archive</span><span class="s3">,</span>
+    <span class="s1">make_tarball</span><span class="s3">,</span>
+    <span class="s1">make_zipfile</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">spawn </span><span class="s2">import </span><span class="s1">spawn</span>
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">tests </span><span class="s2">import </span><span class="s1">support</span>
+<span class="s2">from </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path </span><span class="s2">import </span><span class="s1">splitdrive</span>
+
+<span class="s2">import </span><span class="s1">path</span>
+<span class="s2">import </span><span class="s1">pytest</span>
+<span class="s2">from </span><span class="s1">test</span><span class="s3">.</span><span class="s1">support </span><span class="s2">import </span><span class="s1">patch</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">unix_compat </span><span class="s2">import </span><span class="s1">UID_0_SUPPORT</span><span class="s3">, </span><span class="s1">grp</span><span class="s3">, </span><span class="s1">pwd</span><span class="s3">, </span><span class="s1">require_uid_0</span><span class="s3">, </span><span class="s1">require_unix_id</span>
+
+
+<span class="s2">def </span><span class="s1">can_fs_encode</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return True if the filename can be saved in the file system. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">supports_unicode_filenames</span><span class="s3">:</span>
+        <span class="s2">return True</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">filename</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">getfilesystemencoding</span><span class="s3">())</span>
+    <span class="s2">except </span><span class="s1">UnicodeEncodeError</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">all_equal</span><span class="s3">(</span><span class="s1">values</span><span class="s3">):</span>
+    <span class="s2">return </span><span class="s1">functools</span><span class="s3">.</span><span class="s1">reduce</span><span class="s3">(</span><span class="s1">operator</span><span class="s3">.</span><span class="s1">eq</span><span class="s3">, </span><span class="s1">values</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">same_drive</span><span class="s3">(*</span><span class="s1">paths</span><span class="s3">):</span>
+    <span class="s2">return </span><span class="s1">all_equal</span><span class="s3">(</span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">path</span><span class="s3">).</span><span class="s1">drive </span><span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">paths</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ArchiveUtilTestCase</span><span class="s3">(</span><span class="s1">support</span><span class="s3">.</span><span class="s1">TempdirManager</span><span class="s3">):</span>
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">usefixtures</span><span class="s3">(</span><span class="s4">'needs_zlib'</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_make_tarball</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">=</span><span class="s4">'archive'</span><span class="s3">):</span>
+        <span class="s5"># creating something to tar</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_make_tarball</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s4">'.tar.gz'</span><span class="s3">)</span>
+        <span class="s5"># trying an uncompressed one</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_make_tarball</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s4">'.tar'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s2">None</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">usefixtures</span><span class="s3">(</span><span class="s4">'needs_zlib'</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_make_tarball_gzip</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_make_tarball</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">, </span><span class="s4">'.tar.gz'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s4">'gzip'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_make_tarball_bzip2</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">importorskip</span><span class="s3">(</span><span class="s4">'bz2'</span><span class="s3">)</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_make_tarball</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">, </span><span class="s4">'.tar.bz2'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s4">'bzip2'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_make_tarball_xz</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">importorskip</span><span class="s3">(</span><span class="s4">'lzma'</span><span class="s3">)</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_make_tarball</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">, </span><span class="s4">'.tar.xz'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s4">'xz'</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">skipif</span><span class="s3">(</span><span class="s4">&quot;not can_fs_encode('årchiv')&quot;</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_make_tarball_latin1</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Mirror test_make_tarball, except filename contains latin characters. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">test_make_tarball</span><span class="s3">(</span><span class="s4">'årchiv'</span><span class="s3">)  </span><span class="s5"># note this isn't a real word</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">skipif</span><span class="s3">(</span><span class="s4">&quot;not can_fs_encode('のアーカイブ')&quot;</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_make_tarball_extended</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Mirror test_make_tarball, except filename contains extended 
+        characters outside the latin charset. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">test_make_tarball</span><span class="s3">(</span><span class="s4">'のアーカイブ'</span><span class="s3">)  </span><span class="s5"># japanese for archive</span>
+
+    <span class="s2">def </span><span class="s1">_make_tarball</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s1">target_name</span><span class="s3">, </span><span class="s1">suffix</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s1">tmpdir2 </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">same_drive</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s1">tmpdir2</span><span class="s3">):</span>
+            <span class="s1">pytest</span><span class="s3">.</span><span class="s1">skip</span><span class="s3">(</span><span class="s4">&quot;source and target should be on same drive&quot;</span><span class="s3">)</span>
+
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir2</span><span class="s3">, </span><span class="s1">target_name</span><span class="s3">)</span>
+
+        <span class="s5"># working with relative paths to avoid tar warnings</span>
+        <span class="s2">with </span><span class="s1">path</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">):</span>
+            <span class="s1">make_tarball</span><span class="s3">(</span><span class="s1">splitdrive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">)[</span><span class="s6">1</span><span class="s3">], </span><span class="s4">'dist'</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+        <span class="s5"># check if the compressed tarball was created</span>
+        <span class="s1">tarball </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s1">suffix</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+
+    <span class="s2">def </span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">):</span>
+        <span class="s1">tar </span><span class="s3">= </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">names </span><span class="s3">= </span><span class="s1">tar</span><span class="s3">.</span><span class="s1">getnames</span><span class="s3">()</span>
+            <span class="s1">names</span><span class="s3">.</span><span class="s1">sort</span><span class="s3">()</span>
+            <span class="s2">return </span><span class="s1">names</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">tar</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s1">_zip_created_files </span><span class="s3">= [</span>
+        <span class="s4">'dist/'</span><span class="s3">,</span>
+        <span class="s4">'dist/file1'</span><span class="s3">,</span>
+        <span class="s4">'dist/file2'</span><span class="s3">,</span>
+        <span class="s4">'dist/sub/'</span><span class="s3">,</span>
+        <span class="s4">'dist/sub/file3'</span><span class="s3">,</span>
+        <span class="s4">'dist/sub2/'</span><span class="s3">,</span>
+    <span class="s3">]</span>
+    <span class="s1">_created_files </span><span class="s3">= [</span><span class="s1">p</span><span class="s3">.</span><span class="s1">rstrip</span><span class="s3">(</span><span class="s4">'/'</span><span class="s3">) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">_zip_created_files</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">_create_files</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s5"># creating something to tar</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">()</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_file</span><span class="s3">([</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">'file1'</span><span class="s3">], </span><span class="s4">'xxx'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_file</span><span class="s3">([</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">'file2'</span><span class="s3">], </span><span class="s4">'xxx'</span><span class="s3">)</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">'sub'</span><span class="s3">))</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_file</span><span class="s3">([</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">'sub'</span><span class="s3">, </span><span class="s4">'file3'</span><span class="s3">], </span><span class="s4">'xxx'</span><span class="s3">)</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">'sub2'</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">tmpdir</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">usefixtures</span><span class="s3">(</span><span class="s4">'needs_zlib'</span><span class="s3">)</span>
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">skipif</span><span class="s3">(</span><span class="s4">&quot;not (shutil.which('tar') and shutil.which('gzip'))&quot;</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_tarfile_vs_tar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">tmpdir2 </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir2</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">old_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">make_tarball</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">old_dir</span><span class="s3">)</span>
+
+        <span class="s5"># check if the compressed tarball was created</span>
+        <span class="s1">tarball </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s4">'.tar.gz'</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">)</span>
+
+        <span class="s5"># now create another tarball using `tar`</span>
+        <span class="s1">tarball2 </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s4">'archive2.tar.gz'</span><span class="s3">)</span>
+        <span class="s1">tar_cmd </span><span class="s3">= [</span><span class="s4">'tar'</span><span class="s3">, </span><span class="s4">'-cf'</span><span class="s3">, </span><span class="s4">'archive2.tar'</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">]</span>
+        <span class="s1">gzip_cmd </span><span class="s3">= [</span><span class="s4">'gzip'</span><span class="s3">, </span><span class="s4">'-f'</span><span class="s3">, </span><span class="s4">'-9'</span><span class="s3">, </span><span class="s4">'archive2.tar'</span><span class="s3">]</span>
+        <span class="s1">old_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">spawn</span><span class="s3">(</span><span class="s1">tar_cmd</span><span class="s3">)</span>
+            <span class="s1">spawn</span><span class="s3">(</span><span class="s1">gzip_cmd</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">old_dir</span><span class="s3">)</span>
+
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball2</span><span class="s3">)</span>
+        <span class="s5"># let's compare both tarballs</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">tarball2</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+
+        <span class="s5"># trying an uncompressed one</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir2</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">old_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">make_tarball</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">old_dir</span><span class="s3">)</span>
+        <span class="s1">tarball </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s4">'.tar'</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">)</span>
+
+        <span class="s5"># now for a dry_run</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir2</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">old_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">make_tarball</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">old_dir</span><span class="s3">)</span>
+        <span class="s1">tarball </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s4">'.tar'</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">usefixtures</span><span class="s3">(</span><span class="s4">'needs_zlib'</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_make_zipfile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">zipfile </span><span class="s3">= </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">importorskip</span><span class="s3">(</span><span class="s4">'zipfile'</span><span class="s3">)</span>
+        <span class="s5"># creating something to tar</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">path</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">):</span>
+            <span class="s1">make_zipfile</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+
+        <span class="s5"># check if the compressed tarball was created</span>
+        <span class="s1">tarball </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s4">'.zip'</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">) </span><span class="s2">as </span><span class="s1">zf</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">.</span><span class="s1">namelist</span><span class="s3">()) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_zip_created_files</span>
+
+    <span class="s2">def </span><span class="s1">test_make_zipfile_no_zlib</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">zipfile </span><span class="s3">= </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">importorskip</span><span class="s3">(</span><span class="s4">'zipfile'</span><span class="s3">)</span>
+        <span class="s1">patch</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">archive_util</span><span class="s3">.</span><span class="s1">zipfile</span><span class="s3">, </span><span class="s4">'zlib'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)  </span><span class="s5"># force zlib ImportError</span>
+
+        <span class="s1">called </span><span class="s3">= []</span>
+        <span class="s1">zipfile_class </span><span class="s3">= </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span>
+
+        <span class="s2">def </span><span class="s1">fake_zipfile</span><span class="s3">(*</span><span class="s1">a</span><span class="s3">, **</span><span class="s1">kw</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">kw</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">'compression'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) == </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZIP_STORED</span><span class="s3">:</span>
+                <span class="s1">called</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">a</span><span class="s3">, </span><span class="s1">kw</span><span class="s3">))</span>
+            <span class="s2">return </span><span class="s1">zipfile_class</span><span class="s3">(*</span><span class="s1">a</span><span class="s3">, **</span><span class="s1">kw</span><span class="s3">)</span>
+
+        <span class="s1">patch</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">archive_util</span><span class="s3">.</span><span class="s1">zipfile</span><span class="s3">, </span><span class="s4">'ZipFile'</span><span class="s3">, </span><span class="s1">fake_zipfile</span><span class="s3">)</span>
+
+        <span class="s5"># create something to tar and compress</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">path</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">):</span>
+            <span class="s1">make_zipfile</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+
+        <span class="s1">tarball </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s4">'.zip'</span>
+        <span class="s2">assert </span><span class="s1">called </span><span class="s3">== [((</span><span class="s1">tarball</span><span class="s3">, </span><span class="s4">&quot;w&quot;</span><span class="s3">), {</span><span class="s4">'compression'</span><span class="s3">: </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZIP_STORED</span><span class="s3">})]</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">tarball</span><span class="s3">) </span><span class="s2">as </span><span class="s1">zf</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">.</span><span class="s1">namelist</span><span class="s3">()) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_zip_created_files</span>
+
+    <span class="s2">def </span><span class="s1">test_check_archive_formats</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">assert </span><span class="s1">check_archive_formats</span><span class="s3">([</span><span class="s4">'gztar'</span><span class="s3">, </span><span class="s4">'xxx'</span><span class="s3">, </span><span class="s4">'zip'</span><span class="s3">]) == </span><span class="s4">'xxx'</span>
+        <span class="s2">assert </span><span class="s3">(</span>
+            <span class="s1">check_archive_formats</span><span class="s3">([</span><span class="s4">'gztar'</span><span class="s3">, </span><span class="s4">'bztar'</span><span class="s3">, </span><span class="s4">'xztar'</span><span class="s3">, </span><span class="s4">'ztar'</span><span class="s3">, </span><span class="s4">'tar'</span><span class="s3">, </span><span class="s4">'zip'</span><span class="s3">])</span>
+            <span class="s2">is None</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_make_archive</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">, </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">raises</span><span class="s3">(</span><span class="s1">ValueError</span><span class="s3">):</span>
+            <span class="s1">make_archive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'xxx'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_make_archive_cwd</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">current_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+
+        <span class="s2">def </span><span class="s1">_breaks</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kw</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">()</span>
+
+        <span class="s1">ARCHIVE_FORMATS</span><span class="s3">[</span><span class="s4">'xxx'</span><span class="s3">] = (</span><span class="s1">_breaks</span><span class="s3">, [], </span><span class="s4">'xxx file'</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">make_archive</span><span class="s3">(</span><span class="s4">'xxx'</span><span class="s3">, </span><span class="s4">'xxx'</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">())</span>
+            <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">() == </span><span class="s1">current_dir</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">ARCHIVE_FORMATS</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s4">'xxx'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">test_make_archive_tar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'tar'</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s4">'archive.tar'</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">usefixtures</span><span class="s3">(</span><span class="s4">'needs_zlib'</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">test_make_archive_gztar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'gztar'</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s4">'archive.tar.gz'</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+
+    <span class="s2">def </span><span class="s1">test_make_archive_bztar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">importorskip</span><span class="s3">(</span><span class="s4">'bz2'</span><span class="s3">)</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'bztar'</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s4">'archive.tar.bz2'</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+
+    <span class="s2">def </span><span class="s1">test_make_archive_xztar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">pytest</span><span class="s3">.</span><span class="s1">importorskip</span><span class="s3">(</span><span class="s4">'lzma'</span><span class="s3">)</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'xztar'</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s4">'archive.tar.xz'</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_tarinfo</span><span class="s3">(</span><span class="s1">res</span><span class="s3">) == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_created_files</span>
+
+    <span class="s2">def </span><span class="s1">test_make_archive_owner_group</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s5"># testing make_archive with owner and group, with various combinations</span>
+        <span class="s5"># this works even if there's not gid/uid support</span>
+        <span class="s2">if </span><span class="s1">UID_0_SUPPORT</span><span class="s3">:</span>
+            <span class="s1">group </span><span class="s3">= </span><span class="s1">grp</span><span class="s3">.</span><span class="s1">getgrgid</span><span class="s3">(</span><span class="s6">0</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+            <span class="s1">owner </span><span class="s3">= </span><span class="s1">pwd</span><span class="s3">.</span><span class="s1">getpwuid</span><span class="s3">(</span><span class="s6">0</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">group </span><span class="s3">= </span><span class="s1">owner </span><span class="s3">= </span><span class="s4">'root'</span>
+
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">root_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span>
+            <span class="s1">base_name</span><span class="s3">, </span><span class="s4">'zip'</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">owner</span><span class="s3">=</span><span class="s1">owner</span><span class="s3">, </span><span class="s1">group</span><span class="s3">=</span><span class="s1">group</span>
+        <span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s4">'zip'</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span>
+            <span class="s1">base_name</span><span class="s3">, </span><span class="s4">'tar'</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">owner</span><span class="s3">=</span><span class="s1">owner</span><span class="s3">, </span><span class="s1">group</span><span class="s3">=</span><span class="s1">group</span>
+        <span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+
+        <span class="s1">res </span><span class="s3">= </span><span class="s1">make_archive</span><span class="s3">(</span>
+            <span class="s1">base_name</span><span class="s3">, </span><span class="s4">'tar'</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">owner</span><span class="s3">=</span><span class="s4">'kjhkjhkjg'</span><span class="s3">, </span><span class="s1">group</span><span class="s3">=</span><span class="s4">'oihohoh'</span>
+        <span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">res</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">pytest</span><span class="s3">.</span><span class="s1">mark</span><span class="s3">.</span><span class="s1">usefixtures</span><span class="s3">(</span><span class="s4">'needs_zlib'</span><span class="s3">)</span>
+    <span class="s3">@</span><span class="s1">require_unix_id</span>
+    <span class="s3">@</span><span class="s1">require_uid_0</span>
+    <span class="s2">def </span><span class="s1">test_tarfile_root_owner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">tmpdir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_create_files</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mkdtemp</span><span class="s3">(), </span><span class="s4">'archive'</span><span class="s3">)</span>
+        <span class="s1">old_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">tmpdir</span><span class="s3">)</span>
+        <span class="s1">group </span><span class="s3">= </span><span class="s1">grp</span><span class="s3">.</span><span class="s1">getgrgid</span><span class="s3">(</span><span class="s6">0</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+        <span class="s1">owner </span><span class="s3">= </span><span class="s1">pwd</span><span class="s3">.</span><span class="s1">getpwuid</span><span class="s3">(</span><span class="s6">0</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">archive_name </span><span class="s3">= </span><span class="s1">make_tarball</span><span class="s3">(</span>
+                <span class="s1">base_name</span><span class="s3">, </span><span class="s4">'dist'</span><span class="s3">, </span><span class="s1">compress</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">owner</span><span class="s3">=</span><span class="s1">owner</span><span class="s3">, </span><span class="s1">group</span><span class="s3">=</span><span class="s1">group</span>
+            <span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">old_dir</span><span class="s3">)</span>
+
+        <span class="s5"># check if the compressed tarball was created</span>
+        <span class="s2">assert </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">archive_name</span><span class="s3">)</span>
+
+        <span class="s5"># now checks the rights</span>
+        <span class="s1">archive </span><span class="s3">= </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">archive_name</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">archive</span><span class="s3">.</span><span class="s1">getmembers</span><span class="s3">():</span>
+                <span class="s2">assert </span><span class="s1">member</span><span class="s3">.</span><span class="s1">uid </span><span class="s3">== </span><span class="s6">0</span>
+                <span class="s2">assert </span><span class="s1">member</span><span class="s3">.</span><span class="s1">gid </span><span class="s3">== </span><span class="s6">0</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">archive</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+</pre>
+</body>
+</html>

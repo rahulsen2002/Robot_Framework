@@ -1,0 +1,512 @@
+<html>
+<head>
+<title>collector.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+collector.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+The main purpose of this module is to expose LinkCollector.collect_sources(). 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">collections</span>
+<span class="s2">import </span><span class="s1">email</span><span class="s3">.</span><span class="s1">message</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">json</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">parse</span>
+<span class="s2">import </span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">request</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Iterable</span><span class="s3">, </span><span class="s1">MutableMapping</span><span class="s3">, </span><span class="s1">Sequence</span>
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+<span class="s2">from </span><span class="s1">html</span><span class="s3">.</span><span class="s1">parser </span><span class="s2">import </span><span class="s1">HTMLParser</span>
+<span class="s2">from </span><span class="s1">optparse </span><span class="s2">import </span><span class="s1">Values</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">Callable</span><span class="s3">,</span>
+    <span class="s1">NamedTuple</span><span class="s3">,</span>
+    <span class="s1">Protocol</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor </span><span class="s2">import </span><span class="s1">requests</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">requests </span><span class="s2">import </span><span class="s1">Response</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">requests</span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s1">RetryError</span><span class="s3">, </span><span class="s1">SSLError</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s1">NetworkConnectionError</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">models</span><span class="s3">.</span><span class="s1">link </span><span class="s2">import </span><span class="s1">Link</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">models</span><span class="s3">.</span><span class="s1">search_scope </span><span class="s2">import </span><span class="s1">SearchScope</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">network</span><span class="s3">.</span><span class="s1">session </span><span class="s2">import </span><span class="s1">PipSession</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">network</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s1">raise_for_status</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">filetypes </span><span class="s2">import </span><span class="s1">is_archive_file</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">misc </span><span class="s2">import </span><span class="s1">redact_auth_from_url</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">vcs </span><span class="s2">import </span><span class="s1">vcs</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">sources </span><span class="s2">import </span><span class="s1">CandidatesFromPage</span><span class="s3">, </span><span class="s1">LinkSource</span><span class="s3">, </span><span class="s1">build_source</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+<span class="s1">ResponseHeaders </span><span class="s3">= </span><span class="s1">MutableMapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">_match_vcs_scheme</span><span class="s3">(</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Look for VCS schemes in the URL. 
+ 
+    Returns the matched VCS scheme, or None if there's no match. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">scheme </span><span class="s2">in </span><span class="s1">vcs</span><span class="s3">.</span><span class="s1">schemes</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">url</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">scheme</span><span class="s3">) </span><span class="s2">and </span><span class="s1">url</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">scheme</span><span class="s3">)] </span><span class="s2">in </span><span class="s4">&quot;+:&quot;</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">scheme</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">_NotAPIContent</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">content_type</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">request_desc</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">content_type</span><span class="s3">, </span><span class="s1">request_desc</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">content_type </span><span class="s3">= </span><span class="s1">content_type</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">request_desc </span><span class="s3">= </span><span class="s1">request_desc</span>
+
+
+<span class="s2">def </span><span class="s1">_ensure_api_header</span><span class="s3">(</span><span class="s1">response</span><span class="s3">: </span><span class="s1">Response</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Check the Content-Type header to ensure the response contains a Simple 
+    API Response. 
+ 
+    Raises `_NotAPIContent` if the content type is not a valid content-type. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">content_type </span><span class="s3">= </span><span class="s1">response</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;Content-Type&quot;</span><span class="s3">, </span><span class="s4">&quot;Unknown&quot;</span><span class="s3">)</span>
+
+    <span class="s1">content_type_l </span><span class="s3">= </span><span class="s1">content_type</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">content_type_l</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span>
+        <span class="s3">(</span>
+            <span class="s4">&quot;text/html&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;application/vnd.pypi.simple.v1+html&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;application/vnd.pypi.simple.v1+json&quot;</span><span class="s3">,</span>
+        <span class="s3">)</span>
+    <span class="s3">):</span>
+        <span class="s2">return</span>
+
+    <span class="s2">raise </span><span class="s1">_NotAPIContent</span><span class="s3">(</span><span class="s1">content_type</span><span class="s3">, </span><span class="s1">response</span><span class="s3">.</span><span class="s1">request</span><span class="s3">.</span><span class="s1">method</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_NotHTTP</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">def </span><span class="s1">_ensure_api_response</span><span class="s3">(</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Send a HEAD request to the URL, and ensure the response contains a simple 
+    API Response. 
+ 
+    Raises `_NotHTTP` if the URL is not available for a HEAD request, or 
+    `_NotAPIContent` if the content type is not a valid content type. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">scheme</span><span class="s3">, </span><span class="s1">netloc</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">query</span><span class="s3">, </span><span class="s1">fragment </span><span class="s3">= </span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">parse</span><span class="s3">.</span><span class="s1">urlsplit</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">scheme </span><span class="s2">not in </span><span class="s3">{</span><span class="s4">&quot;http&quot;</span><span class="s3">, </span><span class="s4">&quot;https&quot;</span><span class="s3">}:</span>
+        <span class="s2">raise </span><span class="s1">_NotHTTP</span><span class="s3">()</span>
+
+    <span class="s1">resp </span><span class="s3">= </span><span class="s1">session</span><span class="s3">.</span><span class="s1">head</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">allow_redirects</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+    <span class="s1">raise_for_status</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+
+    <span class="s1">_ensure_api_header</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_simple_response</span><span class="s3">(</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">) </span><span class="s1">-&gt; Response</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Access an Simple API response with GET, and return the response. 
+ 
+    This consists of three parts: 
+ 
+    1. If the URL looks suspiciously like an archive, send a HEAD first to 
+       check the Content-Type is HTML or Simple API, to avoid downloading a 
+       large file. Raise `_NotHTTP` if the content type cannot be determined, or 
+       `_NotAPIContent` if it is not HTML or a Simple API. 
+    2. Actually perform the request. Raise HTTP exceptions on network failures. 
+    3. Check the Content-Type header to make sure we got a Simple API response, 
+       and raise `_NotAPIContent` otherwise. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">is_archive_file</span><span class="s3">(</span><span class="s1">Link</span><span class="s3">(</span><span class="s1">url</span><span class="s3">).</span><span class="s1">filename</span><span class="s3">):</span>
+        <span class="s1">_ensure_api_response</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">session</span><span class="s3">=</span><span class="s1">session</span><span class="s3">)</span>
+
+    <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot;Getting page %s&quot;</span><span class="s3">, </span><span class="s1">redact_auth_from_url</span><span class="s3">(</span><span class="s1">url</span><span class="s3">))</span>
+
+    <span class="s1">resp </span><span class="s3">= </span><span class="s1">session</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span>
+        <span class="s1">url</span><span class="s3">,</span>
+        <span class="s1">headers</span><span class="s3">={</span>
+            <span class="s4">&quot;Accept&quot;</span><span class="s3">: </span><span class="s4">&quot;, &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span>
+                <span class="s3">[</span>
+                    <span class="s4">&quot;application/vnd.pypi.simple.v1+json&quot;</span><span class="s3">,</span>
+                    <span class="s4">&quot;application/vnd.pypi.simple.v1+html; q=0.1&quot;</span><span class="s3">,</span>
+                    <span class="s4">&quot;text/html; q=0.01&quot;</span><span class="s3">,</span>
+                <span class="s3">]</span>
+            <span class="s3">),</span>
+            <span class="s5"># We don't want to blindly returned cached data for</span>
+            <span class="s5"># /simple/, because authors generally expecting that</span>
+            <span class="s5"># twine upload &amp;&amp; pip install will function, but if</span>
+            <span class="s5"># they've done a pip install in the last ~10 minutes</span>
+            <span class="s5"># it won't. Thus by setting this to zero we will not</span>
+            <span class="s5"># blindly use any cached data, however the benefit of</span>
+            <span class="s5"># using max-age=0 instead of no-cache, is that we will</span>
+            <span class="s5"># still support conditional requests, so we will still</span>
+            <span class="s5"># minimize traffic sent in cases where the page hasn't</span>
+            <span class="s5"># changed at all, we will just always incur the round</span>
+            <span class="s5"># trip for the conditional GET now instead of only</span>
+            <span class="s5"># once per 10 minutes.</span>
+            <span class="s5"># For more information, please see pypa/pip#5670.</span>
+            <span class="s4">&quot;Cache-Control&quot;</span><span class="s3">: </span><span class="s4">&quot;max-age=0&quot;</span><span class="s3">,</span>
+        <span class="s3">},</span>
+    <span class="s3">)</span>
+    <span class="s1">raise_for_status</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+
+    <span class="s5"># The check for archives above only works if the url ends with</span>
+    <span class="s5"># something that looks like an archive. However that is not a</span>
+    <span class="s5"># requirement of an url. Unless we issue a HEAD request on every</span>
+    <span class="s5"># url we cannot know ahead of time for sure if something is a</span>
+    <span class="s5"># Simple API response or not. However we can check after we've</span>
+    <span class="s5"># downloaded it.</span>
+    <span class="s1">_ensure_api_header</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+
+    <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span>
+        <span class="s4">&quot;Fetched page %s as %s&quot;</span><span class="s3">,</span>
+        <span class="s1">redact_auth_from_url</span><span class="s3">(</span><span class="s1">url</span><span class="s3">),</span>
+        <span class="s1">resp</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;Content-Type&quot;</span><span class="s3">, </span><span class="s4">&quot;Unknown&quot;</span><span class="s3">),</span>
+    <span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">resp</span>
+
+
+<span class="s2">def </span><span class="s1">_get_encoding_from_headers</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">: </span><span class="s1">ResponseHeaders</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Determine if we have any encoding information in our headers.&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">headers </span><span class="s2">and </span><span class="s4">&quot;Content-Type&quot; </span><span class="s2">in </span><span class="s1">headers</span><span class="s3">:</span>
+        <span class="s1">m </span><span class="s3">= </span><span class="s1">email</span><span class="s3">.</span><span class="s1">message</span><span class="s3">.</span><span class="s1">Message</span><span class="s3">()</span>
+        <span class="s1">m</span><span class="s3">[</span><span class="s4">&quot;content-type&quot;</span><span class="s3">] = </span><span class="s1">headers</span><span class="s3">[</span><span class="s4">&quot;Content-Type&quot;</span><span class="s3">]</span>
+        <span class="s1">charset </span><span class="s3">= </span><span class="s1">m</span><span class="s3">.</span><span class="s1">get_param</span><span class="s3">(</span><span class="s4">&quot;charset&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">charset</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">str</span><span class="s3">(</span><span class="s1">charset</span><span class="s3">)</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">CacheablePageContent</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">page</span><span class="s3">: </span><span class="s1">IndexContent</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">assert </span><span class="s1">page</span><span class="s3">.</span><span class="s1">cache_link_parsing</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">page </span><span class="s3">= </span><span class="s1">page</span>
+
+    <span class="s2">def </span><span class="s1">__eq__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">other</span><span class="s3">: </span><span class="s1">object</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">other</span><span class="s3">, </span><span class="s1">type</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)) </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">page</span><span class="s3">.</span><span class="s1">url </span><span class="s3">== </span><span class="s1">other</span><span class="s3">.</span><span class="s1">page</span><span class="s3">.</span><span class="s1">url</span>
+
+    <span class="s2">def </span><span class="s1">__hash__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hash</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">page</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ParseLinks</span><span class="s3">(</span><span class="s1">Protocol</span><span class="s3">):</span>
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">page</span><span class="s3">: </span><span class="s1">IndexContent</span><span class="s3">) </span><span class="s1">-&gt; Iterable</span><span class="s3">[</span><span class="s1">Link</span><span class="s3">]: ...</span>
+
+
+<span class="s2">def </span><span class="s1">with_cached_index_content</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">: </span><span class="s1">ParseLinks</span><span class="s3">) </span><span class="s1">-&gt; ParseLinks</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a function that parses an Iterable[Link] from an IndexContent, cache the 
+    function's result (keyed by CacheablePageContent), unless the IndexContent 
+    `page` has `page.cache_link_parsing == False`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">@</span><span class="s1">functools</span><span class="s3">.</span><span class="s1">cache</span>
+    <span class="s2">def </span><span class="s1">wrapper</span><span class="s3">(</span><span class="s1">cacheable_page</span><span class="s3">: </span><span class="s1">CacheablePageContent</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">Link</span><span class="s3">]:</span>
+        <span class="s2">return </span><span class="s1">list</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">(</span><span class="s1">cacheable_page</span><span class="s3">.</span><span class="s1">page</span><span class="s3">))</span>
+
+    <span class="s3">@</span><span class="s1">functools</span><span class="s3">.</span><span class="s1">wraps</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">wrapper_wrapper</span><span class="s3">(</span><span class="s1">page</span><span class="s3">: </span><span class="s1">IndexContent</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">Link</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">page</span><span class="s3">.</span><span class="s1">cache_link_parsing</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">wrapper</span><span class="s3">(</span><span class="s1">CacheablePageContent</span><span class="s3">(</span><span class="s1">page</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">list</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">(</span><span class="s1">page</span><span class="s3">))</span>
+
+    <span class="s2">return </span><span class="s1">wrapper_wrapper</span>
+
+
+<span class="s3">@</span><span class="s1">with_cached_index_content</span>
+<span class="s2">def </span><span class="s1">parse_links</span><span class="s3">(</span><span class="s1">page</span><span class="s3">: </span><span class="s1">IndexContent</span><span class="s3">) </span><span class="s1">-&gt; Iterable</span><span class="s3">[</span><span class="s1">Link</span><span class="s3">]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Parse a Simple API's Index Content, and yield its anchor elements as Link objects. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">content_type_l </span><span class="s3">= </span><span class="s1">page</span><span class="s3">.</span><span class="s1">content_type</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">content_type_l</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;application/vnd.pypi.simple.v1+json&quot;</span><span class="s3">):</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">loads</span><span class="s3">(</span><span class="s1">page</span><span class="s3">.</span><span class="s1">content</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">data</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;files&quot;</span><span class="s3">, []):</span>
+            <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">file</span><span class="s3">, </span><span class="s1">page</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">link </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">continue</span>
+            <span class="s2">yield </span><span class="s1">link</span>
+        <span class="s2">return</span>
+
+    <span class="s1">parser </span><span class="s3">= </span><span class="s1">HTMLLinkParser</span><span class="s3">(</span><span class="s1">page</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+    <span class="s1">encoding </span><span class="s3">= </span><span class="s1">page</span><span class="s3">.</span><span class="s1">encoding </span><span class="s2">or </span><span class="s4">&quot;utf-8&quot;</span>
+    <span class="s1">parser</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">page</span><span class="s3">.</span><span class="s1">content</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">))</span>
+
+    <span class="s1">url </span><span class="s3">= </span><span class="s1">page</span><span class="s3">.</span><span class="s1">url</span>
+    <span class="s1">base_url </span><span class="s3">= </span><span class="s1">parser</span><span class="s3">.</span><span class="s1">base_url </span><span class="s2">or </span><span class="s1">url</span>
+    <span class="s2">for </span><span class="s1">anchor </span><span class="s2">in </span><span class="s1">parser</span><span class="s3">.</span><span class="s1">anchors</span><span class="s3">:</span>
+        <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">.</span><span class="s1">from_element</span><span class="s3">(</span><span class="s1">anchor</span><span class="s3">, </span><span class="s1">page_url</span><span class="s3">=</span><span class="s1">url</span><span class="s3">, </span><span class="s1">base_url</span><span class="s3">=</span><span class="s1">base_url</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">link </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">continue</span>
+        <span class="s2">yield </span><span class="s1">link</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">IndexContent</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Represents one response (or page), along with its URL. 
+ 
+    :param encoding: the encoding to decode the given content. 
+    :param url: the URL from which the HTML was downloaded. 
+    :param cache_link_parsing: whether links parsed from this page's url 
+                               should be cached. PyPI index urls should 
+                               have this set to False, for example. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">content</span><span class="s3">: </span><span class="s1">bytes</span>
+    <span class="s1">content_type</span><span class="s3">: </span><span class="s1">str</span>
+    <span class="s1">encoding</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span>
+    <span class="s1">url</span><span class="s3">: </span><span class="s1">str</span>
+    <span class="s1">cache_link_parsing</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">__str__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">redact_auth_from_url</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">HTMLLinkParser</span><span class="s3">(</span><span class="s1">HTMLParser</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    HTMLParser that keeps the first base HREF and a list of all anchor 
+    elements' attributes. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">convert_charrefs</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s1">url</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">base_url</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">anchors</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">]] = []</span>
+
+    <span class="s2">def </span><span class="s1">handle_starttag</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">tag</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">attrs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">]]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">tag </span><span class="s3">== </span><span class="s4">&quot;base&quot; </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">base_url </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">href </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_href</span><span class="s3">(</span><span class="s1">attrs</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">href </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">base_url </span><span class="s3">= </span><span class="s1">href</span>
+        <span class="s2">elif </span><span class="s1">tag </span><span class="s3">== </span><span class="s4">&quot;a&quot;</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">anchors</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">dict</span><span class="s3">(</span><span class="s1">attrs</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">get_href</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">attrs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">]]) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">attrs</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s3">== </span><span class="s4">&quot;href&quot;</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">value</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">_handle_get_simple_fail</span><span class="s3">(</span>
+    <span class="s1">link</span><span class="s3">: </span><span class="s1">Link</span><span class="s3">,</span>
+    <span class="s1">reason</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">Exception</span><span class="s3">,</span>
+    <span class="s1">meth</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">[..., </span><span class="s2">None</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">meth </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">meth </span><span class="s3">= </span><span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span>
+    <span class="s1">meth</span><span class="s3">(</span><span class="s4">&quot;Could not fetch URL %s: %s - skipping&quot;</span><span class="s3">, </span><span class="s1">link</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_make_index_content</span><span class="s3">(</span>
+    <span class="s1">response</span><span class="s3">: </span><span class="s1">Response</span><span class="s3">, </span><span class="s1">cache_link_parsing</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span>
+<span class="s3">) </span><span class="s1">-&gt; IndexContent</span><span class="s3">:</span>
+    <span class="s1">encoding </span><span class="s3">= </span><span class="s1">_get_encoding_from_headers</span><span class="s3">(</span><span class="s1">response</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">IndexContent</span><span class="s3">(</span>
+        <span class="s1">response</span><span class="s3">.</span><span class="s1">content</span><span class="s3">,</span>
+        <span class="s1">response</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">[</span><span class="s4">&quot;Content-Type&quot;</span><span class="s3">],</span>
+        <span class="s1">encoding</span><span class="s3">=</span><span class="s1">encoding</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">=</span><span class="s1">response</span><span class="s3">.</span><span class="s1">url</span><span class="s3">,</span>
+        <span class="s1">cache_link_parsing</span><span class="s3">=</span><span class="s1">cache_link_parsing</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_index_content</span><span class="s3">(</span><span class="s1">link</span><span class="s3">: </span><span class="s1">Link</span><span class="s3">, *, </span><span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">) </span><span class="s1">-&gt; IndexContent </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s1">url </span><span class="s3">= </span><span class="s1">link</span><span class="s3">.</span><span class="s1">url</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;#&quot;</span><span class="s3">, </span><span class="s6">1</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+
+    <span class="s5"># Check for VCS schemes that do not support lookup as web pages.</span>
+    <span class="s1">vcs_scheme </span><span class="s3">= </span><span class="s1">_match_vcs_scheme</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">vcs_scheme</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+            <span class="s4">&quot;Cannot look at %s URL %s because it does not support lookup as web pages.&quot;</span><span class="s3">,</span>
+            <span class="s1">vcs_scheme</span><span class="s3">,</span>
+            <span class="s1">link</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s5"># Tack index.html onto file:// URLs that point to directories</span>
+    <span class="s1">scheme</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">= </span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">parse</span><span class="s3">.</span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">scheme </span><span class="s3">== </span><span class="s4">&quot;file&quot; </span><span class="s2">and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">request</span><span class="s3">.</span><span class="s1">url2pathname</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)):</span>
+        <span class="s5"># add trailing slash if not present so urljoin doesn't trim</span>
+        <span class="s5"># final segment</span>
+        <span class="s2">if not </span><span class="s1">url</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;/&quot;</span><span class="s3">):</span>
+            <span class="s1">url </span><span class="s3">+= </span><span class="s4">&quot;/&quot;</span>
+        <span class="s5"># TODO: In the future, it would be nice if pip supported PEP 691</span>
+        <span class="s5">#       style responses in the file:// URLs, however there's no</span>
+        <span class="s5">#       standard file extension for application/vnd.pypi.simple.v1+json</span>
+        <span class="s5">#       so we'll need to come up with something on our own.</span>
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">parse</span><span class="s3">.</span><span class="s1">urljoin</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s4">&quot;index.html&quot;</span><span class="s3">)</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot; file: URL is directory, getting %s&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">)</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">resp </span><span class="s3">= </span><span class="s1">_get_simple_response</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">session</span><span class="s3">=</span><span class="s1">session</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">_NotHTTP</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+            <span class="s4">&quot;Skipping page %s because it looks like an archive, and cannot &quot;</span>
+            <span class="s4">&quot;be checked by a HTTP HEAD request.&quot;</span><span class="s3">,</span>
+            <span class="s1">link</span><span class="s3">,</span>
+        <span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">_NotAPIContent </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+            <span class="s4">&quot;Skipping page %s because the %s request got Content-Type: %s. &quot;</span>
+            <span class="s4">&quot;The only supported Content-Types are application/vnd.pypi.simple.v1+json, &quot;</span>
+            <span class="s4">&quot;application/vnd.pypi.simple.v1+html, and text/html&quot;</span><span class="s3">,</span>
+            <span class="s1">link</span><span class="s3">,</span>
+            <span class="s1">exc</span><span class="s3">.</span><span class="s1">request_desc</span><span class="s3">,</span>
+            <span class="s1">exc</span><span class="s3">.</span><span class="s1">content_type</span><span class="s3">,</span>
+        <span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">NetworkConnectionError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s1">_handle_get_simple_fail</span><span class="s3">(</span><span class="s1">link</span><span class="s3">, </span><span class="s1">exc</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">RetryError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s1">_handle_get_simple_fail</span><span class="s3">(</span><span class="s1">link</span><span class="s3">, </span><span class="s1">exc</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">SSLError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s1">reason </span><span class="s3">= </span><span class="s4">&quot;There was a problem confirming the ssl certificate: &quot;</span>
+        <span class="s1">reason </span><span class="s3">+= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">)</span>
+        <span class="s1">_handle_get_simple_fail</span><span class="s3">(</span><span class="s1">link</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">, </span><span class="s1">meth</span><span class="s3">=</span><span class="s1">logger</span><span class="s3">.</span><span class="s1">info</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">requests</span><span class="s3">.</span><span class="s1">ConnectionError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s1">_handle_get_simple_fail</span><span class="s3">(</span><span class="s1">link</span><span class="s3">, </span><span class="s4">f&quot;connection error: </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">requests</span><span class="s3">.</span><span class="s1">Timeout</span><span class="s3">:</span>
+        <span class="s1">_handle_get_simple_fail</span><span class="s3">(</span><span class="s1">link</span><span class="s3">, </span><span class="s4">&quot;timed out&quot;</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">_make_index_content</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">, </span><span class="s1">cache_link_parsing</span><span class="s3">=</span><span class="s1">link</span><span class="s3">.</span><span class="s1">cache_link_parsing</span><span class="s3">)</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">CollectedSources</span><span class="s3">(</span><span class="s1">NamedTuple</span><span class="s3">):</span>
+    <span class="s1">find_links</span><span class="s3">: </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">LinkSource </span><span class="s3">| </span><span class="s2">None</span><span class="s3">]</span>
+    <span class="s1">index_urls</span><span class="s3">: </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">LinkSource </span><span class="s3">| </span><span class="s2">None</span><span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">LinkCollector</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Responsible for collecting Link objects from all configured locations, 
+    making network requests as needed. 
+ 
+    The class's main method is its collect_sources() method. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">,</span>
+        <span class="s1">search_scope</span><span class="s3">: </span><span class="s1">SearchScope</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">search_scope </span><span class="s3">= </span><span class="s1">search_scope</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">session </span><span class="s3">= </span><span class="s1">session</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">create</span><span class="s3">(</span>
+        <span class="s1">cls</span><span class="s3">,</span>
+        <span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">,</span>
+        <span class="s1">options</span><span class="s3">: </span><span class="s1">Values</span><span class="s3">,</span>
+        <span class="s1">suppress_no_index</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; LinkCollector</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        :param session: The Session to use to make requests. 
+        :param suppress_no_index: Whether to ignore the --no-index option 
+            when constructing the SearchScope object. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">index_urls </span><span class="s3">= [</span><span class="s1">options</span><span class="s3">.</span><span class="s1">index_url</span><span class="s3">] + </span><span class="s1">options</span><span class="s3">.</span><span class="s1">extra_index_urls</span>
+        <span class="s2">if </span><span class="s1">options</span><span class="s3">.</span><span class="s1">no_index </span><span class="s2">and not </span><span class="s1">suppress_no_index</span><span class="s3">:</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span>
+                <span class="s4">&quot;Ignoring indexes: %s&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;,&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">redact_auth_from_url</span><span class="s3">(</span><span class="s1">url</span><span class="s3">) </span><span class="s2">for </span><span class="s1">url </span><span class="s2">in </span><span class="s1">index_urls</span><span class="s3">),</span>
+            <span class="s3">)</span>
+            <span class="s1">index_urls </span><span class="s3">= []</span>
+
+        <span class="s5"># Make sure find_links is a list before passing to create().</span>
+        <span class="s1">find_links </span><span class="s3">= </span><span class="s1">options</span><span class="s3">.</span><span class="s1">find_links </span><span class="s2">or </span><span class="s3">[]</span>
+
+        <span class="s1">search_scope </span><span class="s3">= </span><span class="s1">SearchScope</span><span class="s3">.</span><span class="s1">create</span><span class="s3">(</span>
+            <span class="s1">find_links</span><span class="s3">=</span><span class="s1">find_links</span><span class="s3">,</span>
+            <span class="s1">index_urls</span><span class="s3">=</span><span class="s1">index_urls</span><span class="s3">,</span>
+            <span class="s1">no_index</span><span class="s3">=</span><span class="s1">options</span><span class="s3">.</span><span class="s1">no_index</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s1">link_collector </span><span class="s3">= </span><span class="s1">LinkCollector</span><span class="s3">(</span>
+            <span class="s1">session</span><span class="s3">=</span><span class="s1">session</span><span class="s3">,</span>
+            <span class="s1">search_scope</span><span class="s3">=</span><span class="s1">search_scope</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">link_collector</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">find_links</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">search_scope</span><span class="s3">.</span><span class="s1">find_links</span>
+
+    <span class="s2">def </span><span class="s1">fetch_response</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">location</span><span class="s3">: </span><span class="s1">Link</span><span class="s3">) </span><span class="s1">-&gt; IndexContent </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Fetch an HTML page containing package links. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">_get_index_content</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s1">session</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">session</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">collect_sources</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">project_name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">candidates_from_page</span><span class="s3">: </span><span class="s1">CandidatesFromPage</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; CollectedSources</span><span class="s3">:</span>
+        <span class="s5"># The OrderedDict calls deduplicate sources by URL.</span>
+        <span class="s1">index_url_sources </span><span class="s3">= </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">OrderedDict</span><span class="s3">(</span>
+            <span class="s1">build_source</span><span class="s3">(</span>
+                <span class="s1">loc</span><span class="s3">,</span>
+                <span class="s1">candidates_from_page</span><span class="s3">=</span><span class="s1">candidates_from_page</span><span class="s3">,</span>
+                <span class="s1">page_validator</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">session</span><span class="s3">.</span><span class="s1">is_secure_origin</span><span class="s3">,</span>
+                <span class="s1">expand_dir</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+                <span class="s1">cache_link_parsing</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+                <span class="s1">project_name</span><span class="s3">=</span><span class="s1">project_name</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">loc </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">search_scope</span><span class="s3">.</span><span class="s1">get_index_urls_locations</span><span class="s3">(</span><span class="s1">project_name</span><span class="s3">)</span>
+        <span class="s3">).</span><span class="s1">values</span><span class="s3">()</span>
+        <span class="s1">find_links_sources </span><span class="s3">= </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">OrderedDict</span><span class="s3">(</span>
+            <span class="s1">build_source</span><span class="s3">(</span>
+                <span class="s1">loc</span><span class="s3">,</span>
+                <span class="s1">candidates_from_page</span><span class="s3">=</span><span class="s1">candidates_from_page</span><span class="s3">,</span>
+                <span class="s1">page_validator</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">session</span><span class="s3">.</span><span class="s1">is_secure_origin</span><span class="s3">,</span>
+                <span class="s1">expand_dir</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+                <span class="s1">cache_link_parsing</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+                <span class="s1">project_name</span><span class="s3">=</span><span class="s1">project_name</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">loc </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">find_links</span>
+        <span class="s3">).</span><span class="s1">values</span><span class="s3">()</span>
+
+        <span class="s2">if </span><span class="s1">logger</span><span class="s3">.</span><span class="s1">isEnabledFor</span><span class="s3">(</span><span class="s1">logging</span><span class="s3">.</span><span class="s1">DEBUG</span><span class="s3">):</span>
+            <span class="s1">lines </span><span class="s3">= [</span>
+                <span class="s4">f&quot;* </span><span class="s2">{</span><span class="s1">s</span><span class="s3">.</span><span class="s1">link</span><span class="s2">}</span><span class="s4">&quot;</span>
+                <span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">itertools</span><span class="s3">.</span><span class="s1">chain</span><span class="s3">(</span><span class="s1">find_links_sources</span><span class="s3">, </span><span class="s1">index_url_sources</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">s </span><span class="s2">is not None and </span><span class="s1">s</span><span class="s3">.</span><span class="s1">link </span><span class="s2">is not None</span>
+            <span class="s3">]</span>
+            <span class="s1">lines </span><span class="s3">= [</span>
+                <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">len</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">)</span><span class="s2">} </span><span class="s4">location(s) to search &quot;</span>
+                <span class="s4">f&quot;for versions of </span><span class="s2">{</span><span class="s1">project_name</span><span class="s2">}</span><span class="s4">:&quot;</span>
+            <span class="s3">] + </span><span class="s1">lines</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">))</span>
+
+        <span class="s2">return </span><span class="s1">CollectedSources</span><span class="s3">(</span>
+            <span class="s1">find_links</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">find_links_sources</span><span class="s3">),</span>
+            <span class="s1">index_urls</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">index_url_sources</span><span class="s3">),</span>
+        <span class="s3">)</span>
+</pre>
+</body>
+</html>

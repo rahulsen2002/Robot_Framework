@@ -1,0 +1,364 @@
+<html>
+<head>
+<title>cygwin.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cygwin.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.cygwinccompiler 
+ 
+Provides the CygwinCCompiler class, a subclass of UnixCCompiler that 
+handles the Cygwin port of the GNU C compiler to Windows.  It also contains 
+the Mingw32CCompiler class which handles the mingw32 port of GCC (same as 
+cygwin in no-cygwin mode). 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">copy</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+<span class="s2">import </span><span class="s1">shlex</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">from </span><span class="s1">subprocess </span><span class="s2">import </span><span class="s1">check_output</span>
+
+<span class="s2">from </span><span class="s3">...</span><span class="s1">errors </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">DistutilsExecError</span><span class="s3">,</span>
+    <span class="s1">DistutilsPlatformError</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">file_util </span><span class="s2">import </span><span class="s1">write_file</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">sysconfig </span><span class="s2">import </span><span class="s1">get_config_vars</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">version </span><span class="s2">import </span><span class="s1">LooseVersion</span><span class="s3">, </span><span class="s1">suppress_known_deprecation</span>
+<span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">unix</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">CompileError</span><span class="s3">,</span>
+    <span class="s1">Error</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_msvcr</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot;No longer needed, but kept for backward compatibility.&quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s3">[]</span>
+
+
+<span class="s1">_runtime_library_dirs_msg </span><span class="s3">= (</span>
+    <span class="s4">&quot;Unable to set runtime library search path on Windows, &quot;</span>
+    <span class="s4">&quot;usually indicated by `runtime_library_dirs` parameter to Extension&quot;</span>
+<span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Compiler</span><span class="s3">(</span><span class="s1">unix</span><span class="s3">.</span><span class="s1">Compiler</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Handles the Cygwin port of the GNU C compiler to Windows.&quot;&quot;&quot;</span>
+
+    <span class="s1">compiler_type </span><span class="s3">= </span><span class="s4">'cygwin'</span>
+    <span class="s1">obj_extension </span><span class="s3">= </span><span class="s4">&quot;.o&quot;</span>
+    <span class="s1">static_lib_extension </span><span class="s3">= </span><span class="s4">&quot;.a&quot;</span>
+    <span class="s1">shared_lib_extension </span><span class="s3">= </span><span class="s4">&quot;.dll.a&quot;</span>
+    <span class="s1">dylib_lib_extension </span><span class="s3">= </span><span class="s4">&quot;.dll&quot;</span>
+    <span class="s1">static_lib_format </span><span class="s3">= </span><span class="s4">&quot;lib%s%s&quot;</span>
+    <span class="s1">shared_lib_format </span><span class="s3">= </span><span class="s4">&quot;lib%s%s&quot;</span>
+    <span class="s1">dylib_lib_format </span><span class="s3">= </span><span class="s4">&quot;cyg%s%s&quot;</span>
+    <span class="s1">exe_extension </span><span class="s3">= </span><span class="s4">&quot;.exe&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">force</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">verbose</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">, </span><span class="s1">force</span><span class="s3">)</span>
+
+        <span class="s1">status</span><span class="s3">, </span><span class="s1">details </span><span class="s3">= </span><span class="s1">check_config_h</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s4">f&quot;Python's GCC status: </span><span class="s2">{</span><span class="s1">status</span><span class="s2">} </span><span class="s4">(details: </span><span class="s2">{</span><span class="s1">details</span><span class="s2">}</span><span class="s4">)&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">status </span><span class="s2">is not </span><span class="s1">CONFIG_H_OK</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s4">&quot;Python's pyconfig.h doesn't seem to support your compiler. &quot;</span>
+                <span class="s4">f&quot;Reason: </span><span class="s2">{</span><span class="s1">details</span><span class="s2">}</span><span class="s4">. &quot;</span>
+                <span class="s4">&quot;Compiling may fail because of undefined preprocessor macros.&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx </span><span class="s3">= </span><span class="s1">get_config_vars</span><span class="s3">(</span><span class="s4">'CC'</span><span class="s3">, </span><span class="s4">'CXX'</span><span class="s3">)</span>
+
+        <span class="s5"># Override 'CC' and 'CXX' environment variables for</span>
+        <span class="s5"># building using MINGW compiler for MSVC python.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cc </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">'CC'</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc </span><span class="s2">or </span><span class="s4">'gcc'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cxx </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">'CXX'</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx </span><span class="s2">or </span><span class="s4">'g++'</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll_cxx </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span>
+        <span class="s1">shared_option </span><span class="s3">= </span><span class="s4">&quot;-shared&quot;</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_executables</span><span class="s3">(</span>
+            <span class="s1">compiler</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s2">} </span><span class="s4">-mcygwin -O -Wall'</span><span class="s3">,</span>
+            <span class="s1">compiler_so</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s2">} </span><span class="s4">-mcygwin -mdll -O -Wall'</span><span class="s3">,</span>
+            <span class="s1">compiler_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span><span class="s2">} </span><span class="s4">-mcygwin -O -Wall'</span><span class="s3">,</span>
+            <span class="s1">compiler_so_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span><span class="s2">} </span><span class="s4">-mcygwin -mdll -O -Wall'</span><span class="s3">,</span>
+            <span class="s1">linker_exe</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s2">} </span><span class="s4">-mcygwin'</span><span class="s3">,</span>
+            <span class="s1">linker_so</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll</span><span class="s2">} </span><span class="s4">-mcygwin </span><span class="s2">{</span><span class="s1">shared_option</span><span class="s2">}</span><span class="s4">'</span><span class="s3">,</span>
+            <span class="s1">linker_exe_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span><span class="s2">} </span><span class="s4">-mcygwin'</span><span class="s3">,</span>
+            <span class="s1">linker_so_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll_cxx</span><span class="s2">} </span><span class="s4">-mcygwin </span><span class="s2">{</span><span class="s1">shared_option</span><span class="s2">}</span><span class="s4">'</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dll_libraries </span><span class="s3">= </span><span class="s1">get_msvcr</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">gcc_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s5"># Older numpy depended on this existing to check for ancient</span>
+        <span class="s5"># gcc versions. This doesn't make much sense with clang etc so</span>
+        <span class="s5"># just hardcode to something recent.</span>
+        <span class="s5"># https://github.com/numpy/numpy/pull/20333</span>
+        <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+            <span class="s4">&quot;gcc_version attribute of CygwinCCompiler is deprecated. &quot;</span>
+            <span class="s4">&quot;Instead of returning actual gcc version a fixed value 11.2.0 is returned.&quot;</span><span class="s3">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s3">,</span>
+            <span class="s1">stacklevel</span><span class="s3">=</span><span class="s6">2</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">suppress_known_deprecation</span><span class="s3">():</span>
+            <span class="s2">return </span><span class="s1">LooseVersion</span><span class="s3">(</span><span class="s4">&quot;11.2.0&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">, </span><span class="s1">cc_args</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Compiles the source by spawning GCC and windres if needed.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">ext </span><span class="s2">in </span><span class="s3">(</span><span class="s4">'.rc'</span><span class="s3">, </span><span class="s4">'.res'</span><span class="s3">):</span>
+            <span class="s5"># gcc needs '.res' and '.rc' compiled to object files !!!</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">spawn</span><span class="s3">([</span><span class="s4">&quot;windres&quot;</span><span class="s3">, </span><span class="s4">&quot;-i&quot;</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s4">&quot;-o&quot;</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">])</span>
+            <span class="s2">except </span><span class="s1">DistutilsExecError </span><span class="s2">as </span><span class="s1">msg</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">CompileError</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:  </span><span class="s5"># for other files use the C-compiler</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">detect_language</span><span class="s3">(</span><span class="s1">src</span><span class="s3">) == </span><span class="s4">'c++'</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">spawn</span><span class="s3">(</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">compiler_so_cxx</span>
+                        <span class="s3">+ </span><span class="s1">cc_args</span>
+                        <span class="s3">+ [</span><span class="s1">src</span><span class="s3">, </span><span class="s4">'-o'</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">]</span>
+                        <span class="s3">+ </span><span class="s1">extra_postargs</span>
+                    <span class="s3">)</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">spawn</span><span class="s3">(</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">compiler_so </span><span class="s3">+ </span><span class="s1">cc_args </span><span class="s3">+ [</span><span class="s1">src</span><span class="s3">, </span><span class="s4">'-o'</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">] + </span><span class="s1">extra_postargs</span>
+                    <span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">DistutilsExecError </span><span class="s2">as </span><span class="s1">msg</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">CompileError</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">link</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">target_desc</span><span class="s3">,</span>
+        <span class="s1">objects</span><span class="s3">,</span>
+        <span class="s1">output_filename</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">runtime_library_dirs</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">export_symbols</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">build_temp</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">target_lang</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Link the objects.&quot;&quot;&quot;</span>
+        <span class="s5"># use separate copies, so we can modify the lists</span>
+        <span class="s1">extra_preargs </span><span class="s3">= </span><span class="s1">copy</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">(</span><span class="s1">extra_preargs </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s1">libraries </span><span class="s3">= </span><span class="s1">copy</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">(</span><span class="s1">libraries </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s1">objects </span><span class="s3">= </span><span class="s1">copy</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">(</span><span class="s1">objects </span><span class="s2">or </span><span class="s3">[])</span>
+
+        <span class="s2">if </span><span class="s1">runtime_library_dirs</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s1">_runtime_library_dirs_msg</span><span class="s3">)</span>
+
+        <span class="s5"># Additional libraries</span>
+        <span class="s1">libraries</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dll_libraries</span><span class="s3">)</span>
+
+        <span class="s5"># handle export symbols by creating a def-file</span>
+        <span class="s5"># with executables this only works with gcc/ld as linker</span>
+        <span class="s2">if </span><span class="s3">(</span><span class="s1">export_symbols </span><span class="s2">is not None</span><span class="s3">) </span><span class="s2">and </span><span class="s3">(</span>
+            <span class="s1">target_desc </span><span class="s3">!= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">EXECUTABLE </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll </span><span class="s3">== </span><span class="s4">&quot;gcc&quot;</span>
+        <span class="s3">):</span>
+            <span class="s5"># (The linker doesn't do anything if output is up-to-date.</span>
+            <span class="s5"># So it would probably better to check if we really need this,</span>
+            <span class="s5"># but for this we had to insert some unchanged parts of</span>
+            <span class="s5"># UnixCCompiler, and this is not what we want.)</span>
+
+            <span class="s5"># we want to put some files in the same directory as the</span>
+            <span class="s5"># object files are, build_temp doesn't help much</span>
+            <span class="s5"># where are the object files</span>
+            <span class="s1">temp_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">[</span><span class="s6">0</span><span class="s3">])</span>
+            <span class="s5"># name of dll to give the helper files the same base name</span>
+            <span class="s3">(</span><span class="s1">dll_name</span><span class="s3">, </span><span class="s1">dll_extension</span><span class="s3">) = </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">output_filename</span><span class="s3">)</span>
+            <span class="s3">)</span>
+
+            <span class="s5"># generate the filenames for these files</span>
+            <span class="s1">def_file </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">temp_dir</span><span class="s3">, </span><span class="s1">dll_name </span><span class="s3">+ </span><span class="s4">&quot;.def&quot;</span><span class="s3">)</span>
+
+            <span class="s5"># Generate .def file</span>
+            <span class="s1">contents </span><span class="s3">= [</span><span class="s4">f&quot;LIBRARY </span><span class="s2">{</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">output_filename</span><span class="s3">)</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s4">&quot;EXPORTS&quot;</span><span class="s3">]</span>
+            <span class="s1">contents</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">export_symbols</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">write_file</span><span class="s3">, (</span><span class="s1">def_file</span><span class="s3">, </span><span class="s1">contents</span><span class="s3">), </span><span class="s4">f&quot;writing </span><span class="s2">{</span><span class="s1">def_file</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+            <span class="s5"># next add options for def-file</span>
+
+            <span class="s5"># for gcc/ld the def-file is specified as any object files</span>
+            <span class="s1">objects</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">def_file</span><span class="s3">)</span>
+
+        <span class="s5"># end: if ((export_symbols is not None) and</span>
+        <span class="s5">#        (target_desc != self.EXECUTABLE or self.linker_dll == &quot;gcc&quot;)):</span>
+
+        <span class="s5"># who wants symbols and a many times larger output file</span>
+        <span class="s5"># should explicitly switch the debug mode on</span>
+        <span class="s5"># otherwise we let ld strip the output file</span>
+        <span class="s5"># (On my machine: 10KiB &lt; stripped_file &lt; ??100KiB</span>
+        <span class="s5">#   unstripped_file = stripped_file + XXX KiB</span>
+        <span class="s5">#  ( XXX=254 for a typical python extension))</span>
+        <span class="s2">if not </span><span class="s1">debug</span><span class="s3">:</span>
+            <span class="s1">extra_preargs</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;-s&quot;</span><span class="s3">)</span>
+
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">link</span><span class="s3">(</span>
+            <span class="s1">target_desc</span><span class="s3">,</span>
+            <span class="s1">objects</span><span class="s3">,</span>
+            <span class="s1">output_filename</span><span class="s3">,</span>
+            <span class="s1">output_dir</span><span class="s3">,</span>
+            <span class="s1">libraries</span><span class="s3">,</span>
+            <span class="s1">library_dirs</span><span class="s3">,</span>
+            <span class="s1">runtime_library_dirs</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,  </span><span class="s5"># export_symbols, we do this in our def-file</span>
+            <span class="s1">debug</span><span class="s3">,</span>
+            <span class="s1">extra_preargs</span><span class="s3">,</span>
+            <span class="s1">extra_postargs</span><span class="s3">,</span>
+            <span class="s1">build_temp</span><span class="s3">,</span>
+            <span class="s1">target_lang</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">runtime_library_dir_option</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">):</span>
+        <span class="s5"># cygwin doesn't support rpath. While in theory we could error</span>
+        <span class="s5"># out like MSVC does, code might expect it to work like on Unix, so</span>
+        <span class="s5"># just warn and hope for the best.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s1">_runtime_library_dirs_msg</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+
+    <span class="s5"># -- Miscellaneous methods -----------------------------------------</span>
+
+    <span class="s2">def </span><span class="s1">_make_out_path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">, </span><span class="s1">src_name</span><span class="s3">):</span>
+        <span class="s5"># use normcase to make sure '.rc' is really '.rc' and not '.RC'</span>
+        <span class="s1">norm_src_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normcase</span><span class="s3">(</span><span class="s1">src_name</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">super</span><span class="s3">().</span><span class="s1">_make_out_path</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">, </span><span class="s1">norm_src_name</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">out_extensions</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Add support for rc and res files. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s3">{</span>
+            <span class="s3">**</span><span class="s1">super</span><span class="s3">().</span><span class="s1">out_extensions</span><span class="s3">,</span>
+            <span class="s3">**{</span><span class="s1">ext</span><span class="s3">: </span><span class="s1">ext </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">obj_extension </span><span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s3">(</span><span class="s4">'.res'</span><span class="s3">, </span><span class="s4">'.rc'</span><span class="s3">)},</span>
+        <span class="s3">}</span>
+
+
+<span class="s5"># the same as cygwin plus some additional parameters</span>
+<span class="s2">class </span><span class="s1">MinGW32Compiler</span><span class="s3">(</span><span class="s1">Compiler</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Handles the Mingw32 port of the GNU C compiler to Windows.&quot;&quot;&quot;</span>
+
+    <span class="s1">compiler_type </span><span class="s3">= </span><span class="s4">'mingw32'</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">force</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">verbose</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">, </span><span class="s1">force</span><span class="s3">)</span>
+
+        <span class="s1">shared_option </span><span class="s3">= </span><span class="s4">&quot;-shared&quot;</span>
+
+        <span class="s2">if </span><span class="s1">is_cygwincc</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">Error</span><span class="s3">(</span><span class="s4">'Cygwin gcc cannot be used with --compiler=mingw32'</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_executables</span><span class="s3">(</span>
+            <span class="s1">compiler</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s2">} </span><span class="s4">-O -Wall'</span><span class="s3">,</span>
+            <span class="s1">compiler_so</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s2">} </span><span class="s4">-shared -O -Wall'</span><span class="s3">,</span>
+            <span class="s1">compiler_so_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span><span class="s2">} </span><span class="s4">-shared -O -Wall'</span><span class="s3">,</span>
+            <span class="s1">compiler_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span><span class="s2">} </span><span class="s4">-O -Wall'</span><span class="s3">,</span>
+            <span class="s1">linker_exe</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cc</span><span class="s2">}</span><span class="s4">'</span><span class="s3">,</span>
+            <span class="s1">linker_so</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll</span><span class="s2">} {</span><span class="s1">shared_option</span><span class="s2">}</span><span class="s4">'</span><span class="s3">,</span>
+            <span class="s1">linker_exe_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cxx</span><span class="s2">}</span><span class="s4">'</span><span class="s3">,</span>
+            <span class="s1">linker_so_cxx</span><span class="s3">=</span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">linker_dll_cxx</span><span class="s2">} {</span><span class="s1">shared_option</span><span class="s2">}</span><span class="s4">'</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">runtime_library_dir_option</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">DistutilsPlatformError</span><span class="s3">(</span><span class="s1">_runtime_library_dirs_msg</span><span class="s3">)</span>
+
+
+<span class="s5"># Because these compilers aren't configured in Python's pyconfig.h file by</span>
+<span class="s5"># default, we should at least warn the user if he is using an unmodified</span>
+<span class="s5"># version.</span>
+
+<span class="s1">CONFIG_H_OK </span><span class="s3">= </span><span class="s4">&quot;ok&quot;</span>
+<span class="s1">CONFIG_H_NOTOK </span><span class="s3">= </span><span class="s4">&quot;not ok&quot;</span>
+<span class="s1">CONFIG_H_UNCERTAIN </span><span class="s3">= </span><span class="s4">&quot;uncertain&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">check_config_h</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot;Check if the current Python installation appears amenable to building 
+    extensions with GCC. 
+ 
+    Returns a tuple (status, details), where 'status' is one of the following 
+    constants: 
+ 
+    - CONFIG_H_OK: all is well, go ahead and compile 
+    - CONFIG_H_NOTOK: doesn't look good 
+    - CONFIG_H_UNCERTAIN: not sure -- unable to read pyconfig.h 
+ 
+    'details' is a human-readable string explaining the situation. 
+ 
+    Note there are two ways to conclude &quot;OK&quot;: either 'sys.version' contains 
+    the string &quot;GCC&quot; (implying that this Python was built with GCC), or the 
+    installed &quot;pyconfig.h&quot; contains the string &quot;__GNUC__&quot;. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s5"># XXX since this function also checks sys.version, it's not strictly a</span>
+    <span class="s5"># &quot;pyconfig.h&quot; check -- should probably be renamed...</span>
+
+    <span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">sysconfig</span>
+
+    <span class="s5"># if sys.version contains GCC then python was compiled with GCC, and the</span>
+    <span class="s5"># pyconfig.h file should be OK</span>
+    <span class="s2">if </span><span class="s4">&quot;GCC&quot; </span><span class="s2">in </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">CONFIG_H_OK</span><span class="s3">, </span><span class="s4">&quot;sys.version mentions 'GCC'&quot;</span>
+
+    <span class="s5"># Clang would also work</span>
+    <span class="s2">if </span><span class="s4">&quot;Clang&quot; </span><span class="s2">in </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">CONFIG_H_OK</span><span class="s3">, </span><span class="s4">&quot;sys.version mentions 'Clang'&quot;</span>
+
+    <span class="s5"># let's see if __GNUC__ is mentioned in python.h</span>
+    <span class="s1">fn </span><span class="s3">= </span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_config_h_filename</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">config_h </span><span class="s3">= </span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">).</span><span class="s1">read_text</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">'utf-8'</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s1">CONFIG_H_UNCERTAIN</span><span class="s3">, </span><span class="s4">f&quot;couldn't read '</span><span class="s2">{</span><span class="s1">fn</span><span class="s2">}</span><span class="s4">': </span><span class="s2">{</span><span class="s1">exc</span><span class="s3">.</span><span class="s1">strerror</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">substring </span><span class="s3">= </span><span class="s4">'__GNUC__'</span>
+        <span class="s2">if </span><span class="s1">substring </span><span class="s2">in </span><span class="s1">config_h</span><span class="s3">:</span>
+            <span class="s1">code </span><span class="s3">= </span><span class="s1">CONFIG_H_OK</span>
+            <span class="s1">mention_inflected </span><span class="s3">= </span><span class="s4">'mentions'</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">code </span><span class="s3">= </span><span class="s1">CONFIG_H_NOTOK</span>
+            <span class="s1">mention_inflected </span><span class="s3">= </span><span class="s4">'does not mention'</span>
+        <span class="s2">return </span><span class="s1">code</span><span class="s3">, </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">fn</span><span class="s2">!r} {</span><span class="s1">mention_inflected</span><span class="s2">} {</span><span class="s1">substring</span><span class="s2">!r}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">is_cygwincc</span><span class="s3">(</span><span class="s1">cc</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Try to determine if the compiler that would be used is from cygwin.&quot;&quot;&quot;</span>
+    <span class="s1">out_string </span><span class="s3">= </span><span class="s1">check_output</span><span class="s3">(</span><span class="s1">shlex</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">cc</span><span class="s3">) + [</span><span class="s4">'-dumpmachine'</span><span class="s3">])</span>
+    <span class="s2">return </span><span class="s1">out_string</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s7">b'cygwin'</span><span class="s3">)</span>
+
+
+<span class="s1">get_versions </span><span class="s3">= </span><span class="s2">None</span>
+<span class="s4">&quot;&quot;&quot; 
+A stand-in for the previous get_versions() function to prevent failures 
+when monkeypatched. See pypa/setuptools#2969. 
+&quot;&quot;&quot;</span>
+</pre>
+</body>
+</html>

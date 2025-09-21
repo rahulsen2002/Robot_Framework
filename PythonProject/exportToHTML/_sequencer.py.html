@@ -1,0 +1,109 @@
+<html>
+<head>
+<title>_sequencer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_sequencer.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">defaultdict</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">asynccontextmanager</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">Event</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">, </span><span class="s1">_util</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncIterator</span>
+
+
+<span class="s2">@</span><span class="s1">_util</span><span class="s2">.</span><span class="s1">final</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">Sequencer</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot;A convenience class for forcing code in different tasks to run in an 
+    explicit linear order. 
+ 
+    Instances of this class implement a ``__call__`` method which returns an 
+    async context manager. The idea is that you pass a sequence number to 
+    ``__call__`` to say where this block of code should go in the linear 
+    sequence. Block 0 starts immediately, and then block N doesn't start until 
+    block N-1 has finished. 
+ 
+    Example: 
+      An extremely elaborate way to print the numbers 0-5, in order:: 
+ 
+         async def worker1(seq): 
+             async with seq(0): 
+                 print(0) 
+             async with seq(4): 
+                 print(4) 
+ 
+         async def worker2(seq): 
+             async with seq(2): 
+                 print(2) 
+             async with seq(5): 
+                 print(5) 
+ 
+         async def worker3(seq): 
+             async with seq(1): 
+                 print(1) 
+             async with seq(3): 
+                 print(3) 
+ 
+         async def main(): 
+            seq = trio.testing.Sequencer() 
+            async with trio.open_nursery() as nursery: 
+                nursery.start_soon(worker1, seq) 
+                nursery.start_soon(worker2, seq) 
+                nursery.start_soon(worker3, seq) 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_sequence_points</span><span class="s2">: </span><span class="s1">defaultdict</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">Event</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">field</span><span class="s2">(</span>
+        <span class="s1">factory</span><span class="s2">=</span><span class="s0">lambda</span><span class="s2">: </span><span class="s1">defaultdict</span><span class="s2">(</span><span class="s1">Event</span><span class="s2">),</span>
+        <span class="s1">init</span><span class="s2">=</span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s1">_claimed</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">int</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">field</span><span class="s2">(</span><span class="s1">factory</span><span class="s2">=</span><span class="s1">set</span><span class="s2">, </span><span class="s1">init</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s1">_broken</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">field</span><span class="s2">(</span><span class="s1">default</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">init</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">asynccontextmanager</span>
+    <span class="s0">async def </span><span class="s1">__call__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">position</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; AsyncIterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">if </span><span class="s1">position </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_claimed</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s4">f&quot;Attempted to reuse sequence point </span><span class="s0">{</span><span class="s1">position</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_broken</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s4">&quot;sequence broken!&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_claimed</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">position</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">position </span><span class="s2">!= </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_sequence_points</span><span class="s2">[</span><span class="s1">position</span><span class="s2">].</span><span class="s1">wait</span><span class="s2">()</span>
+            <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_broken </span><span class="s2">= </span><span class="s0">True</span>
+                <span class="s0">for </span><span class="s1">event </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_sequence_points</span><span class="s2">.</span><span class="s1">values</span><span class="s2">():</span>
+                    <span class="s1">event</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+                <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+                    <span class="s4">&quot;Sequencer wait cancelled -- sequence broken&quot;</span><span class="s2">,</span>
+                <span class="s2">) </span><span class="s0">from None</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_broken</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s4">&quot;sequence broken!&quot;</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_sequence_points</span><span class="s2">[</span><span class="s1">position </span><span class="s2">+ </span><span class="s5">1</span><span class="s2">].</span><span class="s1">set</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

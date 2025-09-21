@@ -1,0 +1,588 @@
+<html>
+<head>
+<title>pyopenssl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pyopenssl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Module for using pyOpenSSL as a TLS backend. This module was relevant before 
+the standard library ``ssl`` module supported SNI, but now that we've dropped 
+support for Python 2.7 all relevant Python versions support SNI so 
+**this module is no longer recommended**. 
+ 
+This needs the following packages installed: 
+ 
+* `pyOpenSSL`_ (tested with 16.0.0) 
+* `cryptography`_ (minimum 1.3.4, from pyopenssl) 
+* `idna`_ (minimum 2.0) 
+ 
+However, pyOpenSSL depends on cryptography, so while we use all three directly here we 
+end up having relatively few packages required. 
+ 
+You can install them with the following command: 
+ 
+.. code-block:: bash 
+ 
+    $ python -m pip install pyopenssl cryptography idna 
+ 
+To activate certificate checking, call 
+:func:`~urllib3.contrib.pyopenssl.inject_into_urllib3` from your Python code 
+before you begin making HTTP requests. This can be done in a ``sitecustomize`` 
+module, or at any other time before your application begins using ``urllib3``, 
+like this: 
+ 
+.. code-block:: python 
+ 
+    try: 
+        import urllib3.contrib.pyopenssl 
+        urllib3.contrib.pyopenssl.inject_into_urllib3() 
+    except ImportError: 
+        pass 
+ 
+.. _pyopenssl: https://www.pyopenssl.org 
+.. _cryptography: https://cryptography.io 
+.. _idna: https://github.com/kjd/idna 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL  </span><span class="s4"># type: ignore[import-untyped]</span>
+<span class="s2">from </span><span class="s1">cryptography </span><span class="s2">import </span><span class="s1">x509</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">cryptography</span><span class="s3">.</span><span class="s1">x509 </span><span class="s2">import </span><span class="s1">UnsupportedExtension  </span><span class="s4"># type: ignore[attr-defined]</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s4"># UnsupportedExtension is gone in cryptography &gt;= 2.1.0</span>
+    <span class="s2">class </span><span class="s1">UnsupportedExtension</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):  </span><span class="s4"># type: ignore[no-redef]</span>
+        <span class="s2">pass</span>
+
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">ssl</span>
+<span class="s2">import </span><span class="s1">typing</span>
+<span class="s2">from </span><span class="s1">io </span><span class="s2">import </span><span class="s1">BytesIO</span>
+<span class="s2">from </span><span class="s1">socket </span><span class="s2">import </span><span class="s1">socket </span><span class="s2">as </span><span class="s1">socket_cls</span>
+<span class="s2">from </span><span class="s1">socket </span><span class="s2">import </span><span class="s1">timeout</span>
+
+<span class="s2">from </span><span class="s3">.. </span><span class="s2">import </span><span class="s1">util</span>
+
+<span class="s2">if </span><span class="s1">typing</span><span class="s3">.</span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">crypto </span><span class="s2">import </span><span class="s1">X509  </span><span class="s4"># type: ignore[import-untyped]</span>
+
+
+<span class="s1">__all__ </span><span class="s3">= [</span><span class="s5">&quot;inject_into_urllib3&quot;</span><span class="s3">, </span><span class="s5">&quot;extract_from_urllib3&quot;</span><span class="s3">]</span>
+
+<span class="s4"># Map from urllib3 to PyOpenSSL compatible parameter-values.</span>
+<span class="s1">_openssl_versions</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">] = {</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">PROTOCOL_TLS</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">SSLv23_METHOD</span><span class="s3">,  </span><span class="s4"># type: ignore[attr-defined]</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">PROTOCOL_TLS_CLIENT</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">SSLv23_METHOD</span><span class="s3">,  </span><span class="s4"># type: ignore[attr-defined]</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">PROTOCOL_TLSv1</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">TLSv1_METHOD</span><span class="s3">,</span>
+<span class="s3">}</span>
+
+<span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">ssl</span><span class="s3">, </span><span class="s5">&quot;PROTOCOL_TLSv1_1&quot;</span><span class="s3">) </span><span class="s2">and </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;TLSv1_1_METHOD&quot;</span><span class="s3">):</span>
+    <span class="s1">_openssl_versions</span><span class="s3">[</span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">PROTOCOL_TLSv1_1</span><span class="s3">] = </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">TLSv1_1_METHOD</span>
+
+<span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">ssl</span><span class="s3">, </span><span class="s5">&quot;PROTOCOL_TLSv1_2&quot;</span><span class="s3">) </span><span class="s2">and </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;TLSv1_2_METHOD&quot;</span><span class="s3">):</span>
+    <span class="s1">_openssl_versions</span><span class="s3">[</span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">PROTOCOL_TLSv1_2</span><span class="s3">] = </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">TLSv1_2_METHOD</span>
+
+
+<span class="s1">_stdlib_to_openssl_verify </span><span class="s3">= {</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">CERT_NONE</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">VERIFY_NONE</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">CERT_OPTIONAL</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">VERIFY_PEER</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">CERT_REQUIRED</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">VERIFY_PEER</span>
+    <span class="s3">+ </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">VERIFY_FAIL_IF_NO_PEER_CERT</span><span class="s3">,</span>
+<span class="s3">}</span>
+<span class="s1">_openssl_to_stdlib_verify </span><span class="s3">= {</span><span class="s1">v</span><span class="s3">: </span><span class="s1">k </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">_stdlib_to_openssl_verify</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()}</span>
+
+<span class="s4"># The SSLvX values are the most likely to be missing in the future</span>
+<span class="s4"># but we check them all just to be sure.</span>
+<span class="s1">_OP_NO_SSLv2_OR_SSLv3</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;OP_NO_SSLv2&quot;</span><span class="s3">, </span><span class="s6">0</span><span class="s3">) | </span><span class="s1">getattr</span><span class="s3">(</span>
+    <span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;OP_NO_SSLv3&quot;</span><span class="s3">, </span><span class="s6">0</span>
+<span class="s3">)</span>
+<span class="s1">_OP_NO_TLSv1</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;OP_NO_TLSv1&quot;</span><span class="s3">, </span><span class="s6">0</span><span class="s3">)</span>
+<span class="s1">_OP_NO_TLSv1_1</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;OP_NO_TLSv1_1&quot;</span><span class="s3">, </span><span class="s6">0</span><span class="s3">)</span>
+<span class="s1">_OP_NO_TLSv1_2</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;OP_NO_TLSv1_2&quot;</span><span class="s3">, </span><span class="s6">0</span><span class="s3">)</span>
+<span class="s1">_OP_NO_TLSv1_3</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">, </span><span class="s5">&quot;OP_NO_TLSv1_3&quot;</span><span class="s3">, </span><span class="s6">0</span><span class="s3">)</span>
+
+<span class="s1">_openssl_to_ssl_minimum_version</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">] = {</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">MINIMUM_SUPPORTED</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1_1</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1_2</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_1</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1_3</span><span class="s3">: (</span>
+        <span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_1 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_2</span>
+    <span class="s3">),</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">MAXIMUM_SUPPORTED</span><span class="s3">: (</span>
+        <span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_1 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_2</span>
+    <span class="s3">),</span>
+<span class="s3">}</span>
+<span class="s1">_openssl_to_ssl_maximum_version</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">] = {</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">MINIMUM_SUPPORTED</span><span class="s3">: (</span>
+        <span class="s1">_OP_NO_SSLv2_OR_SSLv3</span>
+        <span class="s3">| </span><span class="s1">_OP_NO_TLSv1</span>
+        <span class="s3">| </span><span class="s1">_OP_NO_TLSv1_1</span>
+        <span class="s3">| </span><span class="s1">_OP_NO_TLSv1_2</span>
+        <span class="s3">| </span><span class="s1">_OP_NO_TLSv1_3</span>
+    <span class="s3">),</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1</span><span class="s3">: (</span>
+        <span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_1 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_2 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_3</span>
+    <span class="s3">),</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1_1</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_2 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_3</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1_2</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3 </span><span class="s3">| </span><span class="s1">_OP_NO_TLSv1_3</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">TLSv1_3</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3</span><span class="s3">,</span>
+    <span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">MAXIMUM_SUPPORTED</span><span class="s3">: </span><span class="s1">_OP_NO_SSLv2_OR_SSLv3</span><span class="s3">,</span>
+<span class="s3">}</span>
+
+<span class="s4"># OpenSSL will only write 16K at a time</span>
+<span class="s1">SSL_WRITE_BLOCKSIZE </span><span class="s3">= </span><span class="s6">16384</span>
+
+<span class="s1">orig_util_SSLContext </span><span class="s3">= </span><span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">SSLContext</span>
+
+
+<span class="s1">log </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">inject_into_urllib3</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;Monkey-patch urllib3 with PyOpenSSL-backed SSL-support.&quot;</span>
+
+    <span class="s1">_validate_dependencies_met</span><span class="s3">()</span>
+
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">SSLContext </span><span class="s3">= </span><span class="s1">PyOpenSSLContext  </span><span class="s4"># type: ignore[assignment]</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">SSLContext </span><span class="s3">= </span><span class="s1">PyOpenSSLContext  </span><span class="s4"># type: ignore[assignment]</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">IS_PYOPENSSL </span><span class="s3">= </span><span class="s2">True</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">IS_PYOPENSSL </span><span class="s3">= </span><span class="s2">True</span>
+
+
+<span class="s2">def </span><span class="s1">extract_from_urllib3</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;Undo monkey-patching by :func:`inject_into_urllib3`.&quot;</span>
+
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">SSLContext </span><span class="s3">= </span><span class="s1">orig_util_SSLContext</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">SSLContext </span><span class="s3">= </span><span class="s1">orig_util_SSLContext</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">IS_PYOPENSSL </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">IS_PYOPENSSL </span><span class="s3">= </span><span class="s2">False</span>
+
+
+<span class="s2">def </span><span class="s1">_validate_dependencies_met</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Verifies that PyOpenSSL's package-level dependencies have been met. 
+    Throws `ImportError` if they are not met. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># Method added in `cryptography==1.1`; not available in older versions</span>
+    <span class="s2">from </span><span class="s1">cryptography</span><span class="s3">.</span><span class="s1">x509</span><span class="s3">.</span><span class="s1">extensions </span><span class="s2">import </span><span class="s1">Extensions</span>
+
+    <span class="s2">if </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">Extensions</span><span class="s3">, </span><span class="s5">&quot;get_extension_for_class&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">ImportError</span><span class="s3">(</span>
+            <span class="s5">&quot;'cryptography' module missing required functionality.  &quot;</span>
+            <span class="s5">&quot;Try upgrading to v1.3.4 or newer.&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s4"># pyOpenSSL 0.14 and above use cryptography for OpenSSL bindings. The _x509</span>
+    <span class="s4"># attribute is only present on those versions.</span>
+    <span class="s2">from </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">crypto </span><span class="s2">import </span><span class="s1">X509</span>
+
+    <span class="s1">x509 </span><span class="s3">= </span><span class="s1">X509</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">x509</span><span class="s3">, </span><span class="s5">&quot;_x509&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">ImportError</span><span class="s3">(</span>
+            <span class="s5">&quot;'pyOpenSSL' module missing required functionality. &quot;</span>
+            <span class="s5">&quot;Try upgrading to v0.14 or newer.&quot;</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_dnsname_to_stdlib</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Converts a dNSName SubjectAlternativeName field to the form used by the 
+    standard library on the given Python version. 
+ 
+    Cryptography produces a dNSName as a unicode string that was idna-decoded 
+    from ASCII bytes. We need to idna-encode that string to get it back, and 
+    then on Python 3 we also need to convert to unicode via UTF-8 (the stdlib 
+    uses PyUnicode_FromStringAndSize on it, which decodes via UTF-8). 
+ 
+    If the name cannot be idna-encoded then we return None signalling that 
+    the name given should be skipped. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">idna_encode</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bytes </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Borrowed wholesale from the Python Cryptography Project. It turns out 
+        that we can't just safely call `idna.encode`: it can explode for 
+        wildcard names. This avoids that problem. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">import </span><span class="s1">idna</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">prefix </span><span class="s2">in </span><span class="s3">[</span><span class="s5">&quot;*.&quot;</span><span class="s3">, </span><span class="s5">&quot;.&quot;</span><span class="s3">]:</span>
+                <span class="s2">if </span><span class="s1">name</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">):</span>
+                    <span class="s1">name </span><span class="s3">= </span><span class="s1">name</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">) :]</span>
+                    <span class="s2">return </span><span class="s1">prefix</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;ascii&quot;</span><span class="s3">) + </span><span class="s1">idna</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">idna</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">idna</span><span class="s3">.</span><span class="s1">core</span><span class="s3">.</span><span class="s1">IDNAError</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+    <span class="s4"># Don't send IPv6 addresses through the IDNA encoder.</span>
+    <span class="s2">if </span><span class="s5">&quot;:&quot; </span><span class="s2">in </span><span class="s1">name</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">name</span>
+
+    <span class="s1">encoded_name </span><span class="s3">= </span><span class="s1">idna_encode</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">encoded_name </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">return None</span>
+    <span class="s2">return </span><span class="s1">encoded_name</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_subj_alt_name</span><span class="s3">(</span><span class="s1">peer_cert</span><span class="s3">: </span><span class="s1">X509</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given an PyOpenSSL certificate, provides all the subject alternative names. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">cert </span><span class="s3">= </span><span class="s1">peer_cert</span><span class="s3">.</span><span class="s1">to_cryptography</span><span class="s3">()</span>
+
+    <span class="s4"># We want to find the SAN extension. Ask Cryptography to locate it (it's</span>
+    <span class="s4"># faster than looping in Python)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">ext </span><span class="s3">= </span><span class="s1">cert</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">.</span><span class="s1">get_extension_for_class</span><span class="s3">(</span><span class="s1">x509</span><span class="s3">.</span><span class="s1">SubjectAlternativeName</span><span class="s3">).</span><span class="s1">value</span>
+    <span class="s2">except </span><span class="s1">x509</span><span class="s3">.</span><span class="s1">ExtensionNotFound</span><span class="s3">:</span>
+        <span class="s4"># No such extension, return the empty list.</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+    <span class="s2">except </span><span class="s3">(</span>
+        <span class="s1">x509</span><span class="s3">.</span><span class="s1">DuplicateExtension</span><span class="s3">,</span>
+        <span class="s1">UnsupportedExtension</span><span class="s3">,</span>
+        <span class="s1">x509</span><span class="s3">.</span><span class="s1">UnsupportedGeneralNameType</span><span class="s3">,</span>
+        <span class="s1">UnicodeError</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+        <span class="s4"># A problem has been found with the quality of the certificate. Assume</span>
+        <span class="s4"># no SAN field is present.</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+            <span class="s5">&quot;A problem was encountered with the certificate that prevented &quot;</span>
+            <span class="s5">&quot;urllib3 from finding the SubjectAlternativeName field. This can &quot;</span>
+            <span class="s5">&quot;affect certificate validation. The error was %s&quot;</span><span class="s3">,</span>
+            <span class="s1">e</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+
+    <span class="s4"># We want to return dNSName and iPAddress fields. We need to cast the IPs</span>
+    <span class="s4"># back to strings because the match_hostname function wants them as</span>
+    <span class="s4"># strings.</span>
+    <span class="s4"># Sadly the DNS names need to be idna encoded and then, on Python 3, UTF-8</span>
+    <span class="s4"># decoded. This is pretty frustrating, but that's what the standard library</span>
+    <span class="s4"># does with certificates, and so we need to attempt to do the same.</span>
+    <span class="s4"># We also want to skip over names which cannot be idna encoded.</span>
+    <span class="s1">names </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s5">&quot;DNS&quot;</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">map</span><span class="s3">(</span><span class="s1">_dnsname_to_stdlib</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">.</span><span class="s1">get_values_for_type</span><span class="s3">(</span><span class="s1">x509</span><span class="s3">.</span><span class="s1">DNSName</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">is not None</span>
+    <span class="s3">]</span>
+    <span class="s1">names</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s5">&quot;IP Address&quot;</span><span class="s3">, </span><span class="s1">str</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">ext</span><span class="s3">.</span><span class="s1">get_values_for_type</span><span class="s3">(</span><span class="s1">x509</span><span class="s3">.</span><span class="s1">IPAddress</span><span class="s3">)</span>
+    <span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">names</span>
+
+
+<span class="s2">class </span><span class="s1">WrappedSocket</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;API-compatibility wrapper for Python OpenSSL's Connection-class.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">connection</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Connection</span><span class="s3">,</span>
+        <span class="s1">socket</span><span class="s3">: </span><span class="s1">socket_cls</span><span class="s3">,</span>
+        <span class="s1">suppress_ragged_eofs</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">connection </span><span class="s3">= </span><span class="s1">connection</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">socket </span><span class="s3">= </span><span class="s1">socket</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">suppress_ragged_eofs </span><span class="s3">= </span><span class="s1">suppress_ragged_eofs</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_io_refs </span><span class="s3">= </span><span class="s6">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_closed </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">fileno</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">fileno</span><span class="s3">()</span>
+
+    <span class="s4"># Copy-pasted from Python 3.5 source code</span>
+    <span class="s2">def </span><span class="s1">_decref_socketios</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_io_refs </span><span class="s3">&gt; </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_io_refs </span><span class="s3">-= </span><span class="s6">1</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_closed</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">recv</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">: </span><span class="s1">typing</span><span class="s3">.</span><span class="s1">Any</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">: </span><span class="s1">typing</span><span class="s3">.</span><span class="s1">Any</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">recv</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">SysCallError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">suppress_ragged_eofs </span><span class="s2">and </span><span class="s1">e</span><span class="s3">.</span><span class="s1">args </span><span class="s3">== (-</span><span class="s6">1</span><span class="s3">, </span><span class="s5">&quot;Unexpected EOF&quot;</span><span class="s3">):</span>
+                <span class="s2">return </span><span class="s7">b&quot;&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">OSError</span><span class="s3">(</span><span class="s1">e</span><span class="s3">.</span><span class="s1">args</span><span class="s3">[</span><span class="s6">0</span><span class="s3">], </span><span class="s1">str</span><span class="s3">(</span><span class="s1">e</span><span class="s3">)) </span><span class="s2">from </span><span class="s1">e</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">ZeroReturnError</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">get_shutdown</span><span class="s3">() == </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">RECEIVED_SHUTDOWN</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s7">b&quot;&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">WantReadError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">util</span><span class="s3">.</span><span class="s1">wait_for_read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">gettimeout</span><span class="s3">()):</span>
+                <span class="s2">raise </span><span class="s1">timeout</span><span class="s3">(</span><span class="s5">&quot;The read operation timed out&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">recv</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+        <span class="s4"># TLS 1.3 post-handshake authentication</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLError</span><span class="s3">(</span><span class="s5">f&quot;read error: </span><span class="s2">{</span><span class="s1">e</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">data  </span><span class="s4"># type: ignore[no-any-return]</span>
+
+    <span class="s2">def </span><span class="s1">recv_into</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">: </span><span class="s1">typing</span><span class="s3">.</span><span class="s1">Any</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">: </span><span class="s1">typing</span><span class="s3">.</span><span class="s1">Any</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">recv_into</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)  </span><span class="s4"># type: ignore[no-any-return]</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">SysCallError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">suppress_ragged_eofs </span><span class="s2">and </span><span class="s1">e</span><span class="s3">.</span><span class="s1">args </span><span class="s3">== (-</span><span class="s6">1</span><span class="s3">, </span><span class="s5">&quot;Unexpected EOF&quot;</span><span class="s3">):</span>
+                <span class="s2">return </span><span class="s6">0</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">OSError</span><span class="s3">(</span><span class="s1">e</span><span class="s3">.</span><span class="s1">args</span><span class="s3">[</span><span class="s6">0</span><span class="s3">], </span><span class="s1">str</span><span class="s3">(</span><span class="s1">e</span><span class="s3">)) </span><span class="s2">from </span><span class="s1">e</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">ZeroReturnError</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">get_shutdown</span><span class="s3">() == </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">RECEIVED_SHUTDOWN</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s6">0</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">WantReadError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">util</span><span class="s3">.</span><span class="s1">wait_for_read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">gettimeout</span><span class="s3">()):</span>
+                <span class="s2">raise </span><span class="s1">timeout</span><span class="s3">(</span><span class="s5">&quot;The read operation timed out&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">recv_into</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+        <span class="s4"># TLS 1.3 post-handshake authentication</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLError</span><span class="s3">(</span><span class="s5">f&quot;read error: </span><span class="s2">{</span><span class="s1">e</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s2">def </span><span class="s1">settimeout</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">: </span><span class="s1">float</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">settimeout</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_send_until_done</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)  </span><span class="s4"># type: ignore[no-any-return]</span>
+            <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">WantWriteError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">util</span><span class="s3">.</span><span class="s1">wait_for_write</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">gettimeout</span><span class="s3">()):</span>
+                    <span class="s2">raise </span><span class="s1">timeout</span><span class="s3">() </span><span class="s2">from </span><span class="s1">e</span>
+                <span class="s2">continue</span>
+            <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">SysCallError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">OSError</span><span class="s3">(</span><span class="s1">e</span><span class="s3">.</span><span class="s1">args</span><span class="s3">[</span><span class="s6">0</span><span class="s3">], </span><span class="s1">str</span><span class="s3">(</span><span class="s1">e</span><span class="s3">)) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s2">def </span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">total_sent </span><span class="s3">= </span><span class="s6">0</span>
+        <span class="s2">while </span><span class="s1">total_sent </span><span class="s3">&lt; </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">):</span>
+            <span class="s1">sent </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_send_until_done</span><span class="s3">(</span>
+                <span class="s1">data</span><span class="s3">[</span><span class="s1">total_sent </span><span class="s3">: </span><span class="s1">total_sent </span><span class="s3">+ </span><span class="s1">SSL_WRITE_BLOCKSIZE</span><span class="s3">]</span>
+            <span class="s3">)</span>
+            <span class="s1">total_sent </span><span class="s3">+= </span><span class="s1">sent</span>
+
+    <span class="s2">def </span><span class="s1">shutdown</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">how</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">shutdown</span><span class="s3">()</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLError</span><span class="s3">(</span><span class="s5">f&quot;shutdown error: </span><span class="s2">{</span><span class="s1">e</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_closed </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_io_refs </span><span class="s3">&lt;= </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_real_close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_real_close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()  </span><span class="s4"># type: ignore[no-any-return]</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">getpeercert</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">binary_form</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">typing</span><span class="s3">.</span><span class="s1">Any</span><span class="s3">]] | </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">x509 </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">get_peer_certificate</span><span class="s3">()</span>
+
+        <span class="s2">if not </span><span class="s1">x509</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">x509  </span><span class="s4"># type: ignore[no-any-return]</span>
+
+        <span class="s2">if </span><span class="s1">binary_form</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">crypto</span><span class="s3">.</span><span class="s1">dump_certificate</span><span class="s3">(</span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">crypto</span><span class="s3">.</span><span class="s1">FILETYPE_ASN1</span><span class="s3">, </span><span class="s1">x509</span><span class="s3">)  </span><span class="s4"># type: ignore[no-any-return]</span>
+
+        <span class="s2">return </span><span class="s3">{</span>
+            <span class="s5">&quot;subject&quot;</span><span class="s3">: (((</span><span class="s5">&quot;commonName&quot;</span><span class="s3">, </span><span class="s1">x509</span><span class="s3">.</span><span class="s1">get_subject</span><span class="s3">().</span><span class="s1">CN</span><span class="s3">),),),  </span><span class="s4"># type: ignore[dict-item]</span>
+            <span class="s5">&quot;subjectAltName&quot;</span><span class="s3">: </span><span class="s1">get_subj_alt_name</span><span class="s3">(</span><span class="s1">x509</span><span class="s3">),</span>
+        <span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">get_protocol_version_name</span><span class="s3">()  </span><span class="s4"># type: ignore[no-any-return]</span>
+
+    <span class="s2">def </span><span class="s1">selected_alpn_protocol</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">alpn_proto </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connection</span><span class="s3">.</span><span class="s1">get_alpn_proto_negotiated</span><span class="s3">()</span>
+        <span class="s2">return </span><span class="s1">alpn_proto</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">() </span><span class="s2">if </span><span class="s1">alpn_proto </span><span class="s2">else None</span>
+
+
+<span class="s1">WrappedSocket</span><span class="s3">.</span><span class="s1">makefile </span><span class="s3">= </span><span class="s1">socket_cls</span><span class="s3">.</span><span class="s1">makefile  </span><span class="s4"># type: ignore[attr-defined]</span>
+
+
+<span class="s2">class </span><span class="s1">PyOpenSSLContext</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    I am a wrapper class for the PyOpenSSL ``Context`` object. I am responsible 
+    for translating the interface of the standard library ``SSLContext`` object 
+    to calls into PyOpenSSL. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">protocol</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">protocol </span><span class="s3">= </span><span class="s1">_openssl_versions</span><span class="s3">[</span><span class="s1">protocol</span><span class="s3">]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx </span><span class="s3">= </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Context</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">protocol</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_options </span><span class="s3">= </span><span class="s6">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">check_hostname </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_minimum_version</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">MINIMUM_SUPPORTED</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_maximum_version</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">TLSVersion</span><span class="s3">.</span><span class="s1">MAXIMUM_SUPPORTED</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_flags</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">VERIFY_X509_TRUSTED_FIRST</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_options</span>
+
+    <span class="s3">@</span><span class="s1">options</span><span class="s3">.</span><span class="s1">setter</span>
+    <span class="s2">def </span><span class="s1">options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_options </span><span class="s3">= </span><span class="s1">value</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_ctx_options</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">verify_flags</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_flags</span>
+
+    <span class="s3">@</span><span class="s1">verify_flags</span><span class="s3">.</span><span class="s1">setter</span>
+    <span class="s2">def </span><span class="s1">verify_flags</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_flags </span><span class="s3">= </span><span class="s1">value</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">get_cert_store</span><span class="s3">().</span><span class="s1">set_flags</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_flags</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">verify_mode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">_openssl_to_stdlib_verify</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">get_verify_mode</span><span class="s3">()]</span>
+
+    <span class="s3">@</span><span class="s1">verify_mode</span><span class="s3">.</span><span class="s1">setter</span>
+    <span class="s2">def </span><span class="s1">verify_mode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">VerifyMode</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">set_verify</span><span class="s3">(</span><span class="s1">_stdlib_to_openssl_verify</span><span class="s3">[</span><span class="s1">value</span><span class="s3">], </span><span class="s1">_verify_callback</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_default_verify_paths</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">set_default_verify_paths</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">set_ciphers</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ciphers</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">ciphers</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s1">ciphers </span><span class="s3">= </span><span class="s1">ciphers</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">set_cipher_list</span><span class="s3">(</span><span class="s1">ciphers</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">load_verify_locations</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">cafile</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">capath</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">cadata</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">cafile </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">cafile </span><span class="s3">= </span><span class="s1">cafile</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)  </span><span class="s4"># type: ignore[assignment]</span>
+        <span class="s2">if </span><span class="s1">capath </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">capath </span><span class="s3">= </span><span class="s1">capath</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)  </span><span class="s4"># type: ignore[assignment]</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">load_verify_locations</span><span class="s3">(</span><span class="s1">cafile</span><span class="s3">, </span><span class="s1">capath</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">cadata </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">load_verify_locations</span><span class="s3">(</span><span class="s1">BytesIO</span><span class="s3">(</span><span class="s1">cadata</span><span class="s3">))</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLError</span><span class="s3">(</span><span class="s5">f&quot;unable to load trusted certificates: </span><span class="s2">{</span><span class="s1">e</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s2">def </span><span class="s1">load_cert_chain</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">certfile</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">keyfile</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">password</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">use_certificate_chain_file</span><span class="s3">(</span><span class="s1">certfile</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">password </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">password</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">):</span>
+                    <span class="s1">password </span><span class="s3">= </span><span class="s1">password</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)  </span><span class="s4"># type: ignore[assignment]</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">set_passwd_cb</span><span class="s3">(</span><span class="s2">lambda </span><span class="s3">*</span><span class="s1">_</span><span class="s3">: </span><span class="s1">password</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">use_privatekey_file</span><span class="s3">(</span><span class="s1">keyfile </span><span class="s2">or </span><span class="s1">certfile</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLError</span><span class="s3">(</span><span class="s5">f&quot;Unable to load certificate chain: </span><span class="s2">{</span><span class="s1">e</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s2">def </span><span class="s1">set_alpn_protocols</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">protocols</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">protocols </span><span class="s3">= [</span><span class="s1">util</span><span class="s3">.</span><span class="s1">util</span><span class="s3">.</span><span class="s1">to_bytes</span><span class="s3">(</span><span class="s1">p</span><span class="s3">, </span><span class="s5">&quot;ascii&quot;</span><span class="s3">) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">protocols</span><span class="s3">]</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">set_alpn_protos</span><span class="s3">(</span><span class="s1">protocols</span><span class="s3">)  </span><span class="s4"># type: ignore[no-any-return]</span>
+
+    <span class="s2">def </span><span class="s1">wrap_socket</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">sock</span><span class="s3">: </span><span class="s1">socket_cls</span><span class="s3">,</span>
+        <span class="s1">server_side</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">do_handshake_on_connect</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">suppress_ragged_eofs</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">server_hostname</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; WrappedSocket</span><span class="s3">:</span>
+        <span class="s1">cnx </span><span class="s3">= </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">, </span><span class="s1">sock</span><span class="s3">)</span>
+
+        <span class="s4"># If server_hostname is an IP, don't use it for SNI, per RFC6066 Section 3</span>
+        <span class="s2">if </span><span class="s1">server_hostname </span><span class="s2">and not </span><span class="s1">util</span><span class="s3">.</span><span class="s1">ssl_</span><span class="s3">.</span><span class="s1">is_ipaddress</span><span class="s3">(</span><span class="s1">server_hostname</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">server_hostname</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+                <span class="s1">server_hostname </span><span class="s3">= </span><span class="s1">server_hostname</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)</span>
+            <span class="s1">cnx</span><span class="s3">.</span><span class="s1">set_tlsext_host_name</span><span class="s3">(</span><span class="s1">server_hostname</span><span class="s3">)</span>
+
+        <span class="s1">cnx</span><span class="s3">.</span><span class="s1">set_connect_state</span><span class="s3">()</span>
+
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">cnx</span><span class="s3">.</span><span class="s1">do_handshake</span><span class="s3">()</span>
+            <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">WantReadError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">util</span><span class="s3">.</span><span class="s1">wait_for_read</span><span class="s3">(</span><span class="s1">sock</span><span class="s3">, </span><span class="s1">sock</span><span class="s3">.</span><span class="s1">gettimeout</span><span class="s3">()):</span>
+                    <span class="s2">raise </span><span class="s1">timeout</span><span class="s3">(</span><span class="s5">&quot;select timed out&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+                <span class="s2">continue</span>
+            <span class="s2">except </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Error </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLError</span><span class="s3">(</span><span class="s5">f&quot;bad handshake: </span><span class="s2">{</span><span class="s1">e</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+            <span class="s2">break</span>
+
+        <span class="s2">return </span><span class="s1">WrappedSocket</span><span class="s3">(</span><span class="s1">cnx</span><span class="s3">, </span><span class="s1">sock</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_set_ctx_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ctx</span><span class="s3">.</span><span class="s1">set_options</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_options</span>
+            <span class="s3">| </span><span class="s1">_openssl_to_ssl_minimum_version</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_minimum_version</span><span class="s3">]</span>
+            <span class="s3">| </span><span class="s1">_openssl_to_ssl_maximum_version</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_maximum_version</span><span class="s3">]</span>
+        <span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">minimum_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_minimum_version</span>
+
+    <span class="s3">@</span><span class="s1">minimum_version</span><span class="s3">.</span><span class="s1">setter</span>
+    <span class="s2">def </span><span class="s1">minimum_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">minimum_version</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_minimum_version </span><span class="s3">= </span><span class="s1">minimum_version</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_ctx_options</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">maximum_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_maximum_version</span>
+
+    <span class="s3">@</span><span class="s1">maximum_version</span><span class="s3">.</span><span class="s1">setter</span>
+    <span class="s2">def </span><span class="s1">maximum_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">maximum_version</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_maximum_version </span><span class="s3">= </span><span class="s1">maximum_version</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_ctx_options</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">_verify_callback</span><span class="s3">(</span>
+    <span class="s1">cnx</span><span class="s3">: </span><span class="s1">OpenSSL</span><span class="s3">.</span><span class="s1">SSL</span><span class="s3">.</span><span class="s1">Connection</span><span class="s3">,</span>
+    <span class="s1">x509</span><span class="s3">: </span><span class="s1">X509</span><span class="s3">,</span>
+    <span class="s1">err_no</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+    <span class="s1">err_depth</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+    <span class="s1">return_code</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s1">err_no </span><span class="s3">== </span><span class="s6">0</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,537 @@
+<html>
+<head>
+<title>cdp.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cdp.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># The MIT License(MIT)</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright(c) 2018 Hyperion Gray</span>
+<span class="s0">#</span>
+<span class="s0"># Permission is hereby granted, free of charge, to any person obtaining a copy</span>
+<span class="s0"># of this software and associated documentation files(the &quot;Software&quot;), to deal</span>
+<span class="s0"># in the Software without restriction, including without limitation the rights</span>
+<span class="s0"># to use, copy, modify, merge, publish, distribute, sublicense, and / or sell</span>
+<span class="s0"># copies of the Software, and to permit persons to whom the Software is</span>
+<span class="s0"># furnished to do so, subject to the following conditions:</span>
+<span class="s0">#</span>
+<span class="s0"># The above copyright notice and this permission notice shall be included in</span>
+<span class="s0"># all copies or substantial portions of the Software.</span>
+<span class="s0">#</span>
+<span class="s0"># THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR</span>
+<span class="s0"># IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,</span>
+<span class="s0"># FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE</span>
+<span class="s0"># AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER</span>
+<span class="s0"># LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,</span>
+<span class="s0"># OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN</span>
+<span class="s0"># THE SOFTWARE.</span>
+<span class="s0">#</span>
+<span class="s0"># This code comes from https://github.com/HyperionGray/trio-chrome-devtools-protocol/tree/master/trio_cdp</span>
+
+<span class="s0"># flake8: noqa</span>
+
+<span class="s2">import </span><span class="s1">contextvars</span>
+<span class="s2">import </span><span class="s1">importlib</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">json</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">defaultdict</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">asynccontextmanager</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">AsyncGenerator</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">AsyncIterator</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Generator</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Type</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TypeVar</span>
+
+<span class="s2">import </span><span class="s1">trio</span>
+<span class="s2">from </span><span class="s1">trio_websocket </span><span class="s2">import </span><span class="s1">ConnectionClosed </span><span class="s2">as </span><span class="s1">WsConnectionClosed</span>
+<span class="s2">from </span><span class="s1">trio_websocket </span><span class="s2">import </span><span class="s1">connect_websocket_url</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s4">&quot;trio_cdp&quot;</span><span class="s3">)</span>
+<span class="s1">T </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;T&quot;</span><span class="s3">)</span>
+<span class="s1">MAX_WS_MESSAGE_SIZE </span><span class="s3">= </span><span class="s5">2</span><span class="s3">**</span><span class="s5">24</span>
+
+<span class="s1">devtools </span><span class="s3">= </span><span class="s2">None</span>
+<span class="s1">version </span><span class="s3">= </span><span class="s2">None</span>
+
+
+<span class="s2">def </span><span class="s1">import_devtools</span><span class="s3">(</span><span class="s1">ver</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Attempt to load the current latest available devtools into the module 
+    cache for use later.&quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">devtools</span>
+    <span class="s2">global </span><span class="s1">version</span>
+    <span class="s1">version </span><span class="s3">= </span><span class="s1">ver</span>
+    <span class="s1">base </span><span class="s3">= </span><span class="s4">&quot;selenium.webdriver.common.devtools.v&quot;</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">devtools </span><span class="s3">= </span><span class="s1">importlib</span><span class="s3">.</span><span class="s1">import_module</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">base</span><span class="s2">}{</span><span class="s1">ver</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">devtools</span>
+    <span class="s2">except </span><span class="s1">ModuleNotFoundError</span><span class="s3">:</span>
+        <span class="s0"># Attempt to parse and load the 'most recent' devtools module. This is likely</span>
+        <span class="s0"># because cdp has been updated but selenium python has not been released yet.</span>
+        <span class="s1">devtools_path </span><span class="s3">= </span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">__file__</span><span class="s3">).</span><span class="s1">parents</span><span class="s3">[</span><span class="s5">1</span><span class="s3">].</span><span class="s1">joinpath</span><span class="s3">(</span><span class="s4">&quot;devtools&quot;</span><span class="s3">)</span>
+        <span class="s1">versions </span><span class="s3">= </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">f</span><span class="s3">.</span><span class="s1">name </span><span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">devtools_path</span><span class="s3">.</span><span class="s1">iterdir</span><span class="s3">() </span><span class="s2">if </span><span class="s1">f</span><span class="s3">.</span><span class="s1">is_dir</span><span class="s3">())</span>
+        <span class="s1">latest </span><span class="s3">= </span><span class="s1">max</span><span class="s3">(</span><span class="s1">int</span><span class="s3">(</span><span class="s1">x</span><span class="s3">[</span><span class="s5">1</span><span class="s3">:]) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">versions</span><span class="s3">)</span>
+        <span class="s1">selenium_logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+        <span class="s1">selenium_logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot;Falling back to loading `devtools`: v%s&quot;</span><span class="s3">, </span><span class="s1">latest</span><span class="s3">)</span>
+        <span class="s1">devtools </span><span class="s3">= </span><span class="s1">importlib</span><span class="s3">.</span><span class="s1">import_module</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">base</span><span class="s2">}{</span><span class="s1">latest</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">devtools</span>
+
+
+<span class="s1">_connection_context</span><span class="s3">: </span><span class="s1">contextvars</span><span class="s3">.</span><span class="s1">ContextVar </span><span class="s3">= </span><span class="s1">contextvars</span><span class="s3">.</span><span class="s1">ContextVar</span><span class="s3">(</span><span class="s4">&quot;connection_context&quot;</span><span class="s3">)</span>
+<span class="s1">_session_context</span><span class="s3">: </span><span class="s1">contextvars</span><span class="s3">.</span><span class="s1">ContextVar </span><span class="s3">= </span><span class="s1">contextvars</span><span class="s3">.</span><span class="s1">ContextVar</span><span class="s3">(</span><span class="s4">&quot;session_context&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_connection_context</span><span class="s3">(</span><span class="s1">fn_name</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Look up the current connection. 
+ 
+    If there is no current connection, raise a ``RuntimeError`` with a 
+    helpful message. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">_connection_context</span><span class="s3">.</span><span class="s1">get</span><span class="s3">()</span>
+    <span class="s2">except </span><span class="s1">LookupError</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">fn_name</span><span class="s2">}</span><span class="s4">() must be called in a connection context.&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_session_context</span><span class="s3">(</span><span class="s1">fn_name</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Look up the current session. 
+ 
+    If there is no current session, raise a ``RuntimeError`` with a 
+    helpful message. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">_session_context</span><span class="s3">.</span><span class="s1">get</span><span class="s3">()</span>
+    <span class="s2">except </span><span class="s1">LookupError</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">fn_name</span><span class="s2">}</span><span class="s4">() must be called in a session context.&quot;</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">contextmanager</span>
+<span class="s2">def </span><span class="s1">connection_context</span><span class="s3">(</span><span class="s1">connection</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;This context manager installs ``connection`` as the session context for 
+    the current Trio task.&quot;&quot;&quot;</span>
+    <span class="s1">token </span><span class="s3">= </span><span class="s1">_connection_context</span><span class="s3">.</span><span class="s1">set</span><span class="s3">(</span><span class="s1">connection</span><span class="s3">)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">_connection_context</span><span class="s3">.</span><span class="s1">reset</span><span class="s3">(</span><span class="s1">token</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">contextmanager</span>
+<span class="s2">def </span><span class="s1">session_context</span><span class="s3">(</span><span class="s1">session</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;This context manager installs ``session`` as the session context for the 
+    current Trio task.&quot;&quot;&quot;</span>
+    <span class="s1">token </span><span class="s3">= </span><span class="s1">_session_context</span><span class="s3">.</span><span class="s1">set</span><span class="s3">(</span><span class="s1">session</span><span class="s3">)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">_session_context</span><span class="s3">.</span><span class="s1">reset</span><span class="s3">(</span><span class="s1">token</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">set_global_connection</span><span class="s3">(</span><span class="s1">connection</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Install ``connection`` in the root context so that it will become the 
+    default connection for all tasks. 
+ 
+    This is generally not recommended, except it may be necessary in 
+    certain use cases such as running inside Jupyter notebook. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_connection_context</span>
+    <span class="s1">_connection_context </span><span class="s3">= </span><span class="s1">contextvars</span><span class="s3">.</span><span class="s1">ContextVar</span><span class="s3">(</span><span class="s4">&quot;_connection_context&quot;</span><span class="s3">, </span><span class="s1">default</span><span class="s3">=</span><span class="s1">connection</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">set_global_session</span><span class="s3">(</span><span class="s1">session</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Install ``session`` in the root context so that it will become the 
+    default session for all tasks. 
+ 
+    This is generally not recommended, except it may be necessary in 
+    certain use cases such as running inside Jupyter notebook. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">global </span><span class="s1">_session_context</span>
+    <span class="s1">_session_context </span><span class="s3">= </span><span class="s1">contextvars</span><span class="s3">.</span><span class="s1">ContextVar</span><span class="s3">(</span><span class="s4">&quot;_session_context&quot;</span><span class="s3">, </span><span class="s1">default</span><span class="s3">=</span><span class="s1">session</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">BrowserError</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;This exception is raised when the browser's response to a command 
+    indicates that an error occurred.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">code </span><span class="s3">= </span><span class="s1">obj</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;code&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">message </span><span class="s3">= </span><span class="s1">obj</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;message&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">detail </span><span class="s3">= </span><span class="s1">obj</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;data&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__str__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s4">f&quot;BrowserError&lt;code=</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">code</span><span class="s2">} </span><span class="s4">message=</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">message</span><span class="s2">}</span><span class="s4">&gt; </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">detail</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">CdpConnectionClosed</span><span class="s3">(</span><span class="s1">WsConnectionClosed</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Raised when a public method is called on a closed CDP connection.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Constructor. 
+ 
+        :param reason: 
+        :type reason: wsproto.frame_protocol.CloseReason 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">reason </span><span class="s3">= </span><span class="s1">reason</span>
+
+    <span class="s2">def </span><span class="s1">__repr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Return representation.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">__name__</span><span class="s2">}</span><span class="s4">&lt;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">reason</span><span class="s2">}</span><span class="s4">&gt;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">InternalError</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;This exception is only raised when there is faulty logic in TrioCDP or 
+    the integration with PyCDP.&quot;&quot;&quot;</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span>
+<span class="s2">class </span><span class="s1">CmEventProxy</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot;A proxy object returned by :meth:`CdpBase.wait_for()``. 
+ 
+    After the context manager executes, this proxy object will have a 
+    value set that contains the returned event. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">value</span><span class="s3">: </span><span class="s1">Any </span><span class="s3">= </span><span class="s2">None</span>
+
+
+<span class="s2">class </span><span class="s1">CdpBase</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ws</span><span class="s3">, </span><span class="s1">session_id</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ws </span><span class="s3">= </span><span class="s1">ws</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">session_id </span><span class="s3">= </span><span class="s1">session_id</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">target_id </span><span class="s3">= </span><span class="s1">target_id</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">channels </span><span class="s3">= </span><span class="s1">defaultdict</span><span class="s3">(</span><span class="s1">set</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">id_iter </span><span class="s3">= </span><span class="s1">itertools</span><span class="s3">.</span><span class="s1">count</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_cmd </span><span class="s3">= {}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_result </span><span class="s3">= {}</span>
+
+    <span class="s2">async def </span><span class="s1">execute</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">cmd</span><span class="s3">: </span><span class="s1">Generator</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">, </span><span class="s1">T</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">]) </span><span class="s1">-&gt; T</span><span class="s3">:</span>
+        <span class="s6">&quot;&quot;&quot;Execute a command on the server and wait for the result. 
+ 
+        :param cmd: any CDP command 
+        :returns: a CDP result 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cmd_id </span><span class="s3">= </span><span class="s1">next</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">id_iter</span><span class="s3">)</span>
+        <span class="s1">cmd_event </span><span class="s3">= </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">Event</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_cmd</span><span class="s3">[</span><span class="s1">cmd_id</span><span class="s3">] = </span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">cmd_event</span>
+        <span class="s1">request </span><span class="s3">= </span><span class="s1">next</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">)</span>
+        <span class="s1">request</span><span class="s3">[</span><span class="s4">&quot;id&quot;</span><span class="s3">] = </span><span class="s1">cmd_id</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">session_id</span><span class="s3">:</span>
+            <span class="s1">request</span><span class="s3">[</span><span class="s4">&quot;sessionId&quot;</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">session_id</span>
+        <span class="s1">request_str </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">dumps</span><span class="s3">(</span><span class="s1">request</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">logger</span><span class="s3">.</span><span class="s1">isEnabledFor</span><span class="s3">(</span><span class="s1">logging</span><span class="s3">.</span><span class="s1">DEBUG</span><span class="s3">):</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">f&quot;Sending CDP message: </span><span class="s2">{</span><span class="s1">cmd_id</span><span class="s2">} {</span><span class="s1">cmd_event</span><span class="s2">}</span><span class="s4">: </span><span class="s2">{</span><span class="s1">request_str</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ws</span><span class="s3">.</span><span class="s1">send_message</span><span class="s3">(</span><span class="s1">request_str</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">WsConnectionClosed </span><span class="s2">as </span><span class="s1">wcc</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">CdpConnectionClosed</span><span class="s3">(</span><span class="s1">wcc</span><span class="s3">.</span><span class="s1">reason</span><span class="s3">) </span><span class="s2">from None</span>
+        <span class="s2">await </span><span class="s1">cmd_event</span><span class="s3">.</span><span class="s1">wait</span><span class="s3">()</span>
+        <span class="s1">response </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_result</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">cmd_id</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">logger</span><span class="s3">.</span><span class="s1">isEnabledFor</span><span class="s3">(</span><span class="s1">logging</span><span class="s3">.</span><span class="s1">DEBUG</span><span class="s3">):</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">f&quot;Received CDP message: </span><span class="s2">{</span><span class="s1">response</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">response</span><span class="s3">, </span><span class="s1">Exception</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">logger</span><span class="s3">.</span><span class="s1">isEnabledFor</span><span class="s3">(</span><span class="s1">logging</span><span class="s3">.</span><span class="s1">DEBUG</span><span class="s3">):</span>
+                <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">f&quot;Exception raised by </span><span class="s2">{</span><span class="s1">cmd_event</span><span class="s2">} </span><span class="s4">message: </span><span class="s2">{</span><span class="s1">type</span><span class="s3">(</span><span class="s1">response</span><span class="s3">).</span><span class="s1">__name__</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">response</span>
+        <span class="s2">return </span><span class="s1">response</span>
+
+    <span class="s2">def </span><span class="s1">listen</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">event_types</span><span class="s3">, </span><span class="s1">buffer_size</span><span class="s3">=</span><span class="s5">10</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Return an async iterator that iterates over events matching the 
+        indicated types.&quot;&quot;&quot;</span>
+        <span class="s1">sender</span><span class="s3">, </span><span class="s1">receiver </span><span class="s3">= </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">open_memory_channel</span><span class="s3">(</span><span class="s1">buffer_size</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">event_type </span><span class="s2">in </span><span class="s1">event_types</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">channels</span><span class="s3">[</span><span class="s1">event_type</span><span class="s3">].</span><span class="s1">add</span><span class="s3">(</span><span class="s1">sender</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">receiver</span>
+
+    <span class="s3">@</span><span class="s1">asynccontextmanager</span>
+    <span class="s2">async def </span><span class="s1">wait_for</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event_type</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">T</span><span class="s3">], </span><span class="s1">buffer_size</span><span class="s3">=</span><span class="s5">10</span><span class="s3">) </span><span class="s1">-&gt; AsyncGenerator</span><span class="s3">[</span><span class="s1">CmEventProxy</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s6">&quot;&quot;&quot;Wait for an event of the given type and return it. 
+ 
+        This is an async context manager, so you should open it inside 
+        an async with block. The block will not exit until the indicated 
+        event is received. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">sender</span><span class="s3">: </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">MemorySendChannel</span>
+        <span class="s1">receiver</span><span class="s3">: </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">MemoryReceiveChannel</span>
+        <span class="s1">sender</span><span class="s3">, </span><span class="s1">receiver </span><span class="s3">= </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">open_memory_channel</span><span class="s3">(</span><span class="s1">buffer_size</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">channels</span><span class="s3">[</span><span class="s1">event_type</span><span class="s3">].</span><span class="s1">add</span><span class="s3">(</span><span class="s1">sender</span><span class="s3">)</span>
+        <span class="s1">proxy </span><span class="s3">= </span><span class="s1">CmEventProxy</span><span class="s3">()</span>
+        <span class="s2">yield </span><span class="s1">proxy</span>
+        <span class="s2">async with </span><span class="s1">receiver</span><span class="s3">:</span>
+            <span class="s1">event </span><span class="s3">= </span><span class="s2">await </span><span class="s1">receiver</span><span class="s3">.</span><span class="s1">receive</span><span class="s3">()</span>
+        <span class="s1">proxy</span><span class="s3">.</span><span class="s1">value </span><span class="s3">= </span><span class="s1">event</span>
+
+    <span class="s2">def </span><span class="s1">_handle_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Handle incoming WebSocket data. 
+ 
+        :param dict data: a JSON dictionary 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s4">&quot;id&quot; </span><span class="s2">in </span><span class="s1">data</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_handle_cmd_response</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_handle_event</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_handle_cmd_response</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Handle a response to a command. This will set an event flag that 
+        will return control to the task that called the command. 
+ 
+        :param dict data: response as a JSON dictionary 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cmd_id </span><span class="s3">= </span><span class="s1">data</span><span class="s3">[</span><span class="s4">&quot;id&quot;</span><span class="s3">]</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">cmd</span><span class="s3">, </span><span class="s1">event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_cmd</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">cmd_id</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s4">&quot;Got a message with a command ID that does not exist: %s&quot;</span><span class="s3">, </span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">return</span>
+        <span class="s2">if </span><span class="s4">&quot;error&quot; </span><span class="s2">in </span><span class="s1">data</span><span class="s3">:</span>
+            <span class="s0"># If the server reported an error, convert it to an exception and do</span>
+            <span class="s0"># not process the response any further.</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_result</span><span class="s3">[</span><span class="s1">cmd_id</span><span class="s3">] = </span><span class="s1">BrowserError</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s4">&quot;error&quot;</span><span class="s3">])</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s0"># Otherwise, continue the generator to parse the JSON result</span>
+            <span class="s0"># into a CDP object.</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">_ </span><span class="s3">= </span><span class="s1">cmd</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s4">&quot;result&quot;</span><span class="s3">])</span>
+                <span class="s2">raise </span><span class="s1">InternalError</span><span class="s3">(</span><span class="s4">&quot;The command's generator function did not exit when expected!&quot;</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">StopIteration </span><span class="s2">as </span><span class="s1">exit</span><span class="s3">:</span>
+                <span class="s1">return_ </span><span class="s3">= </span><span class="s1">exit</span><span class="s3">.</span><span class="s1">value</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">inflight_result</span><span class="s3">[</span><span class="s1">cmd_id</span><span class="s3">] = </span><span class="s1">return_</span>
+        <span class="s1">event</span><span class="s3">.</span><span class="s1">set</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_handle_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Handle an event. 
+ 
+        :param dict data: event as a JSON dictionary 
+        &quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">devtools</span>
+        <span class="s1">event </span><span class="s3">= </span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">util</span><span class="s3">.</span><span class="s1">parse_json_event</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot;Received event: %s&quot;</span><span class="s3">, </span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s1">to_remove </span><span class="s3">= </span><span class="s1">set</span><span class="s3">()</span>
+        <span class="s2">for </span><span class="s1">sender </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">channels</span><span class="s3">[</span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)]:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">sender</span><span class="s3">.</span><span class="s1">send_nowait</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">WouldBlock</span><span class="s3">:</span>
+                <span class="s1">logger</span><span class="s3">.</span><span class="s1">error</span><span class="s3">(</span><span class="s4">'Unable to send event &quot;%r&quot; due to full channel %s'</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">sender</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">:</span>
+                <span class="s1">to_remove</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">sender</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">to_remove</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">channels</span><span class="s3">[</span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)] -= </span><span class="s1">to_remove</span>
+
+
+<span class="s2">class </span><span class="s1">CdpSession</span><span class="s3">(</span><span class="s1">CdpBase</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Contains the state for a CDP session. 
+ 
+    Generally you should not instantiate this object yourself; you should call 
+    :meth:`CdpConnection.open_session`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ws</span><span class="s3">, </span><span class="s1">session_id</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Constructor. 
+ 
+        :param trio_websocket.WebSocketConnection ws: 
+        :param devtools.target.SessionID session_id: 
+        :param devtools.target.TargetID target_id: 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">ws</span><span class="s3">, </span><span class="s1">session_id</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_count </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_lock </span><span class="s3">= </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">Lock</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_count </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_lock </span><span class="s3">= </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">Lock</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">asynccontextmanager</span>
+    <span class="s2">async def </span><span class="s1">dom_enable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;A context manager that executes ``dom.enable()`` when it enters and 
+        then calls ``dom.disable()``. 
+ 
+        This keeps track of concurrent callers and only disables DOM 
+        events when all callers have exited. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">devtools</span>
+        <span class="s2">async with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_lock</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_count </span><span class="s3">+= </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_count </span><span class="s3">== </span><span class="s5">1</span><span class="s3">:</span>
+                <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">dom</span><span class="s3">.</span><span class="s1">enable</span><span class="s3">())</span>
+
+        <span class="s2">yield</span>
+
+        <span class="s2">async with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_lock</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_count </span><span class="s3">-= </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dom_enable_count </span><span class="s3">== </span><span class="s5">0</span><span class="s3">:</span>
+                <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">dom</span><span class="s3">.</span><span class="s1">disable</span><span class="s3">())</span>
+
+    <span class="s3">@</span><span class="s1">asynccontextmanager</span>
+    <span class="s2">async def </span><span class="s1">page_enable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;A context manager that executes ``page.enable()`` when it enters and 
+        then calls ``page.disable()`` when it exits. 
+ 
+        This keeps track of concurrent callers and only disables page 
+        events when all callers have exited. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">devtools</span>
+        <span class="s2">async with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_lock</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_count </span><span class="s3">+= </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_count </span><span class="s3">== </span><span class="s5">1</span><span class="s3">:</span>
+                <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">page</span><span class="s3">.</span><span class="s1">enable</span><span class="s3">())</span>
+
+        <span class="s2">yield</span>
+
+        <span class="s2">async with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_lock</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_count </span><span class="s3">-= </span><span class="s5">1</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_page_enable_count </span><span class="s3">== </span><span class="s5">0</span><span class="s3">:</span>
+                <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">page</span><span class="s3">.</span><span class="s1">disable</span><span class="s3">())</span>
+
+
+<span class="s2">class </span><span class="s1">CdpConnection</span><span class="s3">(</span><span class="s1">CdpBase</span><span class="s3">, </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">abc</span><span class="s3">.</span><span class="s1">AsyncResource</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;Contains the connection state for a Chrome DevTools Protocol server. 
+ 
+    CDP can multiplex multiple &quot;sessions&quot; over a single connection. This 
+    class corresponds to the &quot;root&quot; session, i.e. the implicitly created 
+    session that has no session ID. This class is responsible for 
+    reading incoming WebSocket messages and forwarding them to the 
+    corresponding session, as well as handling messages targeted at the 
+    root session itself. You should generally call the 
+    :func:`open_cdp()` instead of instantiating this class directly. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">ws</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Constructor. 
+ 
+        :param trio_websocket.WebSocketConnection ws: 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">ws</span><span class="s3">, </span><span class="s1">session_id</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">=</span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sessions </span><span class="s3">= {}</span>
+
+    <span class="s2">async def </span><span class="s1">aclose</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Close the underlying WebSocket connection. 
+ 
+        This will cause the reader task to gracefully exit when it tries 
+        to read the next message from the WebSocket. All of the public 
+        APIs (``execute()``, ``listen()``, etc.) will raise 
+        ``CdpConnectionClosed`` after the CDP connection is closed. It 
+        is safe to call this multiple times. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ws</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">asynccontextmanager</span>
+    <span class="s2">async def </span><span class="s1">open_session</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">) </span><span class="s1">-&gt; AsyncIterator</span><span class="s3">[</span><span class="s1">CdpSession</span><span class="s3">]:</span>
+        <span class="s6">&quot;&quot;&quot;This context manager opens a session and enables the &quot;simple&quot; style 
+        of calling CDP APIs. 
+ 
+        For example, inside a session context, you can call ``await 
+        dom.get_document()`` and it will execute on the current session 
+        automatically. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">session </span><span class="s3">= </span><span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">connect_session</span><span class="s3">(</span><span class="s1">target_id</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">session_context</span><span class="s3">(</span><span class="s1">session</span><span class="s3">):</span>
+            <span class="s2">yield </span><span class="s1">session</span>
+
+    <span class="s2">async def </span><span class="s1">connect_session</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s4">&quot;CdpSession&quot;</span><span class="s3">:</span>
+        <span class="s6">&quot;&quot;&quot;Returns a new :class:`CdpSession` connected to the specified 
+        target.&quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">devtools</span>
+        <span class="s1">session_id </span><span class="s3">= </span><span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">target</span><span class="s3">.</span><span class="s1">attach_to_target</span><span class="s3">(</span><span class="s1">target_id</span><span class="s3">, </span><span class="s2">True</span><span class="s3">))</span>
+        <span class="s1">session </span><span class="s3">= </span><span class="s1">CdpSession</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">ws</span><span class="s3">, </span><span class="s1">session_id</span><span class="s3">, </span><span class="s1">target_id</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sessions</span><span class="s3">[</span><span class="s1">session_id</span><span class="s3">] = </span><span class="s1">session</span>
+        <span class="s2">return </span><span class="s1">session</span>
+
+    <span class="s2">async def </span><span class="s1">_reader_task</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6">&quot;&quot;&quot;Runs in the background and handles incoming messages: dispatching 
+        responses to commands and events to listeners.&quot;&quot;&quot;</span>
+        <span class="s2">global </span><span class="s1">devtools</span>
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">message </span><span class="s3">= </span><span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ws</span><span class="s3">.</span><span class="s1">get_message</span><span class="s3">()</span>
+            <span class="s2">except </span><span class="s1">WsConnectionClosed</span><span class="s3">:</span>
+                <span class="s0"># If the WebSocket is closed, we don't want to throw an</span>
+                <span class="s0"># exception from the reader task. Instead we will throw</span>
+                <span class="s0"># exceptions from the public API methods, and we can quietly</span>
+                <span class="s0"># exit the reader task here.</span>
+                <span class="s2">break</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">data </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">loads</span><span class="s3">(</span><span class="s1">message</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">json</span><span class="s3">.</span><span class="s1">JSONDecodeError</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">BrowserError</span><span class="s3">({</span><span class="s4">&quot;code&quot;</span><span class="s3">: -</span><span class="s5">32700</span><span class="s3">, </span><span class="s4">&quot;message&quot;</span><span class="s3">: </span><span class="s4">&quot;Client received invalid JSON&quot;</span><span class="s3">, </span><span class="s4">&quot;data&quot;</span><span class="s3">: </span><span class="s1">message</span><span class="s3">})</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot;Received message %r&quot;</span><span class="s3">, </span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s4">&quot;sessionId&quot; </span><span class="s2">in </span><span class="s1">data</span><span class="s3">:</span>
+                <span class="s1">session_id </span><span class="s3">= </span><span class="s1">devtools</span><span class="s3">.</span><span class="s1">target</span><span class="s3">.</span><span class="s1">SessionID</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s4">&quot;sessionId&quot;</span><span class="s3">])</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">session </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">sessions</span><span class="s3">[</span><span class="s1">session_id</span><span class="s3">]</span>
+                <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">BrowserError</span><span class="s3">(</span>
+                        <span class="s3">{</span>
+                            <span class="s4">&quot;code&quot;</span><span class="s3">: -</span><span class="s5">32700</span><span class="s3">,</span>
+                            <span class="s4">&quot;message&quot;</span><span class="s3">: </span><span class="s4">&quot;Browser sent a message for an invalid session&quot;</span><span class="s3">,</span>
+                            <span class="s4">&quot;data&quot;</span><span class="s3">: </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">session_id</span><span class="s2">!r}</span><span class="s4">&quot;</span><span class="s3">,</span>
+                        <span class="s3">}</span>
+                    <span class="s3">)</span>
+                <span class="s1">session</span><span class="s3">.</span><span class="s1">_handle_data</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_handle_data</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">_</span><span class="s3">, </span><span class="s1">session </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">sessions</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+            <span class="s2">for </span><span class="s1">_</span><span class="s3">, </span><span class="s1">senders </span><span class="s2">in </span><span class="s1">session</span><span class="s3">.</span><span class="s1">channels</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+                <span class="s2">for </span><span class="s1">sender </span><span class="s2">in </span><span class="s1">senders</span><span class="s3">:</span>
+                    <span class="s1">sender</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+
+<span class="s3">@</span><span class="s1">asynccontextmanager</span>
+<span class="s2">async def </span><span class="s1">open_cdp</span><span class="s3">(</span><span class="s1">url</span><span class="s3">) </span><span class="s1">-&gt; AsyncIterator</span><span class="s3">[</span><span class="s1">CdpConnection</span><span class="s3">]:</span>
+    <span class="s6">&quot;&quot;&quot;This async context manager opens a connection to the browser specified 
+    by ``url`` before entering the block, then closes the connection when the 
+    block exits. 
+ 
+    The context manager also sets the connection as the default 
+    connection for the current task, so that commands like ``await 
+    target.get_targets()`` will run on this connection automatically. If 
+    you want to use multiple connections concurrently, it is recommended 
+    to open each on in a separate task. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">async with </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+        <span class="s1">conn </span><span class="s3">= </span><span class="s2">await </span><span class="s1">connect_cdp</span><span class="s3">(</span><span class="s1">nursery</span><span class="s3">, </span><span class="s1">url</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">connection_context</span><span class="s3">(</span><span class="s1">conn</span><span class="s3">):</span>
+                <span class="s2">yield </span><span class="s1">conn</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">conn</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">()</span>
+
+
+<span class="s2">async def </span><span class="s1">connect_cdp</span><span class="s3">(</span><span class="s1">nursery</span><span class="s3">, </span><span class="s1">url</span><span class="s3">) </span><span class="s1">-&gt; CdpConnection</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot;Connect to the browser specified by ``url`` and spawn a background task 
+    in the specified nursery. 
+ 
+    The ``open_cdp()`` context manager is preferred in most situations. 
+    You should only use this function if you need to specify a custom 
+    nursery. This connection is not automatically closed! You can either 
+    use the connection object as a context manager (``async with 
+    conn:``) or else call ``await conn.aclose()`` on it when you are 
+    done with it. If ``set_context`` is True, then the returned 
+    connection will be installed as the default connection for the 
+    current task. This argument is for unusual use cases, such as 
+    running inside of a notebook. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ws </span><span class="s3">= </span><span class="s2">await </span><span class="s1">connect_websocket_url</span><span class="s3">(</span><span class="s1">nursery</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">max_message_size</span><span class="s3">=</span><span class="s1">MAX_WS_MESSAGE_SIZE</span><span class="s3">)</span>
+    <span class="s1">cdp_conn </span><span class="s3">= </span><span class="s1">CdpConnection</span><span class="s3">(</span><span class="s1">ws</span><span class="s3">)</span>
+    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">cdp_conn</span><span class="s3">.</span><span class="s1">_reader_task</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">cdp_conn</span>
+</pre>
+</body>
+</html>

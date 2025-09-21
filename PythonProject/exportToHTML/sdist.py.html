@@ -1,0 +1,544 @@
+<html>
+<head>
+<title>sdist.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+sdist.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.sdist 
+ 
+Implements the Distutils 'sdist' command (create a source distribution).&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Callable</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">archive_util</span><span class="s3">, </span><span class="s1">dir_util</span><span class="s3">, </span><span class="s1">file_util</span>
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">_log </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s1">glob </span><span class="s2">import </span><span class="s1">glob</span>
+<span class="s2">from </span><span class="s1">itertools </span><span class="s2">import </span><span class="s1">filterfalse</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">ClassVar</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">DistutilsOptionError</span><span class="s3">, </span><span class="s1">DistutilsTemplateError</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">filelist </span><span class="s2">import </span><span class="s1">FileList</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">text_file </span><span class="s2">import </span><span class="s1">TextFile</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">util </span><span class="s2">import </span><span class="s1">convert_path</span>
+
+
+<span class="s2">def </span><span class="s1">show_formats</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot;Print all possible values for the 'formats' option (used by 
+    the &quot;--help-formats&quot; command-line option). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s3">..</span><span class="s1">archive_util </span><span class="s2">import </span><span class="s1">ARCHIVE_FORMATS</span>
+    <span class="s2">from </span><span class="s3">..</span><span class="s1">fancy_getopt </span><span class="s2">import </span><span class="s1">FancyGetopt</span>
+
+    <span class="s1">formats </span><span class="s3">= </span><span class="s1">sorted</span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s4">&quot;formats=&quot; </span><span class="s3">+ </span><span class="s1">format</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">ARCHIVE_FORMATS</span><span class="s3">[</span><span class="s1">format</span><span class="s3">][</span><span class="s5">2</span><span class="s3">])</span>
+        <span class="s2">for </span><span class="s1">format </span><span class="s2">in </span><span class="s1">ARCHIVE_FORMATS</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">()</span>
+    <span class="s3">)</span>
+    <span class="s1">FancyGetopt</span><span class="s3">(</span><span class="s1">formats</span><span class="s3">).</span><span class="s1">print_help</span><span class="s3">(</span><span class="s4">&quot;List of available source distribution formats:&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">sdist</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s1">description </span><span class="s3">= </span><span class="s4">&quot;create a source distribution (tarball, zip file, etc.)&quot;</span>
+
+    <span class="s2">def </span><span class="s1">checking_metadata</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Callable used for the check sub-command. 
+ 
+        Placed here so user_options can view it&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">metadata_check</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s4">'template='</span><span class="s3">, </span><span class="s4">'t'</span><span class="s3">, </span><span class="s4">&quot;name of manifest template file [default: MANIFEST.in]&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'manifest='</span><span class="s3">, </span><span class="s4">'m'</span><span class="s3">, </span><span class="s4">&quot;name of manifest file [default: MANIFEST]&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'use-defaults'</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;include the default file set in the manifest &quot;</span>
+            <span class="s4">&quot;[default; disable with --no-defaults]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'no-defaults'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;don't include the default file set&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'prune'</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;specifically exclude files/directories that should not be &quot;</span>
+            <span class="s4">&quot;distributed (build tree, RCS/CVS dirs, etc.) &quot;</span>
+            <span class="s4">&quot;[default; disable with --no-prune]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'no-prune'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;don't automatically exclude anything&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'manifest-only'</span><span class="s3">,</span>
+            <span class="s4">'o'</span><span class="s3">,</span>
+            <span class="s4">&quot;just regenerate the manifest and then stop (implies --force-manifest)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'force-manifest'</span><span class="s3">,</span>
+            <span class="s4">'f'</span><span class="s3">,</span>
+            <span class="s4">&quot;forcibly regenerate the manifest and carry on as usual. &quot;</span>
+            <span class="s4">&quot;Deprecated: now the manifest is always regenerated.&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'formats='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;formats for source distribution (comma-separated list)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'keep-temp'</span><span class="s3">,</span>
+            <span class="s4">'k'</span><span class="s3">,</span>
+            <span class="s4">&quot;keep the distribution tree around after creating &quot; </span><span class="s3">+ </span><span class="s4">&quot;archive file(s)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'dist-dir='</span><span class="s3">,</span>
+            <span class="s4">'d'</span><span class="s3">,</span>
+            <span class="s4">&quot;directory to put the source distribution archive(s) in [default: dist]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'metadata-check'</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s4">&quot;Ensure that all required elements of meta-data &quot;</span>
+            <span class="s4">&quot;are supplied. Warn if any missing. [default]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'owner='</span><span class="s3">,</span>
+            <span class="s4">'u'</span><span class="s3">,</span>
+            <span class="s4">&quot;Owner name used when creating a tar file [default: current user]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'group='</span><span class="s3">,</span>
+            <span class="s4">'g'</span><span class="s3">,</span>
+            <span class="s4">&quot;Group name used when creating a tar file [default: current group]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">boolean_options</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = [</span>
+        <span class="s4">'use-defaults'</span><span class="s3">,</span>
+        <span class="s4">'prune'</span><span class="s3">,</span>
+        <span class="s4">'manifest-only'</span><span class="s3">,</span>
+        <span class="s4">'force-manifest'</span><span class="s3">,</span>
+        <span class="s4">'keep-temp'</span><span class="s3">,</span>
+        <span class="s4">'metadata-check'</span><span class="s3">,</span>
+    <span class="s3">]</span>
+
+    <span class="s1">help_options</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">[[], </span><span class="s1">object</span><span class="s3">]]]] = [</span>
+        <span class="s3">(</span><span class="s4">'help-formats'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;list available distribution formats&quot;</span><span class="s3">, </span><span class="s1">show_formats</span><span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">negative_opt</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]] = {</span>
+        <span class="s4">'no-defaults'</span><span class="s3">: </span><span class="s4">'use-defaults'</span><span class="s3">,</span>
+        <span class="s4">'no-prune'</span><span class="s3">: </span><span class="s4">'prune'</span><span class="s3">,</span>
+    <span class="s3">}</span>
+
+    <span class="s1">sub_commands </span><span class="s3">= [(</span><span class="s4">'check'</span><span class="s3">, </span><span class="s1">checking_metadata</span><span class="s3">)]</span>
+
+    <span class="s1">READMES</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...]] = (</span><span class="s4">'README'</span><span class="s3">, </span><span class="s4">'README.txt'</span><span class="s3">, </span><span class="s4">'README.rst'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6"># 'template' and 'manifest' are, respectively, the names of</span>
+        <span class="s6"># the manifest template and manifest file.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">template </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">manifest </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s6"># 'use_defaults': if true, we will include the default file set</span>
+        <span class="s6"># in the manifest</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">use_defaults </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">prune </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">manifest_only </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">force_manifest </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">formats </span><span class="s3">= [</span><span class="s4">'gztar'</span><span class="s3">]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">archive_files </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">metadata_check </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">owner </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">group </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">manifest </span><span class="s3">= </span><span class="s4">&quot;MANIFEST&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">template </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">template </span><span class="s3">= </span><span class="s4">&quot;MANIFEST.in&quot;</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'formats'</span><span class="s3">)</span>
+
+        <span class="s1">bad_format </span><span class="s3">= </span><span class="s1">archive_util</span><span class="s3">.</span><span class="s1">check_archive_formats</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">bad_format</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsOptionError</span><span class="s3">(</span><span class="s4">f&quot;unknown archive format '</span><span class="s2">{</span><span class="s1">bad_format</span><span class="s2">}</span><span class="s4">'&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s4">&quot;dist&quot;</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s6"># 'filelist' contains the list of files that will make up the</span>
+        <span class="s6"># manifest</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist </span><span class="s3">= </span><span class="s1">FileList</span><span class="s3">()</span>
+
+        <span class="s6"># Run sub commands</span>
+        <span class="s2">for </span><span class="s1">cmd_name </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_sub_commands</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s1">cmd_name</span><span class="s3">)</span>
+
+        <span class="s6"># Do whatever it takes to get the list of files to process</span>
+        <span class="s6"># (process the manifest template, read an existing manifest,</span>
+        <span class="s6"># whatever).  File list is accumulated in 'self.filelist'.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">get_file_list</span><span class="s3">()</span>
+
+        <span class="s6"># If user just wanted us to regenerate the manifest, stop now.</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest_only</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+        <span class="s6"># Otherwise, go ahead and create the source distribution tarball,</span>
+        <span class="s6"># or zipfile, or whatever.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">make_distribution</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">get_file_list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Figure out the list of files to include in the source 
+        distribution, and put it in 'self.filelist'.  This might involve 
+        reading the manifest template (and writing the manifest), or just 
+        reading the manifest, or just using the default file set -- it all 
+        depends on the user's options. 
+        &quot;&quot;&quot;</span>
+        <span class="s6"># new behavior when using a template:</span>
+        <span class="s6"># the file list is recalculated every time because</span>
+        <span class="s6"># even if MANIFEST.in or setup.py are not changed</span>
+        <span class="s6"># the user might have added some files in the tree that</span>
+        <span class="s6"># need to be included.</span>
+        <span class="s6">#</span>
+        <span class="s6">#  This makes --force the default and only behavior with templates.</span>
+        <span class="s1">template_exists </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">template</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">template_exists </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_manifest_is_not_generated</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">read_manifest</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">sort</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">remove_duplicates</span><span class="s3">()</span>
+            <span class="s2">return</span>
+
+        <span class="s2">if not </span><span class="s1">template_exists</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s3">(</span><span class="s4">&quot;manifest template '%s' does not exist &quot; </span><span class="s3">+ </span><span class="s4">&quot;(using default file list)&quot;</span><span class="s3">)</span>
+                <span class="s3">% </span><span class="s1">self</span><span class="s3">.</span><span class="s1">template</span>
+            <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">findall</span><span class="s3">()</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">use_defaults</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">add_defaults</span><span class="s3">()</span>
+
+        <span class="s2">if </span><span class="s1">template_exists</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">read_template</span><span class="s3">()</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">prune</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">prune_file_list</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">sort</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">remove_duplicates</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_manifest</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">add_defaults</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Add all the default files to self.filelist: 
+          - README or README.txt 
+          - setup.py 
+          - tests/test*.py and test/test*.py 
+          - all pure Python modules mentioned in setup script 
+          - all files pointed by package_data (build_py) 
+          - all files defined in data_files. 
+          - all files defined as scripts. 
+          - all C sources listed as part of extensions or C libraries 
+            in the setup script (doesn't catch C headers!) 
+        Warns if (README or README.txt) or setup.py are missing; everything 
+        else is optional. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_standards</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_optional</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_python</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_data_files</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_ext</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_c_libs</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_add_defaults_scripts</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">_cs_path_exists</span><span class="s3">(</span><span class="s1">fspath</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Case-sensitive path existence check 
+ 
+        &gt;&gt;&gt; sdist._cs_path_exists(__file__) 
+        True 
+        &gt;&gt;&gt; sdist._cs_path_exists(__file__.upper()) 
+        False 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">fspath</span><span class="s3">):</span>
+            <span class="s2">return False</span>
+        <span class="s6"># make absolute so we always have a directory</span>
+        <span class="s1">abspath </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">fspath</span><span class="s3">)</span>
+        <span class="s1">directory</span><span class="s3">, </span><span class="s1">filename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">abspath</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">listdir</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_standards</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">standards </span><span class="s3">= [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">READMES</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">script_name</span><span class="s3">]</span>
+        <span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">standards</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">):</span>
+                <span class="s1">alts </span><span class="s3">= </span><span class="s1">fn</span>
+                <span class="s1">got_it </span><span class="s3">= </span><span class="s2">False</span>
+                <span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">alts</span><span class="s3">:</span>
+                    <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cs_path_exists</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">):</span>
+                        <span class="s1">got_it </span><span class="s3">= </span><span class="s2">True</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+                        <span class="s2">break</span>
+
+                <span class="s2">if not </span><span class="s1">got_it</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                        <span class="s4">&quot;standard file not found: should have one of &quot; </span><span class="s3">+ </span><span class="s4">', '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">alts</span><span class="s3">)</span>
+                    <span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cs_path_exists</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s4">f&quot;standard file '</span><span class="s2">{</span><span class="s1">fn</span><span class="s2">}</span><span class="s4">' not found&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_optional</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">optional </span><span class="s3">= [</span><span class="s4">'tests/test*.py'</span><span class="s3">, </span><span class="s4">'test/test*.py'</span><span class="s3">, </span><span class="s4">'setup.cfg'</span><span class="s3">]</span>
+        <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">optional</span><span class="s3">:</span>
+            <span class="s1">files </span><span class="s3">= </span><span class="s1">filter</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">, </span><span class="s1">glob</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">))</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">files</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_python</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6"># build_py is used to get:</span>
+        <span class="s6">#  - python modules</span>
+        <span class="s6">#  - files defined in package_data</span>
+        <span class="s1">build_py </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build_py'</span><span class="s3">)</span>
+
+        <span class="s6"># getting python files</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_pure_modules</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">build_py</span><span class="s3">.</span><span class="s1">get_source_files</span><span class="s3">())</span>
+
+        <span class="s6"># getting package_data files</span>
+        <span class="s6"># (computed in build_py.data_files by build_py.finalize_options)</span>
+        <span class="s2">for </span><span class="s1">_pkg</span><span class="s3">, </span><span class="s1">src_dir</span><span class="s3">, </span><span class="s1">_build_dir</span><span class="s3">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">build_py</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">src_dir</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_data_files</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6"># getting distribution.data_files</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_data_files</span><span class="s3">():</span>
+            <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">item</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+                    <span class="s6"># plain file</span>
+                    <span class="s1">item </span><span class="s3">= </span><span class="s1">convert_path</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span>
+                    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">item</span><span class="s3">):</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s6"># a (dirname, filenames) tuple</span>
+                    <span class="s1">dirname</span><span class="s3">, </span><span class="s1">filenames </span><span class="s3">= </span><span class="s1">item</span>
+                    <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">filenames</span><span class="s3">:</span>
+                        <span class="s1">f </span><span class="s3">= </span><span class="s1">convert_path</span><span class="s3">(</span><span class="s1">f</span><span class="s3">)</span>
+                        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">f</span><span class="s3">):</span>
+                            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">f</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_ext</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+            <span class="s1">build_ext </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build_ext'</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">build_ext</span><span class="s3">.</span><span class="s1">get_source_files</span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_c_libs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_c_libraries</span><span class="s3">():</span>
+            <span class="s1">build_clib </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build_clib'</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">build_clib</span><span class="s3">.</span><span class="s1">get_source_files</span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">_add_defaults_scripts</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_scripts</span><span class="s3">():</span>
+            <span class="s1">build_scripts </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build_scripts'</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">build_scripts</span><span class="s3">.</span><span class="s1">get_source_files</span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">read_template</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Read and parse manifest template file named by self.template. 
+ 
+        (usually &quot;MANIFEST.in&quot;) The parsing and processing is done by 
+        'self.filelist', which updates itself accordingly. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s4">&quot;reading manifest template '%s'&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">template</span><span class="s3">)</span>
+        <span class="s1">template </span><span class="s3">= </span><span class="s1">TextFile</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">template</span><span class="s3">,</span>
+            <span class="s1">strip_comments</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s1">skip_blanks</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s1">join_lines</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s1">lstrip_ws</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s1">rstrip_ws</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s1">collapse_join</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">while True</span><span class="s3">:</span>
+                <span class="s1">line </span><span class="s3">= </span><span class="s1">template</span><span class="s3">.</span><span class="s1">readline</span><span class="s3">()</span>
+                <span class="s2">if </span><span class="s1">line </span><span class="s2">is None</span><span class="s3">:  </span><span class="s6"># end of file</span>
+                    <span class="s2">break</span>
+
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">process_template_line</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+                <span class="s6"># the call above can raise a DistutilsTemplateError for</span>
+                <span class="s6"># malformed lines, or a ValueError from the lower-level</span>
+                <span class="s6"># convert_path function</span>
+                <span class="s2">except </span><span class="s3">(</span><span class="s1">DistutilsTemplateError</span><span class="s3">, </span><span class="s1">ValueError</span><span class="s3">) </span><span class="s2">as </span><span class="s1">msg</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                        <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">template</span><span class="s3">.</span><span class="s1">filename</span><span class="s2">}</span><span class="s4">, line </span><span class="s2">{</span><span class="s1">int</span><span class="s3">(</span><span class="s1">template</span><span class="s3">.</span><span class="s1">current_line</span><span class="s3">)</span><span class="s2">}</span><span class="s4">: </span><span class="s2">{</span><span class="s1">msg</span><span class="s2">}</span><span class="s4">&quot;</span>
+                    <span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">template</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">prune_file_list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Prune off branches that might slip into the file list as created 
+        by 'read_template()', but really don't belong there: 
+          * the build tree (typically &quot;build&quot;) 
+          * the release tree itself (only an issue if we ran &quot;sdist&quot; 
+            previously with --keep-temp, or it aborted) 
+          * any RCS, CVS, .svn, .hg, .git, .bzr, _darcs directories 
+        &quot;&quot;&quot;</span>
+        <span class="s1">build </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build'</span><span class="s3">)</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_fullname</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s1">os</span><span class="s3">.</span><span class="s1">fspath</span><span class="s3">(</span><span class="s1">build</span><span class="s3">.</span><span class="s1">build_base</span><span class="s3">))</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s1">base_dir</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform </span><span class="s3">== </span><span class="s4">'win32'</span><span class="s3">:</span>
+            <span class="s1">seps </span><span class="s3">= </span><span class="s4">r'/|\\'</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">seps </span><span class="s3">= </span><span class="s4">'/'</span>
+
+        <span class="s1">vcs_dirs </span><span class="s3">= [</span><span class="s4">'RCS'</span><span class="s3">, </span><span class="s4">'CVS'</span><span class="s3">, </span><span class="s4">r'\.svn'</span><span class="s3">, </span><span class="s4">r'\.hg'</span><span class="s3">, </span><span class="s4">r'\.git'</span><span class="s3">, </span><span class="s4">r'\.bzr'</span><span class="s3">, </span><span class="s4">'_darcs'</span><span class="s3">]</span>
+        <span class="s1">vcs_ptrn </span><span class="s3">= </span><span class="s4">r'(^|{})({})({}).*'</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">seps</span><span class="s3">, </span><span class="s4">'|'</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">vcs_dirs</span><span class="s3">), </span><span class="s1">seps</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s1">vcs_ptrn</span><span class="s3">, </span><span class="s1">is_regex</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">write_manifest</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Write the file list in 'self.filelist' (presumably as filled in 
+        by 'add_defaults()' and 'read_template()') to the manifest file 
+        named by 'self.manifest'. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_manifest_is_not_generated</span><span class="s3">():</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span>
+                <span class="s4">f&quot;not writing to manually maintained manifest file '</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s2">}</span><span class="s4">'&quot;</span>
+            <span class="s3">)</span>
+            <span class="s2">return</span>
+
+        <span class="s1">content </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[:]</span>
+        <span class="s1">content</span><span class="s3">.</span><span class="s1">insert</span><span class="s3">(</span><span class="s5">0</span><span class="s3">, </span><span class="s4">'# file GENERATED by distutils, do NOT edit'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span>
+            <span class="s1">file_util</span><span class="s3">.</span><span class="s1">write_file</span><span class="s3">,</span>
+            <span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s3">, </span><span class="s1">content</span><span class="s3">),</span>
+            <span class="s4">f&quot;writing manifest file '</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s2">}</span><span class="s4">'&quot;</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_manifest_is_not_generated</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s6"># check for special comment used in 3.1.3 and higher</span>
+        <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s3">):</span>
+            <span class="s2">return False</span>
+
+        <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">'utf-8'</span><span class="s3">) </span><span class="s2">as </span><span class="s1">fp</span><span class="s3">:</span>
+            <span class="s1">first_line </span><span class="s3">= </span><span class="s1">next</span><span class="s3">(</span><span class="s1">fp</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">first_line </span><span class="s3">!= </span><span class="s4">'# file GENERATED by distutils, do NOT edit</span><span class="s2">\n</span><span class="s4">'</span>
+
+    <span class="s2">def </span><span class="s1">read_manifest</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Read the manifest file (named by 'self.manifest') and use it to 
+        fill in 'self.filelist', the list of files to include in the source 
+        distribution. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s4">&quot;reading manifest file '%s'&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">manifest</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">'utf-8'</span><span class="s3">) </span><span class="s2">as </span><span class="s1">lines</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span>
+                <span class="s6"># ignore comments and blank lines</span>
+                <span class="s1">filter</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">filterfalse</span><span class="s3">(</span><span class="s1">is_comment</span><span class="s3">, </span><span class="s1">map</span><span class="s3">(</span><span class="s1">str</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">, </span><span class="s1">lines</span><span class="s3">)))</span>
+            <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">make_release_tree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">files</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Create the directory tree that will become the source 
+        distribution archive.  All directories implied by the filenames in 
+        'files' are created under 'base_dir', and then we hard link or copy 
+        (if hard linking is unavailable) those files into place. 
+        Essentially, this duplicates the developer's source tree, but in a 
+        directory named after the distribution, containing only the files 
+        to be distributed. 
+        &quot;&quot;&quot;</span>
+        <span class="s6"># Create all the directories under 'base_dir' necessary to</span>
+        <span class="s6"># put 'files' there; the 'mkpath()' is just so we don't die</span>
+        <span class="s6"># if the manifest happens to be empty.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">)</span>
+        <span class="s1">dir_util</span><span class="s3">.</span><span class="s1">create_tree</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">files</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+        <span class="s6"># And walk over the list of files, either making a hard link (if</span>
+        <span class="s6"># os.link exists) to each one that doesn't already exist in its</span>
+        <span class="s6"># corresponding location under 'base_dir', or copying each file</span>
+        <span class="s6"># that's out-of-date in 'base_dir'.  (Usually, all files will be</span>
+        <span class="s6"># out-of-date, because by default we blow away 'base_dir' when</span>
+        <span class="s6"># we're done making the distribution archives.)</span>
+
+        <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">os</span><span class="s3">, </span><span class="s4">'link'</span><span class="s3">):  </span><span class="s6"># can make hard links on this system</span>
+            <span class="s1">link </span><span class="s3">= </span><span class="s4">'hard'</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s4">f&quot;making hard links in </span><span class="s2">{</span><span class="s1">base_dir</span><span class="s2">}</span><span class="s4">...&quot;</span>
+        <span class="s2">else</span><span class="s3">:  </span><span class="s6"># nope, have to copy</span>
+            <span class="s1">link </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s4">f&quot;copying files to </span><span class="s2">{</span><span class="s1">base_dir</span><span class="s2">}</span><span class="s4">...&quot;</span>
+
+        <span class="s2">if not </span><span class="s1">files</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s4">&quot;no files to distribute -- empty manifest?&quot;</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">files</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">file</span><span class="s3">):</span>
+                <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s4">&quot;'%s' not a regular file -- skipping&quot;</span><span class="s3">, </span><span class="s1">file</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">dest </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">file</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">copy_file</span><span class="s3">(</span><span class="s1">file</span><span class="s3">, </span><span class="s1">dest</span><span class="s3">, </span><span class="s1">link</span><span class="s3">=</span><span class="s1">link</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">write_pkg_info</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">make_distribution</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Create the source distribution(s).  First, we create the release 
+        tree with 'make_release_tree()'; then, we create all required 
+        archive files (according to 'self.formats') from the release tree. 
+        Finally, we clean up by blowing away the release tree (unless 
+        'self.keep_temp' is true).  The list of archive files created is 
+        stored so it can be retrieved later by 'get_archive_files()'. 
+        &quot;&quot;&quot;</span>
+        <span class="s6"># Don't warn about missing meta-data here -- should be (and is!)</span>
+        <span class="s6"># done elsewhere.</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_fullname</span><span class="s3">()</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">make_release_tree</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">files</span><span class="s3">)</span>
+        <span class="s1">archive_files </span><span class="s3">= []  </span><span class="s6"># remember names of files we create</span>
+        <span class="s6"># tar archive must be created last to avoid overwrite and remove</span>
+        <span class="s2">if </span><span class="s4">'tar' </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">.</span><span class="s1">index</span><span class="s3">(</span><span class="s4">'tar'</span><span class="s3">)))</span>
+
+        <span class="s2">for </span><span class="s1">fmt </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">:</span>
+            <span class="s1">file </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">make_archive</span><span class="s3">(</span>
+                <span class="s1">base_name</span><span class="s3">, </span><span class="s1">fmt</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">=</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">owner</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">owner</span><span class="s3">, </span><span class="s1">group</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">group</span>
+            <span class="s3">)</span>
+            <span class="s1">archive_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">file</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">dist_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s4">'sdist'</span><span class="s3">, </span><span class="s4">''</span><span class="s3">, </span><span class="s1">file</span><span class="s3">))</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">archive_files </span><span class="s3">= </span><span class="s1">archive_files</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp</span><span class="s3">:</span>
+            <span class="s1">dir_util</span><span class="s3">.</span><span class="s1">remove_tree</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">get_archive_files</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Return the list of archive files created when the command 
+        was run, or None if the command hasn't run yet. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">archive_files</span>
+
+
+<span class="s2">def </span><span class="s1">is_comment</span><span class="s3">(</span><span class="s1">line</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s1">line</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">'#'</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,651 @@
+<html>
+<head>
+<title>test_build_ext.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_build_ext.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">glob</span>
+<span class="s0">import </span><span class="s1">importlib</span>
+<span class="s0">import </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span>
+<span class="s0">import </span><span class="s1">platform</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">import </span><span class="s1">site</span>
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">import </span><span class="s1">textwrap</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">from </span><span class="s1">distutils </span><span class="s0">import </span><span class="s1">sysconfig</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">command</span><span class="s2">.</span><span class="s1">build_ext </span><span class="s0">import </span><span class="s1">build_ext</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">core </span><span class="s0">import </span><span class="s1">Distribution</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">errors </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">CompileError</span><span class="s2">,</span>
+    <span class="s1">DistutilsPlatformError</span><span class="s2">,</span>
+    <span class="s1">DistutilsSetupError</span><span class="s2">,</span>
+    <span class="s1">UnknownFileError</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">extension </span><span class="s0">import </span><span class="s1">Extension</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">tests </span><span class="s0">import </span><span class="s1">missing_compiler_executable</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">tests</span><span class="s2">.</span><span class="s1">support </span><span class="s0">import </span><span class="s1">TempdirManager</span><span class="s2">, </span><span class="s1">copy_xxmodule_c</span><span class="s2">, </span><span class="s1">fixup_build_ext</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">StringIO</span>
+
+<span class="s0">import </span><span class="s1">jaraco</span><span class="s2">.</span><span class="s1">path</span>
+<span class="s0">import </span><span class="s1">path</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+<span class="s0">from </span><span class="s1">test </span><span class="s0">import </span><span class="s1">support</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">compat </span><span class="s0">import </span><span class="s1">py39 </span><span class="s0">as </span><span class="s1">import_helper</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">fixture</span><span class="s2">()</span>
+<span class="s0">def </span><span class="s1">user_site_dir</span><span class="s2">(</span><span class="s1">request</span><span class="s2">):</span>
+    <span class="s1">self </span><span class="s2">= </span><span class="s1">request</span><span class="s2">.</span><span class="s1">instance</span>
+    <span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">()</span>
+    <span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_path </span><span class="s2">= </span><span class="s1">path</span><span class="s2">.</span><span class="s1">Path</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span><span class="s2">)</span>
+    <span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">command </span><span class="s0">import </span><span class="s1">build_ext</span>
+
+    <span class="s1">orig_user_base </span><span class="s2">= </span><span class="s1">site</span><span class="s2">.</span><span class="s1">USER_BASE</span>
+
+    <span class="s1">site</span><span class="s2">.</span><span class="s1">USER_BASE </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">()</span>
+    <span class="s1">build_ext</span><span class="s2">.</span><span class="s1">USER_BASE </span><span class="s2">= </span><span class="s1">site</span><span class="s2">.</span><span class="s1">USER_BASE</span>
+
+    <span class="s3"># bpo-30132: On Windows, a .pdb file may be created in the current</span>
+    <span class="s3"># working directory. Create a temporary working directory to cleanup</span>
+    <span class="s3"># everything at the end of the test.</span>
+    <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_path</span><span class="s2">:</span>
+        <span class="s0">yield</span>
+
+    <span class="s1">site</span><span class="s2">.</span><span class="s1">USER_BASE </span><span class="s2">= </span><span class="s1">orig_user_base</span>
+    <span class="s1">build_ext</span><span class="s2">.</span><span class="s1">USER_BASE </span><span class="s2">= </span><span class="s1">orig_user_base</span>
+
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">'cygwin'</span><span class="s2">:</span>
+        <span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">1</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">safe_extension_import</span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">path</span><span class="s2">):</span>
+    <span class="s0">with </span><span class="s1">import_helper</span><span class="s2">.</span><span class="s1">CleanImport</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+        <span class="s0">with </span><span class="s1">extension_redirect</span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">path</span><span class="s2">) </span><span class="s0">as </span><span class="s1">new_path</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">import_helper</span><span class="s2">.</span><span class="s1">DirsOnSysPath</span><span class="s2">(</span><span class="s1">new_path</span><span class="s2">):</span>
+                <span class="s0">yield</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">extension_redirect</span><span class="s2">(</span><span class="s1">mod</span><span class="s2">, </span><span class="s1">path</span><span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Tests will fail to tear down an extension module if it's been imported. 
+ 
+    Before importing, copy the file to a temporary directory that won't 
+    be cleaned up. Yield the new path. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">platform</span><span class="s2">.</span><span class="s1">system</span><span class="s2">() != </span><span class="s4">&quot;Windows&quot; </span><span class="s0">and </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s4">&quot;cygwin&quot;</span><span class="s2">:</span>
+        <span class="s0">yield </span><span class="s1">path</span>
+        <span class="s0">return</span>
+    <span class="s0">with </span><span class="s1">import_helper</span><span class="s2">.</span><span class="s1">DirsOnSysPath</span><span class="s2">(</span><span class="s1">path</span><span class="s2">):</span>
+        <span class="s1">spec </span><span class="s2">= </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">util</span><span class="s2">.</span><span class="s1">find_spec</span><span class="s2">(</span><span class="s1">mod</span><span class="s2">)</span>
+    <span class="s1">filename </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">spec</span><span class="s2">.</span><span class="s1">origin</span><span class="s2">)</span>
+    <span class="s1">trash_dir </span><span class="s2">= </span><span class="s1">tempfile</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">(</span><span class="s1">prefix</span><span class="s2">=</span><span class="s4">'deleteme'</span><span class="s2">)</span>
+    <span class="s1">dest </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">trash_dir</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">filename</span><span class="s2">))</span>
+    <span class="s1">shutil</span><span class="s2">.</span><span class="s1">copy</span><span class="s2">(</span><span class="s1">spec</span><span class="s2">.</span><span class="s1">origin</span><span class="s2">, </span><span class="s1">dest</span><span class="s2">)</span>
+    <span class="s0">yield </span><span class="s1">trash_dir</span>
+    <span class="s3"># TODO: can the file be scheduled for deletion?</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">usefixtures</span><span class="s2">(</span><span class="s4">'user_site_dir'</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">TestBuildExt</span><span class="s2">(</span><span class="s1">TempdirManager</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">):</span>
+        <span class="s0">return </span><span class="s1">build_ext</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span><span class="s4">&quot;copy_so&quot;</span><span class="s2">, [</span><span class="s0">False</span><span class="s2">])</span>
+    <span class="s0">def </span><span class="s1">test_build_ext</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">copy_so</span><span class="s2">):</span>
+        <span class="s1">missing_compiler_executable</span><span class="s2">()</span>
+        <span class="s1">copy_xxmodule_c</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span><span class="s2">)</span>
+        <span class="s1">xx_c </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span><span class="s2">, </span><span class="s4">'xxmodule.c'</span><span class="s2">)</span>
+        <span class="s1">xx_ext </span><span class="s2">= </span><span class="s1">Extension</span><span class="s2">(</span><span class="s4">'xx'</span><span class="s2">, [</span><span class="s1">xx_c</span><span class="s2">])</span>
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s4">&quot;win32&quot;</span><span class="s2">:</span>
+            <span class="s0">if not </span><span class="s1">copy_so</span><span class="s2">:</span>
+                <span class="s1">xx_ext </span><span class="s2">= </span><span class="s1">Extension</span><span class="s2">(</span>
+                    <span class="s4">'xx'</span><span class="s2">,</span>
+                    <span class="s2">[</span><span class="s1">xx_c</span><span class="s2">],</span>
+                    <span class="s1">library_dirs</span><span class="s2">=[</span><span class="s4">'/usr/lib'</span><span class="s2">],</span>
+                    <span class="s1">libraries</span><span class="s2">=[</span><span class="s4">'z'</span><span class="s2">],</span>
+                    <span class="s1">runtime_library_dirs</span><span class="s2">=[</span><span class="s4">'/usr/lib'</span><span class="s2">],</span>
+                <span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">'linux'</span><span class="s2">:</span>
+                <span class="s1">libz_so </span><span class="s2">= {</span>
+                    <span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">realpath</span><span class="s2">(</span><span class="s1">name</span><span class="s2">) </span><span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">glob</span><span class="s2">.</span><span class="s1">iglob</span><span class="s2">(</span><span class="s4">'/usr/lib*/libz.so*'</span><span class="s2">)</span>
+                <span class="s2">}</span>
+                <span class="s1">libz_so </span><span class="s2">= </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">libz_so</span><span class="s2">, </span><span class="s1">key</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">lib_path</span><span class="s2">: </span><span class="s1">len</span><span class="s2">(</span><span class="s1">lib_path</span><span class="s2">))</span>
+                <span class="s1">shutil</span><span class="s2">.</span><span class="s1">copyfile</span><span class="s2">(</span><span class="s1">libz_so</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">], </span><span class="s4">'/tmp/libxx_z.so'</span><span class="s2">)</span>
+
+                <span class="s1">xx_ext </span><span class="s2">= </span><span class="s1">Extension</span><span class="s2">(</span>
+                    <span class="s4">'xx'</span><span class="s2">,</span>
+                    <span class="s2">[</span><span class="s1">xx_c</span><span class="s2">],</span>
+                    <span class="s1">library_dirs</span><span class="s2">=[</span><span class="s4">'/tmp'</span><span class="s2">],</span>
+                    <span class="s1">libraries</span><span class="s2">=[</span><span class="s4">'xx_z'</span><span class="s2">],</span>
+                    <span class="s1">runtime_library_dirs</span><span class="s2">=[</span><span class="s4">'/tmp'</span><span class="s2">],</span>
+                <span class="s2">)</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: [</span><span class="s1">xx_ext</span><span class="s2">]})</span>
+        <span class="s1">dist</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">fixup_build_ext</span><span class="s2">(</span><span class="s1">cmd</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_lib </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_temp </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span>
+
+        <span class="s1">old_stdout </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span>
+        <span class="s0">if not </span><span class="s1">support</span><span class="s2">.</span><span class="s1">verbose</span><span class="s2">:</span>
+            <span class="s3"># silence compiler output</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">StringIO</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">old_stdout</span>
+
+        <span class="s0">with </span><span class="s1">safe_extension_import</span><span class="s2">(</span><span class="s4">'xx'</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_test_xx</span><span class="s2">(</span><span class="s1">copy_so</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">'linux' </span><span class="s0">and </span><span class="s1">copy_so</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">unlink</span><span class="s2">(</span><span class="s4">'/tmp/libxx_z.so'</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_test_xx</span><span class="s2">(</span><span class="s1">copy_so</span><span class="s2">):</span>
+        <span class="s0">import </span><span class="s1">xx  </span><span class="s3"># type: ignore[import-not-found] # Module generated for tests</span>
+
+        <span class="s0">for </span><span class="s1">attr </span><span class="s0">in </span><span class="s2">(</span><span class="s4">'error'</span><span class="s2">, </span><span class="s4">'foo'</span><span class="s2">, </span><span class="s4">'new'</span><span class="s2">, </span><span class="s4">'roj'</span><span class="s2">):</span>
+            <span class="s0">assert </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">xx</span><span class="s2">, </span><span class="s1">attr</span><span class="s2">)</span>
+
+        <span class="s0">assert </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">foo</span><span class="s2">(</span><span class="s5">2</span><span class="s2">, </span><span class="s5">5</span><span class="s2">) == </span><span class="s5">7</span>
+        <span class="s0">assert </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">foo</span><span class="s2">(</span><span class="s5">13</span><span class="s2">, </span><span class="s5">15</span><span class="s2">) == </span><span class="s5">28</span>
+        <span class="s0">assert </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">new</span><span class="s2">().</span><span class="s1">demo</span><span class="s2">() </span><span class="s0">is None</span>
+        <span class="s0">if </span><span class="s1">support</span><span class="s2">.</span><span class="s1">HAVE_DOCSTRINGS</span><span class="s2">:</span>
+            <span class="s1">doc </span><span class="s2">= </span><span class="s4">'This is a template module just for instruction.'</span>
+            <span class="s0">assert </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">__doc__ </span><span class="s2">== </span><span class="s1">doc</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">xx</span><span class="s2">.</span><span class="s1">Null</span><span class="s2">(), </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">Null</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">xx</span><span class="s2">.</span><span class="s1">Str</span><span class="s2">(), </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">Str</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">'linux'</span><span class="s2">:</span>
+            <span class="s1">so_headers </span><span class="s2">= </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">check_output</span><span class="s2">(</span>
+                <span class="s2">[</span><span class="s4">&quot;readelf&quot;</span><span class="s2">, </span><span class="s4">&quot;-d&quot;</span><span class="s2">, </span><span class="s1">xx</span><span class="s2">.</span><span class="s1">__file__</span><span class="s2">], </span><span class="s1">universal_newlines</span><span class="s2">=</span><span class="s0">True</span>
+            <span class="s2">)</span>
+            <span class="s0">import </span><span class="s1">pprint</span>
+
+            <span class="s1">pprint</span><span class="s2">.</span><span class="s1">pprint</span><span class="s2">(</span><span class="s1">so_headers</span><span class="s2">)</span>
+            <span class="s1">rpaths </span><span class="s2">= [</span>
+                <span class="s1">rpath</span>
+                <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">so_headers</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s4">&quot;RPATH&quot; </span><span class="s0">in </span><span class="s1">line </span><span class="s0">or </span><span class="s4">&quot;RUNPATH&quot; </span><span class="s0">in </span><span class="s1">line</span>
+                <span class="s0">for </span><span class="s1">rpath </span><span class="s0">in </span><span class="s1">line</span><span class="s2">.</span><span class="s1">split</span><span class="s2">()[</span><span class="s5">2</span><span class="s2">][</span><span class="s5">1</span><span class="s2">:-</span><span class="s5">1</span><span class="s2">].</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;:&quot;</span><span class="s2">)</span>
+            <span class="s2">]</span>
+            <span class="s0">if not </span><span class="s1">copy_so</span><span class="s2">:</span>
+                <span class="s1">pprint</span><span class="s2">.</span><span class="s1">pprint</span><span class="s2">(</span><span class="s1">rpaths</span><span class="s2">)</span>
+                <span class="s3"># Linked against a library in /usr/lib{,64}</span>
+                <span class="s0">assert </span><span class="s4">&quot;/usr/lib&quot; </span><span class="s0">not in </span><span class="s1">rpaths </span><span class="s0">and </span><span class="s4">&quot;/usr/lib64&quot; </span><span class="s0">not in </span><span class="s1">rpaths</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># Linked against a library in /tmp</span>
+                <span class="s0">assert </span><span class="s4">&quot;/tmp&quot; </span><span class="s0">in </span><span class="s1">rpaths</span>
+                <span class="s3"># The import is the real test here</span>
+
+    <span class="s0">def </span><span class="s1">test_solaris_enable_shared</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">old </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform</span>
+
+        <span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">= </span><span class="s4">'sunos'  </span><span class="s3"># fooling finalize_options</span>
+        <span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">sysconfig </span><span class="s0">import </span><span class="s1">_config_vars</span>
+
+        <span class="s1">old_var </span><span class="s2">= </span><span class="s1">_config_vars</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">'Py_ENABLE_SHARED'</span><span class="s2">)</span>
+        <span class="s1">_config_vars</span><span class="s2">[</span><span class="s4">'Py_ENABLE_SHARED'</span><span class="s2">] = </span><span class="s0">True</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">= </span><span class="s1">old</span>
+            <span class="s0">if </span><span class="s1">old_var </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">del </span><span class="s1">_config_vars</span><span class="s2">[</span><span class="s4">'Py_ENABLE_SHARED'</span><span class="s2">]</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">_config_vars</span><span class="s2">[</span><span class="s4">'Py_ENABLE_SHARED'</span><span class="s2">] = </span><span class="s1">old_var</span>
+
+        <span class="s3"># make sure we get some library dirs under solaris</span>
+        <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">library_dirs</span><span class="s2">) &gt; </span><span class="s5">0</span>
+
+    <span class="s0">def </span><span class="s1">test_user_site</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s0">import </span><span class="s1">site</span>
+
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+
+        <span class="s3"># making sure the user option is there</span>
+        <span class="s1">options </span><span class="s2">= [</span><span class="s1">name </span><span class="s0">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">short</span><span class="s2">, </span><span class="s1">label </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">user_options</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s4">'user' </span><span class="s0">in </span><span class="s1">options</span>
+
+        <span class="s3"># setting a value</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">user </span><span class="s2">= </span><span class="s0">True</span>
+
+        <span class="s3"># setting user based lib and include</span>
+        <span class="s1">lib </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">site</span><span class="s2">.</span><span class="s1">USER_BASE</span><span class="s2">, </span><span class="s4">'lib'</span><span class="s2">)</span>
+        <span class="s1">incl </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">site</span><span class="s2">.</span><span class="s1">USER_BASE</span><span class="s2">, </span><span class="s4">'include'</span><span class="s2">)</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s1">lib</span><span class="s2">)</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s1">incl</span><span class="s2">)</span>
+
+        <span class="s3"># let's run finalize</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+
+        <span class="s3"># see if include_dirs and library_dirs</span>
+        <span class="s3"># were set</span>
+        <span class="s0">assert </span><span class="s1">lib </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">library_dirs</span>
+        <span class="s0">assert </span><span class="s1">lib </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">rpath</span>
+        <span class="s0">assert </span><span class="s1">incl </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">include_dirs</span>
+
+    <span class="s0">def </span><span class="s1">test_optional_extension</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s3"># this extension will fail, but let's ignore this failure</span>
+        <span class="s3"># with the optional argument.</span>
+        <span class="s1">modules </span><span class="s2">= [</span><span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">, [</span><span class="s4">'xxx'</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)]</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: </span><span class="s1">modules</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">((</span><span class="s1">UnknownFileError</span><span class="s2">, </span><span class="s1">CompileError</span><span class="s2">)):</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()  </span><span class="s3"># should raise an error</span>
+
+        <span class="s1">modules </span><span class="s2">= [</span><span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">, [</span><span class="s4">'xxx'</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)]</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: </span><span class="s1">modules</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()  </span><span class="s3"># should pass</span>
+
+    <span class="s0">def </span><span class="s1">test_finalize_options</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s3"># Make sure Python's include directories (for Python.h, pyconfig.h,</span>
+        <span class="s3"># etc.) are in the include search path.</span>
+        <span class="s1">modules </span><span class="s2">= [</span><span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">, [</span><span class="s4">'xxx'</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)]</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: </span><span class="s1">modules</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+
+        <span class="s1">py_include </span><span class="s2">= </span><span class="s1">sysconfig</span><span class="s2">.</span><span class="s1">get_python_inc</span><span class="s2">()</span>
+        <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">py_include</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">pathsep</span><span class="s2">):</span>
+            <span class="s0">assert </span><span class="s1">p </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">include_dirs</span>
+
+        <span class="s1">plat_py_include </span><span class="s2">= </span><span class="s1">sysconfig</span><span class="s2">.</span><span class="s1">get_python_inc</span><span class="s2">(</span><span class="s1">plat_specific</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">plat_py_include</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">pathsep</span><span class="s2">):</span>
+            <span class="s0">assert </span><span class="s1">p </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">include_dirs</span>
+
+        <span class="s3"># make sure cmd.libraries is turned into a list</span>
+        <span class="s3"># if it's a string</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">libraries </span><span class="s2">= </span><span class="s4">'my_lib, other_lib lastlib'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">libraries </span><span class="s2">== [</span><span class="s4">'my_lib'</span><span class="s2">, </span><span class="s4">'other_lib'</span><span class="s2">, </span><span class="s4">'lastlib'</span><span class="s2">]</span>
+
+        <span class="s3"># make sure cmd.library_dirs is turned into a list</span>
+        <span class="s3"># if it's a string</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">library_dirs </span><span class="s2">= </span><span class="s4">f'my_lib_dir</span><span class="s0">{</span><span class="s1">os</span><span class="s2">.</span><span class="s1">pathsep</span><span class="s0">}</span><span class="s4">other_lib_dir'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s4">'my_lib_dir' </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">library_dirs</span>
+        <span class="s0">assert </span><span class="s4">'other_lib_dir' </span><span class="s0">in </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">library_dirs</span>
+
+        <span class="s3"># make sure rpath is turned into a list</span>
+        <span class="s3"># if it's a string</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">rpath </span><span class="s2">= </span><span class="s4">f'one</span><span class="s0">{</span><span class="s1">os</span><span class="s2">.</span><span class="s1">pathsep</span><span class="s0">}</span><span class="s4">two'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">rpath </span><span class="s2">== [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">]</span>
+
+        <span class="s3"># make sure cmd.link_objects is turned into a list</span>
+        <span class="s3"># if it's a string</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">link_objects </span><span class="s2">= </span><span class="s4">'one two,three'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">link_objects </span><span class="s2">== [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">, </span><span class="s4">'three'</span><span class="s2">]</span>
+
+        <span class="s3"># XXX more tests to perform for win32</span>
+
+        <span class="s3"># make sure define is turned into 2-tuples</span>
+        <span class="s3"># strings if they are ','-separated strings</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">define </span><span class="s2">= </span><span class="s4">'one,two'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">define </span><span class="s2">== [(</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'1'</span><span class="s2">), (</span><span class="s4">'two'</span><span class="s2">, </span><span class="s4">'1'</span><span class="s2">)]</span>
+
+        <span class="s3"># make sure undef is turned into a list of</span>
+        <span class="s3"># strings if they are ','-separated strings</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">undef </span><span class="s2">= </span><span class="s4">'one,two'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">undef </span><span class="s2">== [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">]</span>
+
+        <span class="s3"># make sure swig_opts is turned into a list</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">swig_opts </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">swig_opts </span><span class="s2">== []</span>
+
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">swig_opts </span><span class="s2">= </span><span class="s4">'1 2'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">swig_opts </span><span class="s2">== [</span><span class="s4">'1'</span><span class="s2">, </span><span class="s4">'2'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_check_extensions_list</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">()</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">finalize_options</span><span class="s2">()</span>
+
+        <span class="s3"># 'extensions' option must be a list of Extension instances</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsSetupError</span><span class="s2">):</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">)</span>
+
+        <span class="s3"># each element of 'ext_modules' option must be an</span>
+        <span class="s3"># Extension instance or 2-tuple</span>
+        <span class="s1">exts </span><span class="s2">= [(</span><span class="s4">'bar'</span><span class="s2">, </span><span class="s4">'foo'</span><span class="s2">, </span><span class="s4">'bar'</span><span class="s2">), </span><span class="s4">'foo'</span><span class="s2">]</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsSetupError</span><span class="s2">):</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s1">exts</span><span class="s2">)</span>
+
+        <span class="s3"># first element of each tuple in 'ext_modules'</span>
+        <span class="s3"># must be the extension name (a string) and match</span>
+        <span class="s3"># a python dotted-separated name</span>
+        <span class="s1">exts </span><span class="s2">= [(</span><span class="s4">'foo-bar'</span><span class="s2">, </span><span class="s4">''</span><span class="s2">)]</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsSetupError</span><span class="s2">):</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s1">exts</span><span class="s2">)</span>
+
+        <span class="s3"># second element of each tuple in 'ext_modules'</span>
+        <span class="s3"># must be a dictionary (build info)</span>
+        <span class="s1">exts </span><span class="s2">= [(</span><span class="s4">'foo.bar'</span><span class="s2">, </span><span class="s4">''</span><span class="s2">)]</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsSetupError</span><span class="s2">):</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s1">exts</span><span class="s2">)</span>
+
+        <span class="s3"># ok this one should pass</span>
+        <span class="s1">exts </span><span class="s2">= [(</span><span class="s4">'foo.bar'</span><span class="s2">, {</span><span class="s4">'sources'</span><span class="s2">: [</span><span class="s4">''</span><span class="s2">], </span><span class="s4">'libraries'</span><span class="s2">: </span><span class="s4">'foo'</span><span class="s2">, </span><span class="s4">'some'</span><span class="s2">: </span><span class="s4">'bar'</span><span class="s2">})]</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s1">exts</span><span class="s2">)</span>
+        <span class="s1">ext </span><span class="s2">= </span><span class="s1">exts</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">ext</span><span class="s2">, </span><span class="s1">Extension</span><span class="s2">)</span>
+
+        <span class="s3"># check_extensions_list adds in ext the values passed</span>
+        <span class="s3"># when they are in ('include_dirs', 'library_dirs', 'libraries'</span>
+        <span class="s3"># 'extra_objects', 'extra_compile_args', 'extra_link_args')</span>
+        <span class="s0">assert </span><span class="s1">ext</span><span class="s2">.</span><span class="s1">libraries </span><span class="s2">== </span><span class="s4">'foo'</span>
+        <span class="s0">assert not </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">ext</span><span class="s2">, </span><span class="s4">'some'</span><span class="s2">)</span>
+
+        <span class="s3"># 'macros' element of build info dict must be 1- or 2-tuple</span>
+        <span class="s1">exts </span><span class="s2">= [</span>
+            <span class="s2">(</span>
+                <span class="s4">'foo.bar'</span><span class="s2">,</span>
+                <span class="s2">{</span>
+                    <span class="s4">'sources'</span><span class="s2">: [</span><span class="s4">''</span><span class="s2">],</span>
+                    <span class="s4">'libraries'</span><span class="s2">: </span><span class="s4">'foo'</span><span class="s2">,</span>
+                    <span class="s4">'some'</span><span class="s2">: </span><span class="s4">'bar'</span><span class="s2">,</span>
+                    <span class="s4">'macros'</span><span class="s2">: [(</span><span class="s4">'1'</span><span class="s2">, </span><span class="s4">'2'</span><span class="s2">, </span><span class="s4">'3'</span><span class="s2">), </span><span class="s4">'foo'</span><span class="s2">],</span>
+                <span class="s2">},</span>
+            <span class="s2">)</span>
+        <span class="s2">]</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsSetupError</span><span class="s2">):</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s1">exts</span><span class="s2">)</span>
+
+        <span class="s1">exts</span><span class="s2">[</span><span class="s5">0</span><span class="s2">][</span><span class="s5">1</span><span class="s2">][</span><span class="s4">'macros'</span><span class="s2">] = [(</span><span class="s4">'1'</span><span class="s2">, </span><span class="s4">'2'</span><span class="s2">), (</span><span class="s4">'3'</span><span class="s2">,)]</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">check_extensions_list</span><span class="s2">(</span><span class="s1">exts</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">exts</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">undef_macros </span><span class="s2">== [</span><span class="s4">'3'</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">exts</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">define_macros </span><span class="s2">== [(</span><span class="s4">'1'</span><span class="s2">, </span><span class="s4">'2'</span><span class="s2">)]</span>
+
+    <span class="s0">def </span><span class="s1">test_get_source_files</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s1">modules </span><span class="s2">= [</span><span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">, [</span><span class="s4">'xxx'</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)]</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: </span><span class="s1">modules</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_source_files</span><span class="s2">() == [</span><span class="s4">'xxx'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_unicode_module_names</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s1">modules </span><span class="s2">= [</span>
+            <span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">, [</span><span class="s4">'aaa'</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">False</span><span class="s2">),</span>
+            <span class="s1">Extension</span><span class="s2">(</span><span class="s4">'föö'</span><span class="s2">, [</span><span class="s4">'uuu'</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">False</span><span class="s2">),</span>
+        <span class="s2">]</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: </span><span class="s1">modules</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s4">r'foo(_d)?\..*'</span><span class="s2">, </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_filename</span><span class="s2">(</span><span class="s1">modules</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">name</span><span class="s2">))</span>
+        <span class="s0">assert </span><span class="s1">re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s4">r'föö(_d)?\..*'</span><span class="s2">, </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_filename</span><span class="s2">(</span><span class="s1">modules</span><span class="s2">[</span><span class="s5">1</span><span class="s2">].</span><span class="s1">name</span><span class="s2">))</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_export_symbols</span><span class="s2">(</span><span class="s1">modules</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]) == [</span><span class="s4">'PyInit_foo'</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_export_symbols</span><span class="s2">(</span><span class="s1">modules</span><span class="s2">[</span><span class="s5">1</span><span class="s2">]) == [</span><span class="s4">'PyInitU_f_1gaa'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_export_symbols__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s3"># https://github.com/python/cpython/issues/80074</span>
+        <span class="s3"># https://github.com/pypa/setuptools/issues/4826</span>
+        <span class="s1">modules </span><span class="s2">= [</span>
+            <span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo.__init__'</span><span class="s2">, [</span><span class="s4">'aaa'</span><span class="s2">]),</span>
+            <span class="s1">Extension</span><span class="s2">(</span><span class="s4">'föö.__init__'</span><span class="s2">, [</span><span class="s4">'uuu'</span><span class="s2">]),</span>
+        <span class="s2">]</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: </span><span class="s1">modules</span><span class="s2">})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_export_symbols</span><span class="s2">(</span><span class="s1">modules</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]) == [</span><span class="s4">'PyInit_foo'</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_export_symbols</span><span class="s2">(</span><span class="s1">modules</span><span class="s2">[</span><span class="s5">1</span><span class="s2">]) == [</span><span class="s4">'PyInitU_f_1gaa'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_compiler_option</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s3"># cmd.compiler is an option and</span>
+        <span class="s3"># should not be overridden by a compiler instance</span>
+        <span class="s3"># when the command is run</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">()</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">compiler </span><span class="s2">= </span><span class="s4">'unix'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">compiler </span><span class="s2">== </span><span class="s4">'unix'</span>
+
+    <span class="s0">def </span><span class="s1">test_get_outputs</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s1">missing_compiler_executable</span><span class="s2">()</span>
+        <span class="s1">tmp_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">()</span>
+        <span class="s1">c_file </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">tmp_dir</span><span class="s2">, </span><span class="s4">'foo.c'</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">write_file</span><span class="s2">(</span><span class="s1">c_file</span><span class="s2">, </span><span class="s4">'void PyInit_foo(void) {}</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s1">ext </span><span class="s2">= </span><span class="s1">Extension</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">, [</span><span class="s1">c_file</span><span class="s2">], </span><span class="s1">optional</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'xx'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: [</span><span class="s1">ext</span><span class="s2">]})</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">fixup_build_ext</span><span class="s2">(</span><span class="s1">cmd</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_outputs</span><span class="s2">()) == </span><span class="s5">1</span>
+
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_lib </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span><span class="s2">, </span><span class="s4">'build'</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_temp </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span><span class="s2">, </span><span class="s4">'tempt'</span><span class="s2">)</span>
+
+        <span class="s3"># issue #5977 : distutils build_ext.get_outputs</span>
+        <span class="s3"># returns wrong result with --inplace</span>
+        <span class="s1">other_tmp_dir </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">realpath</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">())</span>
+        <span class="s1">old_wd </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">getcwd</span><span class="s2">()</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">chdir</span><span class="s2">(</span><span class="s1">other_tmp_dir</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">inplace </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()</span>
+            <span class="s1">so_file </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_outputs</span><span class="s2">()[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">chdir</span><span class="s2">(</span><span class="s1">old_wd</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">exists</span><span class="s2">(</span><span class="s1">so_file</span><span class="s2">)</span>
+        <span class="s1">ext_suffix </span><span class="s2">= </span><span class="s1">sysconfig</span><span class="s2">.</span><span class="s1">get_config_var</span><span class="s2">(</span><span class="s4">'EXT_SUFFIX'</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">so_file</span><span class="s2">.</span><span class="s1">endswith</span><span class="s2">(</span><span class="s1">ext_suffix</span><span class="s2">)</span>
+        <span class="s1">so_dir </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">dirname</span><span class="s2">(</span><span class="s1">so_file</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">so_dir </span><span class="s2">== </span><span class="s1">other_tmp_dir</span>
+
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">inplace </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">compiler </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()</span>
+        <span class="s1">so_file </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_outputs</span><span class="s2">()[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">exists</span><span class="s2">(</span><span class="s1">so_file</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">so_file</span><span class="s2">.</span><span class="s1">endswith</span><span class="s2">(</span><span class="s1">ext_suffix</span><span class="s2">)</span>
+        <span class="s1">so_dir </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">dirname</span><span class="s2">(</span><span class="s1">so_file</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">so_dir </span><span class="s2">== </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_lib</span>
+
+        <span class="s3"># inplace = False, cmd.package = 'bar'</span>
+        <span class="s1">build_py </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_finalized_command</span><span class="s2">(</span><span class="s4">'build_py'</span><span class="s2">)</span>
+        <span class="s1">build_py</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">= {</span><span class="s4">''</span><span class="s2">: </span><span class="s4">'bar'</span><span class="s2">}</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_fullpath</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">)</span>
+        <span class="s3"># checking that the last directory is the build_dir</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">path </span><span class="s2">== </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_lib</span>
+
+        <span class="s3"># inplace = True, cmd.package = 'bar'</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">inplace </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">other_tmp_dir </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">realpath</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">())</span>
+        <span class="s1">old_wd </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">getcwd</span><span class="s2">()</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">chdir</span><span class="s2">(</span><span class="s1">other_tmp_dir</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_fullpath</span><span class="s2">(</span><span class="s4">'foo'</span><span class="s2">)</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">chdir</span><span class="s2">(</span><span class="s1">old_wd</span><span class="s2">)</span>
+        <span class="s3"># checking that the last directory is bar</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s1">lastdir </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)[-</span><span class="s5">1</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">lastdir </span><span class="s2">== </span><span class="s4">'bar'</span>
+
+    <span class="s0">def </span><span class="s1">test_ext_fullpath</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s1">ext </span><span class="s2">= </span><span class="s1">sysconfig</span><span class="s2">.</span><span class="s1">get_config_var</span><span class="s2">(</span><span class="s4">'EXT_SUFFIX'</span><span class="s2">)</span>
+        <span class="s3"># building lxml.etree inplace</span>
+        <span class="s3"># etree_c = os.path.join(self.tmp_dir, 'lxml.etree.c')</span>
+        <span class="s3"># etree_ext = Extension('lxml.etree', [etree_c])</span>
+        <span class="s3"># dist = Distribution({'name': 'lxml', 'ext_modules': [etree_ext]})</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">()</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">inplace </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">distribution</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">= {</span><span class="s4">''</span><span class="s2">: </span><span class="s4">'src'</span><span class="s2">}</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">distribution</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">= [</span><span class="s4">'lxml'</span><span class="s2">, </span><span class="s4">'lxml.html'</span><span class="s2">]</span>
+        <span class="s1">curdir </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">getcwd</span><span class="s2">()</span>
+        <span class="s1">wanted </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">curdir</span><span class="s2">, </span><span class="s4">'src'</span><span class="s2">, </span><span class="s4">'lxml'</span><span class="s2">, </span><span class="s4">'etree' </span><span class="s2">+ </span><span class="s1">ext</span><span class="s2">)</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_fullpath</span><span class="s2">(</span><span class="s4">'lxml.etree'</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">wanted </span><span class="s2">== </span><span class="s1">path</span>
+
+        <span class="s3"># building lxml.etree not inplace</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">inplace </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_lib </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">curdir</span><span class="s2">, </span><span class="s4">'tmpdir'</span><span class="s2">)</span>
+        <span class="s1">wanted </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">curdir</span><span class="s2">, </span><span class="s4">'tmpdir'</span><span class="s2">, </span><span class="s4">'lxml'</span><span class="s2">, </span><span class="s4">'etree' </span><span class="s2">+ </span><span class="s1">ext</span><span class="s2">)</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_fullpath</span><span class="s2">(</span><span class="s4">'lxml.etree'</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">wanted </span><span class="s2">== </span><span class="s1">path</span>
+
+        <span class="s3"># building twisted.runner.portmap not inplace</span>
+        <span class="s1">build_py </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_finalized_command</span><span class="s2">(</span><span class="s4">'build_py'</span><span class="s2">)</span>
+        <span class="s1">build_py</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">= {}</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">distribution</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">= [</span><span class="s4">'twisted'</span><span class="s2">, </span><span class="s4">'twisted.runner.portmap'</span><span class="s2">]</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_fullpath</span><span class="s2">(</span><span class="s4">'twisted.runner.portmap'</span><span class="s2">)</span>
+        <span class="s1">wanted </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">curdir</span><span class="s2">, </span><span class="s4">'tmpdir'</span><span class="s2">, </span><span class="s4">'twisted'</span><span class="s2">, </span><span class="s4">'runner'</span><span class="s2">, </span><span class="s4">'portmap' </span><span class="s2">+ </span><span class="s1">ext</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">wanted </span><span class="s2">== </span><span class="s1">path</span>
+
+        <span class="s3"># building twisted.runner.portmap inplace</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">inplace </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">get_ext_fullpath</span><span class="s2">(</span><span class="s4">'twisted.runner.portmap'</span><span class="s2">)</span>
+        <span class="s1">wanted </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">curdir</span><span class="s2">, </span><span class="s4">'twisted'</span><span class="s2">, </span><span class="s4">'runner'</span><span class="s2">, </span><span class="s4">'portmap' </span><span class="s2">+ </span><span class="s1">ext</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">wanted </span><span class="s2">== </span><span class="s1">path</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s4">'platform.system() != &quot;Darwin&quot;'</span><span class="s2">)</span>
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">usefixtures</span><span class="s2">(</span><span class="s4">'save_env'</span><span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_deployment_target_default</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s3"># Issue 9516: Test that, in the absence of the environment variable,</span>
+        <span class="s3"># an extension module is compiled with the same deployment target as</span>
+        <span class="s3">#  the interpreter.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_try_compile_deployment_target</span><span class="s2">(</span><span class="s4">'=='</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s4">'platform.system() != &quot;Darwin&quot;'</span><span class="s2">)</span>
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">usefixtures</span><span class="s2">(</span><span class="s4">'save_env'</span><span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_deployment_target_too_low</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s3"># Issue 9516: Test that an extension module is not allowed to be</span>
+        <span class="s3"># compiled with a deployment target less than that of the interpreter.</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsPlatformError</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_try_compile_deployment_target</span><span class="s2">(</span><span class="s4">'&gt;'</span><span class="s2">, </span><span class="s4">'10.1'</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s4">'platform.system() != &quot;Darwin&quot;'</span><span class="s2">)</span>
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">usefixtures</span><span class="s2">(</span><span class="s4">'save_env'</span><span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_deployment_target_higher_ok</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):  </span><span class="s3"># pragma: no cover</span>
+        <span class="s3"># Issue 9516: Test that an extension module can be compiled with a</span>
+        <span class="s3"># deployment target higher than that of the interpreter: the ext</span>
+        <span class="s3"># module may depend on some newer OS feature.</span>
+        <span class="s1">deptarget </span><span class="s2">= </span><span class="s1">sysconfig</span><span class="s2">.</span><span class="s1">get_config_var</span><span class="s2">(</span><span class="s4">'MACOSX_DEPLOYMENT_TARGET'</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">deptarget</span><span class="s2">:</span>
+            <span class="s3"># increment the minor version number (i.e. 10.6 -&gt; 10.7)</span>
+            <span class="s1">deptarget </span><span class="s2">= [</span><span class="s1">int</span><span class="s2">(</span><span class="s1">x</span><span class="s2">) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">deptarget</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">'.'</span><span class="s2">)]</span>
+            <span class="s1">deptarget</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">] += </span><span class="s5">1</span>
+            <span class="s1">deptarget </span><span class="s2">= </span><span class="s4">'.'</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">i</span><span class="s2">) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">deptarget</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_try_compile_deployment_target</span><span class="s2">(</span><span class="s4">'&lt;'</span><span class="s2">, </span><span class="s1">deptarget</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_try_compile_deployment_target</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">operator</span><span class="s2">, </span><span class="s1">target</span><span class="s2">):  </span><span class="s3"># pragma: no cover</span>
+        <span class="s0">if </span><span class="s1">target </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">'MACOSX_DEPLOYMENT_TARGET'</span><span class="s2">):</span>
+                <span class="s0">del </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s4">'MACOSX_DEPLOYMENT_TARGET'</span><span class="s2">]</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s4">'MACOSX_DEPLOYMENT_TARGET'</span><span class="s2">] = </span><span class="s1">target</span>
+
+        <span class="s1">jaraco</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">build</span><span class="s2">(</span>
+            <span class="s2">{</span>
+                <span class="s4">'deptargetmodule.c'</span><span class="s2">: </span><span class="s1">textwrap</span><span class="s2">.</span><span class="s1">dedent</span><span class="s2">(</span><span class="s4">f&quot;&quot;&quot;</span><span class="s0">\ 
+                    </span><span class="s4">#include &lt;AvailabilityMacros.h&gt;</span>
+
+                    <span class="s4">int dummy;</span>
+
+                    <span class="s4">#if TARGET </span><span class="s0">{</span><span class="s1">operator</span><span class="s0">} </span><span class="s4">MAC_OS_X_VERSION_MIN_REQUIRED</span>
+                    <span class="s4">#else</span>
+                    <span class="s4">#error &quot;Unexpected target&quot;</span>
+                    <span class="s4">#endif</span>
+
+                    <span class="s4">&quot;&quot;&quot;</span><span class="s2">),</span>
+            <span class="s2">},</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_path</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s3"># get the deployment target that the interpreter was built with</span>
+        <span class="s1">target </span><span class="s2">= </span><span class="s1">sysconfig</span><span class="s2">.</span><span class="s1">get_config_var</span><span class="s2">(</span><span class="s4">'MACOSX_DEPLOYMENT_TARGET'</span><span class="s2">)</span>
+        <span class="s1">target </span><span class="s2">= </span><span class="s1">tuple</span><span class="s2">(</span><span class="s1">map</span><span class="s2">(</span><span class="s1">int</span><span class="s2">, </span><span class="s1">target</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">'.'</span><span class="s2">)[</span><span class="s5">0</span><span class="s2">:</span><span class="s5">2</span><span class="s2">]))</span>
+        <span class="s3"># format the target value as defined in the Apple</span>
+        <span class="s3"># Availability Macros.  We can't use the macro names since</span>
+        <span class="s3"># at least one value we test with will not exist yet.</span>
+        <span class="s0">if </span><span class="s1">target</span><span class="s2">[:</span><span class="s5">2</span><span class="s2">] &lt; (</span><span class="s5">10</span><span class="s2">, </span><span class="s5">10</span><span class="s2">):</span>
+            <span class="s3"># for 10.1 through 10.9.x -&gt; &quot;10n0&quot;</span>
+            <span class="s1">tmpl </span><span class="s2">= </span><span class="s4">'{:02}{:01}0'</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s3"># for 10.10 and beyond -&gt; &quot;10nn00&quot;</span>
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">target</span><span class="s2">) &gt;= </span><span class="s5">2</span><span class="s2">:</span>
+                <span class="s1">tmpl </span><span class="s2">= </span><span class="s4">'{:02}{:02}00'</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># 11 and later can have no minor version (11 instead of 11.0)</span>
+                <span class="s1">tmpl </span><span class="s2">= </span><span class="s4">'{:02}0000'</span>
+        <span class="s1">target </span><span class="s2">= </span><span class="s1">tmpl</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(*</span><span class="s1">target</span><span class="s2">)</span>
+        <span class="s1">deptarget_ext </span><span class="s2">= </span><span class="s1">Extension</span><span class="s2">(</span>
+            <span class="s4">'deptarget'</span><span class="s2">,</span>
+            <span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_path </span><span class="s2">/ </span><span class="s4">'deptargetmodule.c'</span><span class="s2">],</span>
+            <span class="s1">extra_compile_args</span><span class="s2">=[</span><span class="s4">f'-DTARGET=</span><span class="s0">{</span><span class="s1">target</span><span class="s0">}</span><span class="s4">'</span><span class="s2">],</span>
+        <span class="s2">)</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">({</span><span class="s4">'name'</span><span class="s2">: </span><span class="s4">'deptarget'</span><span class="s2">, </span><span class="s4">'ext_modules'</span><span class="s2">: [</span><span class="s1">deptarget_ext</span><span class="s2">]})</span>
+        <span class="s1">dist</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_lib </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">build_temp </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">tmp_dir</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">old_stdout </span><span class="s2">= </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout</span>
+            <span class="s0">if not </span><span class="s1">support</span><span class="s2">.</span><span class="s1">verbose</span><span class="s2">:</span>
+                <span class="s3"># silence compiler output</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">StringIO</span><span class="s2">()</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">cmd</span><span class="s2">.</span><span class="s1">ensure_finalized</span><span class="s2">()</span>
+                <span class="s1">cmd</span><span class="s2">.</span><span class="s1">run</span><span class="s2">()</span>
+            <span class="s0">finally</span><span class="s2">:</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">old_stdout</span>
+
+        <span class="s0">except </span><span class="s1">CompileError</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">fail</span><span class="s2">(</span><span class="s4">&quot;Wrong deployment target during compilation&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestParallelBuildExt</span><span class="s2">(</span><span class="s1">TestBuildExt</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">build_ext</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">):</span>
+        <span class="s1">build_ext </span><span class="s2">= </span><span class="s1">super</span><span class="s2">().</span><span class="s1">build_ext</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+        <span class="s1">build_ext</span><span class="s2">.</span><span class="s1">parallel </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">return </span><span class="s1">build_ext</span>
+</pre>
+</body>
+</html>

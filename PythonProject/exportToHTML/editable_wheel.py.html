@@ -1,0 +1,953 @@
+<html>
+<head>
+<title>editable_wheel.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+editable_wheel.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Create a wheel that, when installed, will make the source package 'editable' 
+(add it to the interpreter's path, including metadata) per PEP 660. Replaces 
+'setup.py develop'. 
+ 
+.. note:: 
+   One of the mechanisms briefly mentioned in PEP 660 to implement editable installs is 
+   to create a separated directory inside ``build`` and use a .pth file to point to that 
+   directory. In the context of this file such directory is referred as 
+   *auxiliary build directory* or ``auxiliary_dir``. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">io</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">shutil</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Iterable</span><span class="s3">, </span><span class="s1">Iterator</span><span class="s3">, </span><span class="s1">Mapping</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">suppress</span>
+<span class="s2">from </span><span class="s1">enum </span><span class="s2">import </span><span class="s1">Enum</span>
+<span class="s2">from </span><span class="s1">inspect </span><span class="s2">import </span><span class="s1">cleandoc</span>
+<span class="s2">from </span><span class="s1">itertools </span><span class="s2">import </span><span class="s1">chain</span><span class="s3">, </span><span class="s1">starmap</span>
+<span class="s2">from </span><span class="s1">pathlib </span><span class="s2">import </span><span class="s1">Path</span>
+<span class="s2">from </span><span class="s1">tempfile </span><span class="s2">import </span><span class="s1">TemporaryDirectory</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">TracebackType</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">Protocol</span><span class="s3">, </span><span class="s1">TypeVar</span><span class="s3">, </span><span class="s1">cast</span>
+
+<span class="s2">from </span><span class="s3">.. </span><span class="s2">import </span><span class="s1">Command</span><span class="s3">, </span><span class="s1">_normalization</span><span class="s3">, </span><span class="s1">_path</span><span class="s3">, </span><span class="s1">_shutil</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">, </span><span class="s1">namespaces</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_path </span><span class="s2">import </span><span class="s1">StrPath</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">compat </span><span class="s2">import </span><span class="s1">py312</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">discovery </span><span class="s2">import </span><span class="s1">find_package_path</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">dist </span><span class="s2">import </span><span class="s1">Distribution</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">warnings </span><span class="s2">import </span><span class="s1">InformationOnly</span><span class="s3">, </span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">, </span><span class="s1">SetuptoolsWarning</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">build </span><span class="s2">import </span><span class="s1">build </span><span class="s2">as </span><span class="s1">build_cls</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">build_py </span><span class="s2">import </span><span class="s1">build_py </span><span class="s2">as </span><span class="s1">build_py_cls</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">dist_info </span><span class="s2">import </span><span class="s1">dist_info </span><span class="s2">as </span><span class="s1">dist_info_cls</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">egg_info </span><span class="s2">import </span><span class="s1">egg_info </span><span class="s2">as </span><span class="s1">egg_info_cls</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">install </span><span class="s2">import </span><span class="s1">install </span><span class="s2">as </span><span class="s1">install_cls</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">install_scripts </span><span class="s2">import </span><span class="s1">install_scripts </span><span class="s2">as </span><span class="s1">install_scripts_cls</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">Self</span>
+
+    <span class="s2">from </span><span class="s3">..</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">wheel</span><span class="s3">.</span><span class="s1">wheelfile </span><span class="s2">import </span><span class="s1">WheelFile</span>
+
+<span class="s1">_P </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;_P&quot;</span><span class="s3">, </span><span class="s1">bound</span><span class="s3">=</span><span class="s1">StrPath</span><span class="s3">)</span>
+<span class="s1">_logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_EditableMode</span><span class="s3">(</span><span class="s1">Enum</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Possible editable installation modes: 
+    `lenient` (new files automatically added to the package - DEFAULT); 
+    `strict` (requires a new installation when files are added/removed); or 
+    `compat` (attempts to emulate `python setup.py develop` - DEPRECATED). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">STRICT </span><span class="s3">= </span><span class="s4">&quot;strict&quot;</span>
+    <span class="s1">LENIENT </span><span class="s3">= </span><span class="s4">&quot;lenient&quot;</span>
+    <span class="s1">COMPAT </span><span class="s3">= </span><span class="s4">&quot;compat&quot;  </span><span class="s5"># TODO: Remove `compat` after Dec/2022.</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">convert</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; _EditableMode</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">mode</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">_EditableMode</span><span class="s3">.</span><span class="s1">LENIENT  </span><span class="s5"># default</span>
+
+        <span class="s1">_mode </span><span class="s3">= </span><span class="s1">mode</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">_mode </span><span class="s2">not in </span><span class="s1">_EditableMode</span><span class="s3">.</span><span class="s1">__members__</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">errors</span><span class="s3">.</span><span class="s1">OptionError</span><span class="s3">(</span><span class="s4">f&quot;Invalid editable mode: </span><span class="s2">{</span><span class="s1">mode</span><span class="s2">!r}</span><span class="s4">. Try: 'strict'.&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">_mode </span><span class="s3">== </span><span class="s4">&quot;COMPAT&quot;</span><span class="s3">:</span>
+            <span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span>
+                <span class="s4">&quot;Compat editable installs&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;&quot;&quot; 
+                The 'compat' editable mode is transitional and will be removed 
+                in future versions of `setuptools`. 
+                Please adapt your code accordingly to use either the 'strict' or the 
+                'lenient' modes. 
+                &quot;&quot;&quot;</span><span class="s3">,</span>
+                <span class="s1">see_docs</span><span class="s3">=</span><span class="s4">&quot;userguide/development_mode.html&quot;</span><span class="s3">,</span>
+                <span class="s5"># TODO: define due_date</span>
+                <span class="s5"># There is a series of shortcomings with the available editable install</span>
+                <span class="s5"># methods, and they are very controversial. This is something that still</span>
+                <span class="s5"># needs work.</span>
+                <span class="s5"># Moreover, `pip` is still hiding this warning, so users are not aware.</span>
+            <span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">_EditableMode</span><span class="s3">[</span><span class="s1">_mode</span><span class="s3">]</span>
+
+
+<span class="s1">_STRICT_WARNING </span><span class="s3">= </span><span class="s4">&quot;&quot;&quot; 
+New or renamed files may not be automatically picked up without a new installation. 
+&quot;&quot;&quot;</span>
+
+<span class="s1">_LENIENT_WARNING </span><span class="s3">= </span><span class="s4">&quot;&quot;&quot; 
+Options like `package-data`, `include/exclude-package-data` or 
+`packages.find.exclude/include` may have no effect. 
+&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">editable_wheel</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Build 'editable' wheel for development. 
+    This command is private and reserved for internal use of setuptools, 
+    users should rely on ``setuptools.build_meta`` APIs. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">description </span><span class="s3">= </span><span class="s4">&quot;DO NOT CALL DIRECTLY, INTERNAL ONLY: create PEP 660 editable wheel&quot;</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s4">&quot;dist-dir=&quot;</span><span class="s3">, </span><span class="s4">&quot;d&quot;</span><span class="s3">, </span><span class="s4">&quot;directory to put final built distributions in&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">&quot;dist-info-dir=&quot;</span><span class="s3">, </span><span class="s4">&quot;I&quot;</span><span class="s3">, </span><span class="s4">&quot;path to a pre-build .dist-info directory&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">&quot;mode=&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">cleandoc</span><span class="s3">(</span><span class="s1">_EditableMode</span><span class="s3">.</span><span class="s1">__doc__ </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s3">)),</span>
+    <span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">project_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">mode </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">project_dir </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">src_root </span><span class="s2">or </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">package_dir </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">package_dir </span><span class="s2">or </span><span class="s3">{}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s2">or </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_dir</span><span class="s3">, </span><span class="s4">&quot;dist&quot;</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">exist_ok</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_ensure_dist_info</span><span class="s3">()</span>
+
+            <span class="s5"># Add missing dist_info files</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s4">&quot;bdist_wheel&quot;</span><span class="s3">)</span>
+            <span class="s1">bdist_wheel </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">&quot;bdist_wheel&quot;</span><span class="s3">)</span>
+            <span class="s1">bdist_wheel</span><span class="s3">.</span><span class="s1">write_wheelfile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">)</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_create_wheel_file</span><span class="s3">(</span><span class="s1">bdist_wheel</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+            <span class="s1">traceback</span><span class="s3">.</span><span class="s1">print_exc</span><span class="s3">()</span>
+            <span class="s1">project </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">name </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_name</span><span class="s3">()</span>
+            <span class="s1">_DebuggingTips</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span><span class="s1">project</span><span class="s3">=</span><span class="s1">project</span><span class="s3">)</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">_ensure_dist_info</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">dist_info </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">dist_info_cls</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s4">&quot;dist_info&quot;</span><span class="s3">))</span>
+            <span class="s1">dist_info</span><span class="s3">.</span><span class="s1">output_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span>
+            <span class="s1">dist_info</span><span class="s3">.</span><span class="s1">ensure_finalized</span><span class="s3">()</span>
+            <span class="s1">dist_info</span><span class="s3">.</span><span class="s1">run</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir </span><span class="s3">= </span><span class="s1">dist_info</span><span class="s3">.</span><span class="s1">dist_info_dir</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">str</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">).</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;.dist-info&quot;</span><span class="s3">)</span>
+            <span class="s2">assert </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">, </span><span class="s4">&quot;METADATA&quot;</span><span class="s3">).</span><span class="s1">exists</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_install_namespaces</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">installation_dir</span><span class="s3">, </span><span class="s1">pth_prefix</span><span class="s3">):</span>
+        <span class="s5"># XXX: Only required to support the deprecated namespace practice</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span>
+        <span class="s2">if not </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">namespace_packages</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+        <span class="s1">src_root </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_dir</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">package_dir</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;&quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s3">)).</span><span class="s1">resolve</span><span class="s3">()</span>
+        <span class="s1">installer </span><span class="s3">= </span><span class="s1">_NamespaceInstaller</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">installation_dir</span><span class="s3">, </span><span class="s1">pth_prefix</span><span class="s3">, </span><span class="s1">src_root</span><span class="s3">)</span>
+        <span class="s1">installer</span><span class="s3">.</span><span class="s1">install_namespaces</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_find_egg_info_dir</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">parent_dir </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">).</span><span class="s1">parent </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir </span><span class="s2">else </span><span class="s1">Path</span><span class="s3">()</span>
+        <span class="s1">candidates </span><span class="s3">= </span><span class="s1">map</span><span class="s3">(</span><span class="s1">str</span><span class="s3">, </span><span class="s1">parent_dir</span><span class="s3">.</span><span class="s1">glob</span><span class="s3">(</span><span class="s4">&quot;*.egg-info&quot;</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">next</span><span class="s3">(</span><span class="s1">candidates</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_configure_build</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">unpacked_wheel</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">, </span><span class="s1">build_lib</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">, </span><span class="s1">tmp_dir</span><span class="s3">: </span><span class="s1">StrPath</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Configure commands to behave in the following ways: 
+ 
+        - Build commands can write to ``build_lib`` if they really want to... 
+          (but this folder is expected to be ignored and modules are expected to live 
+          in the project directory...) 
+        - Binary extensions should be built in-place (editable_mode = True) 
+        - Data/header/script files are not part of the &quot;editable&quot; specification 
+          so they are written directly to the unpacked_wheel directory. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># Non-editable files (data, headers, scripts) are written directly to the</span>
+        <span class="s5"># unpacked_wheel</span>
+
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span>
+        <span class="s1">wheel </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">unpacked_wheel</span><span class="s3">)</span>
+        <span class="s1">build_lib </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">build_lib</span><span class="s3">)</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">unpacked_wheel</span><span class="s3">, </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.data&quot;</span><span class="s3">, </span><span class="s4">&quot;data&quot;</span><span class="s3">))</span>
+        <span class="s1">headers </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">unpacked_wheel</span><span class="s3">, </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.data&quot;</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">))</span>
+        <span class="s1">scripts </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">unpacked_wheel</span><span class="s3">, </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.data&quot;</span><span class="s3">, </span><span class="s4">&quot;scripts&quot;</span><span class="s3">))</span>
+
+        <span class="s5"># egg-info may be generated again to create a manifest (used for package data)</span>
+        <span class="s1">egg_info </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span>
+            <span class="s1">egg_info_cls</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s4">&quot;egg_info&quot;</span><span class="s3">, </span><span class="s1">reinit_subcommands</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s3">)</span>
+        <span class="s1">egg_info</span><span class="s3">.</span><span class="s1">egg_base </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">tmp_dir</span><span class="s3">)</span>
+        <span class="s1">egg_info</span><span class="s3">.</span><span class="s1">ignore_egg_info_in_manifest </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s1">build </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span>
+            <span class="s1">build_cls</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s4">&quot;build&quot;</span><span class="s3">, </span><span class="s1">reinit_subcommands</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s3">)</span>
+        <span class="s1">install </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span>
+            <span class="s1">install_cls</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s4">&quot;install&quot;</span><span class="s3">, </span><span class="s1">reinit_subcommands</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s3">)</span>
+
+        <span class="s1">build</span><span class="s3">.</span><span class="s1">build_platlib </span><span class="s3">= </span><span class="s1">build</span><span class="s3">.</span><span class="s1">build_purelib </span><span class="s3">= </span><span class="s1">build</span><span class="s3">.</span><span class="s1">build_lib </span><span class="s3">= </span><span class="s1">build_lib</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">install_purelib </span><span class="s3">= </span><span class="s1">install</span><span class="s3">.</span><span class="s1">install_platlib </span><span class="s3">= </span><span class="s1">install</span><span class="s3">.</span><span class="s1">install_lib </span><span class="s3">= </span><span class="s1">wheel</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">install_scripts </span><span class="s3">= </span><span class="s1">build</span><span class="s3">.</span><span class="s1">build_scripts </span><span class="s3">= </span><span class="s1">scripts</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">install_headers </span><span class="s3">= </span><span class="s1">headers</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">install_data </span><span class="s3">= </span><span class="s1">data</span>
+
+        <span class="s5"># For portability, ensure scripts are built with #!python shebang</span>
+        <span class="s5"># pypa/setuptools#4863</span>
+        <span class="s1">build_scripts </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s4">&quot;build_scripts&quot;</span><span class="s3">)</span>
+        <span class="s1">build_scripts</span><span class="s3">.</span><span class="s1">executable </span><span class="s3">= </span><span class="s4">'python'</span>
+
+        <span class="s1">install_scripts </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span>
+            <span class="s1">install_scripts_cls</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s4">&quot;install_scripts&quot;</span><span class="s3">)</span>
+        <span class="s3">)</span>
+        <span class="s1">install_scripts</span><span class="s3">.</span><span class="s1">no_ep </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s1">build</span><span class="s3">.</span><span class="s1">build_temp </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">tmp_dir</span><span class="s3">)</span>
+
+        <span class="s1">build_py </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">build_py_cls</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s4">&quot;build_py&quot;</span><span class="s3">))</span>
+        <span class="s1">build_py</span><span class="s3">.</span><span class="s1">compile </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">build_py</span><span class="s3">.</span><span class="s1">existing_egg_info_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_find_egg_info_dir</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_editable_mode</span><span class="s3">()</span>
+
+        <span class="s1">build</span><span class="s3">.</span><span class="s1">ensure_finalized</span><span class="s3">()</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">ensure_finalized</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_set_editable_mode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Set the ``editable_mode`` flag in the build sub-commands&quot;&quot;&quot;</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span>
+        <span class="s1">build </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s4">&quot;build&quot;</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">cmd_name </span><span class="s2">in </span><span class="s1">build</span><span class="s3">.</span><span class="s1">get_sub_commands</span><span class="s3">():</span>
+            <span class="s1">cmd </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s1">cmd_name</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s4">&quot;editable_mode&quot;</span><span class="s3">):</span>
+                <span class="s1">cmd</span><span class="s3">.</span><span class="s1">editable_mode </span><span class="s3">= </span><span class="s2">True</span>
+            <span class="s2">elif </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s4">&quot;inplace&quot;</span><span class="s3">):</span>
+                <span class="s1">cmd</span><span class="s3">.</span><span class="s1">inplace </span><span class="s3">= </span><span class="s2">True  </span><span class="s5"># backward compatibility with distutils</span>
+
+    <span class="s2">def </span><span class="s1">_collect_build_outputs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]:</span>
+        <span class="s1">files</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+        <span class="s1">mapping</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = {}</span>
+        <span class="s1">build </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">&quot;build&quot;</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">cmd_name </span><span class="s2">in </span><span class="s1">build</span><span class="s3">.</span><span class="s1">get_sub_commands</span><span class="s3">():</span>
+            <span class="s1">cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s1">cmd_name</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s4">&quot;get_outputs&quot;</span><span class="s3">):</span>
+                <span class="s1">files</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">.</span><span class="s1">get_outputs</span><span class="s3">() </span><span class="s2">or </span><span class="s3">[])</span>
+            <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s4">&quot;get_output_mapping&quot;</span><span class="s3">):</span>
+                <span class="s1">mapping</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">.</span><span class="s1">get_output_mapping</span><span class="s3">() </span><span class="s2">or </span><span class="s3">{})</span>
+
+        <span class="s2">return </span><span class="s1">files</span><span class="s3">, </span><span class="s1">mapping</span>
+
+    <span class="s2">def </span><span class="s1">_run_build_commands</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">dist_name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">unpacked_wheel</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+        <span class="s1">build_lib</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+        <span class="s1">tmp_dir</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_configure_build</span><span class="s3">(</span><span class="s1">dist_name</span><span class="s3">, </span><span class="s1">unpacked_wheel</span><span class="s3">, </span><span class="s1">build_lib</span><span class="s3">, </span><span class="s1">tmp_dir</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_build_subcommands</span><span class="s3">()</span>
+        <span class="s1">files</span><span class="s3">, </span><span class="s1">mapping </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_collect_build_outputs</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_install</span><span class="s3">(</span><span class="s4">&quot;headers&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_install</span><span class="s3">(</span><span class="s4">&quot;scripts&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_install</span><span class="s3">(</span><span class="s4">&quot;data&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">files</span><span class="s3">, </span><span class="s1">mapping</span>
+
+    <span class="s2">def </span><span class="s1">_run_build_subcommands</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Issue #3501 indicates that some plugins/customizations might rely on: 
+ 
+        1. ``build_py`` not running 
+        2. ``build_py`` always copying files to ``build_lib`` 
+ 
+        However both these assumptions may be false in editable_wheel. 
+        This method implements a temporary workaround to support the ecosystem 
+        while the implementations catch up. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># TODO: Once plugins/customizations had the chance to catch up, replace</span>
+        <span class="s5">#       `self._run_build_subcommands()` with `self.run_command(&quot;build&quot;)`.</span>
+        <span class="s5">#       Also remove _safely_run, TestCustomBuildPy. Suggested date: Aug/2023.</span>
+        <span class="s1">build </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">&quot;build&quot;</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">build</span><span class="s3">.</span><span class="s1">get_sub_commands</span><span class="s3">():</span>
+            <span class="s1">cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s3">== </span><span class="s4">&quot;build_py&quot; </span><span class="s2">and </span><span class="s1">type</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">) </span><span class="s2">is not </span><span class="s1">build_py_cls</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_safely_run</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_safely_run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">cmd_name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s1">cmd_name</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+            <span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span>
+                <span class="s4">&quot;Customization incompatible with editable install&quot;</span><span class="s3">,</span>
+                <span class="s4">f&quot;&quot;&quot;</span>
+                <span class="s2">{</span><span class="s1">traceback</span><span class="s3">.</span><span class="s1">format_exc</span><span class="s3">()</span><span class="s2">}</span>
+
+                <span class="s4">If you are seeing this warning it is very likely that a setuptools</span>
+                <span class="s4">plugin or customization overrides the `</span><span class="s2">{</span><span class="s1">cmd_name</span><span class="s2">}</span><span class="s4">` command, without</span>
+                <span class="s4">taking into consideration how editable installs run build steps</span>
+                <span class="s4">starting from setuptools v64.0.0.</span>
+
+                <span class="s4">Plugin authors and developers relying on custom build steps are</span>
+                <span class="s4">encouraged to update their `</span><span class="s2">{</span><span class="s1">cmd_name</span><span class="s2">}</span><span class="s4">` implementation considering the</span>
+                <span class="s4">information about editable installs in</span>
+                <span class="s4">https://setuptools.pypa.io/en/latest/userguide/extension.html.</span>
+
+                <span class="s4">For the time being `setuptools` will silence this error and ignore</span>
+                <span class="s4">the faulty command, but this behavior will change in future versions.</span>
+                <span class="s4">&quot;&quot;&quot;</span><span class="s3">,</span>
+                <span class="s5"># TODO: define due_date</span>
+                <span class="s5"># There is a series of shortcomings with the available editable install</span>
+                <span class="s5"># methods, and they are very controversial. This is something that still</span>
+                <span class="s5"># needs work.</span>
+            <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_create_wheel_file</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">bdist_wheel</span><span class="s3">):</span>
+        <span class="s2">from </span><span class="s1">wheel</span><span class="s3">.</span><span class="s1">wheelfile </span><span class="s2">import </span><span class="s1">WheelFile</span>
+
+        <span class="s1">dist_info </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">&quot;dist_info&quot;</span><span class="s3">)</span>
+        <span class="s1">dist_name </span><span class="s3">= </span><span class="s1">dist_info</span><span class="s3">.</span><span class="s1">name</span>
+        <span class="s1">tag </span><span class="s3">= </span><span class="s4">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">bdist_wheel</span><span class="s3">.</span><span class="s1">get_tag</span><span class="s3">())</span>
+        <span class="s1">build_tag </span><span class="s3">= </span><span class="s4">&quot;0.editable&quot;  </span><span class="s5"># According to PEP 427 needs to start with digit</span>
+        <span class="s1">archive_name </span><span class="s3">= </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">dist_name</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">build_tag</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">tag</span><span class="s2">}</span><span class="s4">.whl&quot;</span>
+        <span class="s1">wheel_path </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">archive_name</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">wheel_path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">():</span>
+            <span class="s1">wheel_path</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">()</span>
+
+        <span class="s1">unpacked_wheel </span><span class="s3">= </span><span class="s1">TemporaryDirectory</span><span class="s3">(</span><span class="s1">suffix</span><span class="s3">=</span><span class="s1">archive_name</span><span class="s3">)</span>
+        <span class="s1">build_lib </span><span class="s3">= </span><span class="s1">TemporaryDirectory</span><span class="s3">(</span><span class="s1">suffix</span><span class="s3">=</span><span class="s4">&quot;.build-lib&quot;</span><span class="s3">)</span>
+        <span class="s1">build_tmp </span><span class="s3">= </span><span class="s1">TemporaryDirectory</span><span class="s3">(</span><span class="s1">suffix</span><span class="s3">=</span><span class="s4">&quot;.build-temp&quot;</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">unpacked_wheel </span><span class="s2">as </span><span class="s1">unpacked</span><span class="s3">, </span><span class="s1">build_lib </span><span class="s2">as </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">build_tmp </span><span class="s2">as </span><span class="s1">tmp</span><span class="s3">:</span>
+            <span class="s1">unpacked_dist_info </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">unpacked</span><span class="s3">, </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">).</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copytree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">, </span><span class="s1">unpacked_dist_info</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_install_namespaces</span><span class="s3">(</span><span class="s1">unpacked</span><span class="s3">, </span><span class="s1">dist_name</span><span class="s3">)</span>
+            <span class="s1">files</span><span class="s3">, </span><span class="s1">mapping </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_build_commands</span><span class="s3">(</span><span class="s1">dist_name</span><span class="s3">, </span><span class="s1">unpacked</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">tmp</span><span class="s3">)</span>
+            <span class="s1">strategy </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_select_strategy</span><span class="s3">(</span><span class="s1">dist_name</span><span class="s3">, </span><span class="s1">tag</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">)</span>
+            <span class="s2">with </span><span class="s1">strategy</span><span class="s3">, </span><span class="s1">WheelFile</span><span class="s3">(</span><span class="s1">wheel_path</span><span class="s3">, </span><span class="s4">&quot;w&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">wheel_obj</span><span class="s3">:</span>
+                <span class="s1">strategy</span><span class="s3">(</span><span class="s1">wheel_obj</span><span class="s3">, </span><span class="s1">files</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">)</span>
+                <span class="s1">wheel_obj</span><span class="s3">.</span><span class="s1">write_files</span><span class="s3">(</span><span class="s1">unpacked</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">wheel_path</span>
+
+    <span class="s2">def </span><span class="s1">_run_install</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">category</span><span class="s3">: </span><span class="s1">str</span><span class="s3">):</span>
+        <span class="s1">has_category </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s4">f&quot;has_</span><span class="s2">{</span><span class="s1">category</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">has_category </span><span class="s2">and </span><span class="s1">has_category</span><span class="s3">():</span>
+            <span class="s1">_logger</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s4">f&quot;Installing </span><span class="s2">{</span><span class="s1">category</span><span class="s2">} </span><span class="s4">as non editable&quot;</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s4">f&quot;install_</span><span class="s2">{</span><span class="s1">category</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_select_strategy</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">tag</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">build_lib</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; EditableStrategy</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Decides which strategy to use to implement an editable installation.&quot;&quot;&quot;</span>
+        <span class="s1">build_name </span><span class="s3">= </span><span class="s4">f&quot;__editable__.</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">tag</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">project_dir </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_dir</span><span class="s3">)</span>
+        <span class="s1">mode </span><span class="s3">= </span><span class="s1">_EditableMode</span><span class="s3">.</span><span class="s1">convert</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">mode</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">mode </span><span class="s2">is </span><span class="s1">_EditableMode</span><span class="s3">.</span><span class="s1">STRICT</span><span class="s3">:</span>
+            <span class="s1">auxiliary_dir </span><span class="s3">= </span><span class="s1">_empty_dir</span><span class="s3">(</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_dir</span><span class="s3">, </span><span class="s4">&quot;build&quot;</span><span class="s3">, </span><span class="s1">build_name</span><span class="s3">))</span>
+            <span class="s2">return </span><span class="s1">_LinkTree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">auxiliary_dir</span><span class="s3">, </span><span class="s1">build_lib</span><span class="s3">)</span>
+
+        <span class="s1">packages </span><span class="s3">= </span><span class="s1">_find_packages</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">)</span>
+        <span class="s1">has_simple_layout </span><span class="s3">= </span><span class="s1">_simple_layout</span><span class="s3">(</span><span class="s1">packages</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">package_dir</span><span class="s3">, </span><span class="s1">project_dir</span><span class="s3">)</span>
+        <span class="s1">is_compat_mode </span><span class="s3">= </span><span class="s1">mode </span><span class="s2">is </span><span class="s1">_EditableMode</span><span class="s3">.</span><span class="s1">COMPAT</span>
+        <span class="s2">if </span><span class="s1">set</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">package_dir</span><span class="s3">) == {</span><span class="s4">&quot;&quot;</span><span class="s3">} </span><span class="s2">and </span><span class="s1">has_simple_layout </span><span class="s2">or </span><span class="s1">is_compat_mode</span><span class="s3">:</span>
+            <span class="s5"># src-layout(ish) is relatively safe for a simple pth file</span>
+            <span class="s1">src_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">package_dir</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;&quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">_StaticPth</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, [</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">project_dir</span><span class="s3">, </span><span class="s1">src_dir</span><span class="s3">)])</span>
+
+        <span class="s5"># Use a MetaPathFinder to avoid adding accidental top-level packages/modules</span>
+        <span class="s2">return </span><span class="s1">_TopLevelFinder</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">EditableStrategy</span><span class="s3">(</span><span class="s1">Protocol</span><span class="s3">):</span>
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">wheel</span><span class="s3">: </span><span class="s1">WheelFile</span><span class="s3">, </span><span class="s1">files</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">mapping</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]</span>
+    <span class="s3">) </span><span class="s1">-&gt; object</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Self</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">_exc_type</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">BaseException</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">_exc_value</span><span class="s3">: </span><span class="s1">BaseException </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">_traceback</span><span class="s3">: </span><span class="s1">TracebackType </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; object</span><span class="s3">: ...</span>
+
+
+<span class="s2">class </span><span class="s1">_StaticPth</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">path_entries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">Path</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist </span><span class="s3">= </span><span class="s1">dist</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">name </span><span class="s3">= </span><span class="s1">name</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">path_entries </span><span class="s3">= </span><span class="s1">path_entries</span>
+
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">wheel</span><span class="s3">: </span><span class="s1">WheelFile</span><span class="s3">, </span><span class="s1">files</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">mapping</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s1">entries </span><span class="s3">= </span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">p</span><span class="s3">.</span><span class="s1">resolve</span><span class="s3">()) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">path_entries</span><span class="s3">)</span>
+        <span class="s1">contents </span><span class="s3">= </span><span class="s1">_encode_pth</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">entries</span><span class="s2">}\n</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s1">wheel</span><span class="s3">.</span><span class="s1">writestr</span><span class="s3">(</span><span class="s4">f&quot;__editable__.</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.pth&quot;</span><span class="s3">, </span><span class="s1">contents</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Self</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s4">f&quot;&quot;&quot;</span>
+        <span class="s4">Editable install will be performed using .pth file to extend `sys.path` with:</span>
+        <span class="s2">{</span><span class="s1">list</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">fspath</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">path_entries</span><span class="s3">))</span><span class="s2">!r}</span>
+        <span class="s4">&quot;&quot;&quot;</span>
+        <span class="s1">_logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s1">msg </span><span class="s3">+ </span><span class="s1">_LENIENT_WARNING</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">_exc_type</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+        <span class="s1">_exc_value</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+        <span class="s1">_traceback</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">_LinkTree</span><span class="s3">(</span><span class="s1">_StaticPth</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Creates a ``.pth`` file that points to a link tree in the ``auxiliary_dir``. 
+ 
+    This strategy will only link files (not dirs), so it can be implemented in 
+    any OS, even if that means using hardlinks instead of symlinks. 
+ 
+    By collocating ``auxiliary_dir`` and the original source code, limitations 
+    with hardlinks should be avoided. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">,</span>
+        <span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">auxiliary_dir</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+        <span class="s1">build_lib</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">auxiliary_dir </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">auxiliary_dir</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">build_lib </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">build_lib</span><span class="s3">).</span><span class="s1">resolve</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_file </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s4">&quot;build_py&quot;</span><span class="s3">).</span><span class="s1">copy_file</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">auxiliary_dir</span><span class="s3">])</span>
+
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">wheel</span><span class="s3">: </span><span class="s1">WheelFile</span><span class="s3">, </span><span class="s1">files</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">mapping</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_create_links</span><span class="s3">(</span><span class="s1">files</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">)</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">wheel</span><span class="s3">, </span><span class="s1">files</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_normalize_output</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">file</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s5"># Files relative to build_lib will be normalized to None</span>
+        <span class="s2">with </span><span class="s1">suppress</span><span class="s3">(</span><span class="s1">ValueError</span><span class="s3">):</span>
+            <span class="s1">path </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">file</span><span class="s3">).</span><span class="s1">resolve</span><span class="s3">().</span><span class="s1">relative_to</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_lib</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">str</span><span class="s3">(</span><span class="s1">path</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">, </span><span class="s4">'/'</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_create_file</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">relative_output</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">src_file</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">link</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">dest </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">auxiliary_dir </span><span class="s3">/ </span><span class="s1">relative_output</span>
+        <span class="s2">if not </span><span class="s1">dest</span><span class="s3">.</span><span class="s1">parent</span><span class="s3">.</span><span class="s1">is_dir</span><span class="s3">():</span>
+            <span class="s1">dest</span><span class="s3">.</span><span class="s1">parent</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">parents</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">(</span><span class="s1">src_file</span><span class="s3">, </span><span class="s1">dest</span><span class="s3">, </span><span class="s1">link</span><span class="s3">=</span><span class="s1">link</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_create_links</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">outputs</span><span class="s3">, </span><span class="s1">output_mapping</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">auxiliary_dir</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">parents</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">exist_ok</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s1">link_type </span><span class="s3">= </span><span class="s4">&quot;sym&quot; </span><span class="s2">if </span><span class="s1">_can_symlink_files</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">auxiliary_dir</span><span class="s3">) </span><span class="s2">else </span><span class="s4">&quot;hard&quot;</span>
+        <span class="s1">normalised </span><span class="s3">= ((</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_normalize_output</span><span class="s3">(</span><span class="s1">k</span><span class="s3">), </span><span class="s1">v</span><span class="s3">) </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">output_mapping</span><span class="s3">.</span><span class="s1">items</span><span class="s3">())</span>
+        <span class="s5"># remove files that are not relative to build_lib</span>
+        <span class="s1">mappings </span><span class="s3">= {</span><span class="s1">k</span><span class="s3">: </span><span class="s1">v </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">normalised </span><span class="s2">if </span><span class="s1">k </span><span class="s2">is not None</span><span class="s3">}</span>
+
+        <span class="s2">for </span><span class="s1">output </span><span class="s2">in </span><span class="s1">outputs</span><span class="s3">:</span>
+            <span class="s1">relative </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_normalize_output</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">relative </span><span class="s2">and </span><span class="s1">relative </span><span class="s2">not in </span><span class="s1">mappings</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_create_file</span><span class="s3">(</span><span class="s1">relative</span><span class="s3">, </span><span class="s1">output</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">relative</span><span class="s3">, </span><span class="s1">src </span><span class="s2">in </span><span class="s1">mappings</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_create_file</span><span class="s3">(</span><span class="s1">relative</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s1">link</span><span class="s3">=</span><span class="s1">link_type</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Self</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s4">&quot;Strict editable install will be performed using a link tree.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+        <span class="s1">_logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s1">msg </span><span class="s3">+ </span><span class="s1">_STRICT_WARNING</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">_exc_type</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+        <span class="s1">_exc_value</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+        <span class="s1">_traceback</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s4">f&quot;&quot;&quot;</span><span class="s2">\n</span>
+        <span class="s4">Strict editable installation performed using the auxiliary directory:</span>
+            <span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">auxiliary_dir</span><span class="s2">}</span>
+
+        <span class="s4">Please be careful to not remove this directory, otherwise you might not be able</span>
+        <span class="s4">to import/use your package.</span>
+        <span class="s4">&quot;&quot;&quot;</span>
+        <span class="s1">InformationOnly</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span><span class="s4">&quot;Editable installation.&quot;</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_TopLevelFinder</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist </span><span class="s3">= </span><span class="s1">dist</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">name </span><span class="s3">= </span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">template_vars</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">], </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]]:</span>
+        <span class="s1">src_root </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">src_root </span><span class="s2">or </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span>
+        <span class="s1">top_level </span><span class="s3">= </span><span class="s1">chain</span><span class="s3">(</span><span class="s1">_find_packages</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">), </span><span class="s1">_find_top_level_modules</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">))</span>
+        <span class="s1">package_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">package_dir </span><span class="s2">or </span><span class="s3">{}</span>
+        <span class="s1">roots </span><span class="s3">= </span><span class="s1">_find_package_roots</span><span class="s3">(</span><span class="s1">top_level</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">, </span><span class="s1">src_root</span><span class="s3">)</span>
+
+        <span class="s1">namespaces_ </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span>
+            <span class="s1">chain</span><span class="s3">(</span>
+                <span class="s1">_find_namespaces</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">packages </span><span class="s2">or </span><span class="s3">[], </span><span class="s1">roots</span><span class="s3">),</span>
+                <span class="s3">((</span><span class="s1">ns</span><span class="s3">, []) </span><span class="s2">for </span><span class="s1">ns </span><span class="s2">in </span><span class="s1">_find_virtual_namespaces</span><span class="s3">(</span><span class="s1">roots</span><span class="s3">)),</span>
+            <span class="s3">)</span>
+        <span class="s3">)</span>
+
+        <span class="s1">legacy_namespaces </span><span class="s3">= {</span>
+            <span class="s1">pkg</span><span class="s3">: </span><span class="s1">find_package_path</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">roots</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">src_root </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">pkg </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">namespace_packages </span><span class="s2">or </span><span class="s3">[]</span>
+        <span class="s3">}</span>
+
+        <span class="s1">mapping </span><span class="s3">= {**</span><span class="s1">roots</span><span class="s3">, **</span><span class="s1">legacy_namespaces</span><span class="s3">}</span>
+        <span class="s5"># ^-- We need to explicitly add the legacy_namespaces to the mapping to be</span>
+        <span class="s5">#     able to import their modules even if another package sharing the same</span>
+        <span class="s5">#     namespace is installed in a conventional (non-editable) way.</span>
+
+        <span class="s1">name </span><span class="s3">= </span><span class="s4">f&quot;__editable__.</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.finder&quot;</span>
+        <span class="s1">finder </span><span class="s3">= </span><span class="s1">_normalization</span><span class="s3">.</span><span class="s1">safe_identifier</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">finder</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">, </span><span class="s1">namespaces_</span>
+
+    <span class="s2">def </span><span class="s1">get_implementation</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">]]:</span>
+        <span class="s1">finder</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">, </span><span class="s1">namespaces_ </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">template_vars</span><span class="s3">()</span>
+
+        <span class="s1">content </span><span class="s3">= </span><span class="s1">bytes</span><span class="s3">(</span><span class="s1">_finder_template</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">, </span><span class="s1">namespaces_</span><span class="s3">), </span><span class="s4">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">yield </span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">finder</span><span class="s2">}</span><span class="s4">.py&quot;</span><span class="s3">, </span><span class="s1">content</span><span class="s3">)</span>
+
+        <span class="s1">content </span><span class="s3">= </span><span class="s1">_encode_pth</span><span class="s3">(</span><span class="s4">f&quot;import </span><span class="s2">{</span><span class="s1">finder</span><span class="s2">}</span><span class="s4">; </span><span class="s2">{</span><span class="s1">finder</span><span class="s2">}</span><span class="s4">.install()&quot;</span><span class="s3">)</span>
+        <span class="s2">yield </span><span class="s3">(</span><span class="s4">f&quot;__editable__.</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.pth&quot;</span><span class="s3">, </span><span class="s1">content</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">wheel</span><span class="s3">: </span><span class="s1">WheelFile</span><span class="s3">, </span><span class="s1">files</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">mapping</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s2">for </span><span class="s1">file</span><span class="s3">, </span><span class="s1">content </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_implementation</span><span class="s3">():</span>
+            <span class="s1">wheel</span><span class="s3">.</span><span class="s1">writestr</span><span class="s3">(</span><span class="s1">file</span><span class="s3">, </span><span class="s1">content</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Self</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s4">&quot;Editable install will be performed using a meta path finder.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+        <span class="s1">_logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s1">msg </span><span class="s3">+ </span><span class="s1">_LENIENT_WARNING</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">_exc_type</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+        <span class="s1">_exc_value</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+        <span class="s1">_traceback</span><span class="s3">: </span><span class="s1">object</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\n</span>
+        <span class="s4">Please be careful with folders in your working directory with the same 
+        name as your package as they may take precedence during imports. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">InformationOnly</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span><span class="s4">&quot;Editable installation.&quot;</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_encode_pth</span><span class="s3">(</span><span class="s1">content</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Prior to Python 3.13 (see https://github.com/python/cpython/issues/77102), 
+    .pth files are always read with 'locale' encoding, the recommendation 
+    from the cpython core developers is to write them as ``open(path, &quot;w&quot;)`` 
+    and ignore warnings (see python/cpython#77102, pypa/setuptools#3937). 
+    This function tries to simulate this behavior without having to create an 
+    actual file, in a way that supports a range of active Python versions. 
+    (There seems to be some variety in the way different version of Python handle 
+    ``encoding=None``, not all of them use ``locale.getpreferredencoding(False)`` 
+    or ``locale.getencoding()``). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">with </span><span class="s1">io</span><span class="s3">.</span><span class="s1">BytesIO</span><span class="s3">() </span><span class="s2">as </span><span class="s1">buffer</span><span class="s3">:</span>
+        <span class="s1">wrapper </span><span class="s3">= </span><span class="s1">io</span><span class="s3">.</span><span class="s1">TextIOWrapper</span><span class="s3">(</span><span class="s1">buffer</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s1">py312</span><span class="s3">.</span><span class="s1">PTH_ENCODING</span><span class="s3">)</span>
+        <span class="s5"># TODO: Python 3.13 replace the whole function with `bytes(content, &quot;utf-8&quot;)`</span>
+        <span class="s1">wrapper</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">content</span><span class="s3">)</span>
+        <span class="s1">wrapper</span><span class="s3">.</span><span class="s1">flush</span><span class="s3">()</span>
+        <span class="s1">buffer</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s6">0</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">read</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">_can_symlink_files</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">: </span><span class="s1">Path</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s2">with </span><span class="s1">TemporaryDirectory</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">=</span><span class="s1">str</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">.</span><span class="s1">resolve</span><span class="s3">())) </span><span class="s2">as </span><span class="s1">tmp</span><span class="s3">:</span>
+        <span class="s1">path1</span><span class="s3">, </span><span class="s1">path2 </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmp</span><span class="s3">, </span><span class="s4">&quot;file1.txt&quot;</span><span class="s3">), </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">tmp</span><span class="s3">, </span><span class="s4">&quot;file2.txt&quot;</span><span class="s3">)</span>
+        <span class="s1">path1</span><span class="s3">.</span><span class="s1">write_text</span><span class="s3">(</span><span class="s4">&quot;file1&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">suppress</span><span class="s3">(</span><span class="s1">AttributeError</span><span class="s3">, </span><span class="s1">NotImplementedError</span><span class="s3">, </span><span class="s1">OSError</span><span class="s3">):</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">symlink</span><span class="s3">(</span><span class="s1">path1</span><span class="s3">, </span><span class="s1">path2</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">path2</span><span class="s3">.</span><span class="s1">is_symlink</span><span class="s3">() </span><span class="s2">and </span><span class="s1">path2</span><span class="s3">.</span><span class="s1">read_text</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">&quot;utf-8&quot;</span><span class="s3">) == </span><span class="s4">&quot;file1&quot;</span><span class="s3">:</span>
+                <span class="s2">return True</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">link</span><span class="s3">(</span><span class="s1">path1</span><span class="s3">, </span><span class="s1">path2</span><span class="s3">)  </span><span class="s5"># Ensure hard links can be created</span>
+        <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">ex</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">= (</span>
+                <span class="s4">&quot;File system does not seem to support either symlinks or hard links. &quot;</span>
+                <span class="s4">&quot;Strict editable installs require one of them to be supported.&quot;</span>
+            <span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">LinksNotSupported</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">) </span><span class="s2">from </span><span class="s1">ex</span>
+        <span class="s2">return False</span>
+
+
+<span class="s2">def </span><span class="s1">_simple_layout</span><span class="s3">(</span>
+    <span class="s1">packages</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">], </span><span class="s1">project_dir</span><span class="s3">: </span><span class="s1">StrPath</span>
+<span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Return ``True`` if: 
+    - all packages are contained by the same parent directory, **and** 
+    - all packages become importable if the parent directory is added to ``sys.path``. 
+ 
+    &gt;&gt;&gt; _simple_layout(['a'], {&quot;&quot;: &quot;src&quot;}, &quot;/tmp/myproj&quot;) 
+    True 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.b'], {&quot;&quot;: &quot;src&quot;}, &quot;/tmp/myproj&quot;) 
+    True 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.b'], {}, &quot;/tmp/myproj&quot;) 
+    True 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.a1', 'a.a1.a2', 'b'], {&quot;&quot;: &quot;src&quot;}, &quot;/tmp/myproj&quot;) 
+    True 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.a1', 'a.a1.a2', 'b'], {&quot;a&quot;: &quot;a&quot;, &quot;b&quot;: &quot;b&quot;}, &quot;.&quot;) 
+    True 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.a1', 'a.a1.a2', 'b'], {&quot;a&quot;: &quot;_a&quot;, &quot;b&quot;: &quot;_b&quot;}, &quot;.&quot;) 
+    False 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.a1', 'a.a1.a2', 'b'], {&quot;a&quot;: &quot;_a&quot;}, &quot;/tmp/myproj&quot;) 
+    False 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.a1', 'a.a1.a2', 'b'], {&quot;a.a1.a2&quot;: &quot;_a2&quot;}, &quot;.&quot;) 
+    False 
+    &gt;&gt;&gt; _simple_layout(['a', 'a.b'], {&quot;&quot;: &quot;src&quot;, &quot;a.b&quot;: &quot;_ab&quot;}, &quot;/tmp/myproj&quot;) 
+    False 
+    &gt;&gt;&gt; # Special cases, no packages yet: 
+    &gt;&gt;&gt; _simple_layout([], {&quot;&quot;: &quot;src&quot;}, &quot;/tmp/myproj&quot;) 
+    True 
+    &gt;&gt;&gt; _simple_layout([], {&quot;a&quot;: &quot;_a&quot;, &quot;&quot;: &quot;src&quot;}, &quot;/tmp/myproj&quot;) 
+    False 
+    &quot;&quot;&quot;</span>
+    <span class="s1">layout </span><span class="s3">= {</span><span class="s1">pkg</span><span class="s3">: </span><span class="s1">find_package_path</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">, </span><span class="s1">project_dir</span><span class="s3">) </span><span class="s2">for </span><span class="s1">pkg </span><span class="s2">in </span><span class="s1">packages</span><span class="s3">}</span>
+    <span class="s2">if not </span><span class="s1">layout</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">set</span><span class="s3">(</span><span class="s1">package_dir</span><span class="s3">) </span><span class="s2">in </span><span class="s3">({}, {</span><span class="s4">&quot;&quot;</span><span class="s3">})</span>
+    <span class="s1">parent </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">commonpath</span><span class="s3">(</span><span class="s1">starmap</span><span class="s3">(</span><span class="s1">_parent_path</span><span class="s3">, </span><span class="s1">layout</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()))</span>
+    <span class="s2">return </span><span class="s1">all</span><span class="s3">(</span>
+        <span class="s1">_path</span><span class="s3">.</span><span class="s1">same_path</span><span class="s3">(</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">, *</span><span class="s1">key</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'.'</span><span class="s3">)), </span><span class="s1">value</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">layout</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_parent_path</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">pkg_path</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Infer the parent path containing a package, that if added to ``sys.path`` would 
+    allow importing that package. 
+    When ``pkg`` is directly mapped into a directory with a different name, return its 
+    own path. 
+    &gt;&gt;&gt; _parent_path(&quot;a&quot;, &quot;src/a&quot;) 
+    'src' 
+    &gt;&gt;&gt; _parent_path(&quot;b&quot;, &quot;src/c&quot;) 
+    'src/c' 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parent </span><span class="s3">= </span><span class="s1">pkg_path</span><span class="s3">[: -</span><span class="s1">len</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">)] </span><span class="s2">if </span><span class="s1">pkg_path</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">) </span><span class="s2">else </span><span class="s1">pkg_path</span>
+    <span class="s2">return </span><span class="s1">parent</span><span class="s3">.</span><span class="s1">rstrip</span><span class="s3">(</span><span class="s4">&quot;/&quot; </span><span class="s3">+ </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_find_packages</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s2">yield from </span><span class="s1">iter</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">packages </span><span class="s2">or </span><span class="s3">[])</span>
+
+    <span class="s1">py_modules </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">py_modules </span><span class="s2">or </span><span class="s3">[]</span>
+    <span class="s1">nested_modules </span><span class="s3">= [</span><span class="s1">mod </span><span class="s2">for </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">py_modules </span><span class="s2">if </span><span class="s4">&quot;.&quot; </span><span class="s2">in </span><span class="s1">mod</span><span class="s3">]</span>
+    <span class="s2">if </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_package</span><span class="s3">:</span>
+        <span class="s2">yield </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_package</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">ext_modules </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_modules </span><span class="s2">or </span><span class="s3">[]</span>
+        <span class="s1">nested_modules </span><span class="s3">+= [</span><span class="s1">x</span><span class="s3">.</span><span class="s1">name </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">ext_modules </span><span class="s2">if </span><span class="s4">&quot;.&quot; </span><span class="s2">in </span><span class="s1">x</span><span class="s3">.</span><span class="s1">name</span><span class="s3">]</span>
+
+    <span class="s2">for </span><span class="s1">module </span><span class="s2">in </span><span class="s1">nested_modules</span><span class="s3">:</span>
+        <span class="s1">package</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">= </span><span class="s1">module</span><span class="s3">.</span><span class="s1">rpartition</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)</span>
+        <span class="s2">yield </span><span class="s1">package</span>
+
+
+<span class="s2">def </span><span class="s1">_find_top_level_modules</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">py_modules </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">py_modules </span><span class="s2">or </span><span class="s3">[]</span>
+    <span class="s2">yield from </span><span class="s3">(</span><span class="s1">mod </span><span class="s2">for </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">py_modules </span><span class="s2">if </span><span class="s4">&quot;.&quot; </span><span class="s2">not in </span><span class="s1">mod</span><span class="s3">)</span>
+
+    <span class="s2">if not </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_package</span><span class="s3">:</span>
+        <span class="s1">ext_modules </span><span class="s3">= </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">ext_modules </span><span class="s2">or </span><span class="s3">[]</span>
+        <span class="s2">yield from </span><span class="s3">(</span><span class="s1">x</span><span class="s3">.</span><span class="s1">name </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">ext_modules </span><span class="s2">if </span><span class="s4">&quot;.&quot; </span><span class="s2">not in </span><span class="s1">x</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_find_package_roots</span><span class="s3">(</span>
+    <span class="s1">packages</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">src_root</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">pkg_roots</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = {</span>
+        <span class="s1">pkg</span><span class="s3">: </span><span class="s1">_absolute_root</span><span class="s3">(</span><span class="s1">find_package_path</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">, </span><span class="s1">src_root</span><span class="s3">))</span>
+        <span class="s2">for </span><span class="s1">pkg </span><span class="s2">in </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">packages</span><span class="s3">)</span>
+    <span class="s3">}</span>
+
+    <span class="s2">return </span><span class="s1">_remove_nested</span><span class="s3">(</span><span class="s1">pkg_roots</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_absolute_root</span><span class="s3">(</span><span class="s1">path</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Works for packages and top-level modules&quot;&quot;&quot;</span>
+    <span class="s1">path_ </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+    <span class="s1">parent </span><span class="s3">= </span><span class="s1">path_</span><span class="s3">.</span><span class="s1">parent</span>
+
+    <span class="s2">if </span><span class="s1">path_</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">():</span>
+        <span class="s2">return </span><span class="s1">str</span><span class="s3">(</span><span class="s1">path_</span><span class="s3">.</span><span class="s1">resolve</span><span class="s3">())</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">str</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">.</span><span class="s1">resolve</span><span class="s3">() / </span><span class="s1">path_</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_find_virtual_namespaces</span><span class="s3">(</span><span class="s1">pkg_roots</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s0">&quot;&quot;&quot;By carefully designing ``package_dir``, it is possible to implement the logical 
+    structure of PEP 420 in a package without the corresponding directories. 
+ 
+    Moreover a parent package can be purposefully/accidentally skipped in the discovery 
+    phase (e.g. ``find_packages(include=[&quot;mypkg.*&quot;])``, when ``mypkg.foo`` is included 
+    by ``mypkg`` itself is not). 
+    We consider this case to also be a virtual namespace (ignoring the original 
+    directory) to emulate a non-editable installation. 
+ 
+    This function will try to find these kinds of namespaces. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">pkg </span><span class="s2">in </span><span class="s1">pkg_roots</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s4">&quot;.&quot; </span><span class="s2">not in </span><span class="s1">pkg</span><span class="s3">:</span>
+            <span class="s2">continue</span>
+        <span class="s1">parts </span><span class="s3">= </span><span class="s1">pkg</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">parts</span><span class="s3">) - </span><span class="s6">1</span><span class="s3">, </span><span class="s6">0</span><span class="s3">, -</span><span class="s6">1</span><span class="s3">):</span>
+            <span class="s1">partial_name </span><span class="s3">= </span><span class="s4">&quot;.&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">parts</span><span class="s3">[:</span><span class="s1">i</span><span class="s3">])</span>
+            <span class="s1">path </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">find_package_path</span><span class="s3">(</span><span class="s1">partial_name</span><span class="s3">, </span><span class="s1">pkg_roots</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s3">))</span>
+            <span class="s2">if not </span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">() </span><span class="s2">or </span><span class="s1">partial_name </span><span class="s2">not in </span><span class="s1">pkg_roots</span><span class="s3">:</span>
+                <span class="s5"># partial_name not in pkg_roots ==&gt; purposefully/accidentally skipped</span>
+                <span class="s2">yield </span><span class="s1">partial_name</span>
+
+
+<span class="s2">def </span><span class="s1">_find_namespaces</span><span class="s3">(</span>
+    <span class="s1">packages</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">pkg_roots</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterator</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]]:</span>
+    <span class="s2">for </span><span class="s1">pkg </span><span class="s2">in </span><span class="s1">packages</span><span class="s3">:</span>
+        <span class="s1">path </span><span class="s3">= </span><span class="s1">find_package_path</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">pkg_roots</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">path</span><span class="s3">).</span><span class="s1">exists</span><span class="s3">() </span><span class="s2">and not </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s4">&quot;__init__.py&quot;</span><span class="s3">).</span><span class="s1">exists</span><span class="s3">():</span>
+            <span class="s2">yield </span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, [</span><span class="s1">path</span><span class="s3">])</span>
+
+
+<span class="s2">def </span><span class="s1">_remove_nested</span><span class="s3">(</span><span class="s1">pkg_roots</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">output </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">pkg_roots</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">())</span>
+
+    <span class="s2">for </span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">path </span><span class="s2">in </span><span class="s1">reversed</span><span class="s3">(</span><span class="s1">list</span><span class="s3">(</span><span class="s1">pkg_roots</span><span class="s3">.</span><span class="s1">items</span><span class="s3">())):</span>
+        <span class="s2">if </span><span class="s1">any</span><span class="s3">(</span>
+            <span class="s1">pkg </span><span class="s3">!= </span><span class="s1">other </span><span class="s2">and </span><span class="s1">_is_nested</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">other</span><span class="s3">, </span><span class="s1">other_path</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">other</span><span class="s3">, </span><span class="s1">other_path </span><span class="s2">in </span><span class="s1">pkg_roots</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+        <span class="s3">):</span>
+            <span class="s1">output</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">output</span>
+
+
+<span class="s2">def </span><span class="s1">_is_nested</span><span class="s3">(</span><span class="s1">pkg</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">pkg_path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">parent</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">parent_path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return ``True`` if ``pkg`` is nested inside ``parent`` both logically and in the 
+    file system. 
+    &gt;&gt;&gt; _is_nested(&quot;a.b&quot;, &quot;path/a/b&quot;, &quot;a&quot;, &quot;path/a&quot;) 
+    True 
+    &gt;&gt;&gt; _is_nested(&quot;a.b&quot;, &quot;path/a/b&quot;, &quot;a&quot;, &quot;otherpath/a&quot;) 
+    False 
+    &gt;&gt;&gt; _is_nested(&quot;a.b&quot;, &quot;path/a/b&quot;, &quot;c&quot;, &quot;path/c&quot;) 
+    False 
+    &gt;&gt;&gt; _is_nested(&quot;a.a&quot;, &quot;path/a/a&quot;, &quot;a&quot;, &quot;path/a&quot;) 
+    True 
+    &gt;&gt;&gt; _is_nested(&quot;b.a&quot;, &quot;path/b/a&quot;, &quot;a&quot;, &quot;path/a&quot;) 
+    False 
+    &quot;&quot;&quot;</span>
+    <span class="s1">norm_pkg_path </span><span class="s3">= </span><span class="s1">_path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">pkg_path</span><span class="s3">)</span>
+    <span class="s1">rest </span><span class="s3">= </span><span class="s1">pkg</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s3">, </span><span class="s6">1</span><span class="s3">).</span><span class="s1">strip</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">).</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">pkg</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">) </span><span class="s2">and </span><span class="s1">norm_pkg_path </span><span class="s3">== </span><span class="s1">_path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span>
+        <span class="s1">Path</span><span class="s3">(</span><span class="s1">parent_path</span><span class="s3">, *</span><span class="s1">rest</span><span class="s3">)</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_empty_dir</span><span class="s3">(</span><span class="s1">dir_</span><span class="s3">: </span><span class="s1">_P</span><span class="s3">) </span><span class="s1">-&gt; _P</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create a directory ensured to be empty. Existing files may be removed.&quot;&quot;&quot;</span>
+    <span class="s1">_shutil</span><span class="s3">.</span><span class="s1">rmtree</span><span class="s3">(</span><span class="s1">dir_</span><span class="s3">, </span><span class="s1">ignore_errors</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+    <span class="s1">os</span><span class="s3">.</span><span class="s1">makedirs</span><span class="s3">(</span><span class="s1">dir_</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">dir_</span>
+
+
+<span class="s2">class </span><span class="s1">_NamespaceInstaller</span><span class="s3">(</span><span class="s1">namespaces</span><span class="s3">.</span><span class="s1">Installer</span><span class="s3">):</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">distribution</span><span class="s3">, </span><span class="s1">installation_dir</span><span class="s3">, </span><span class="s1">editable_name</span><span class="s3">, </span><span class="s1">src_root</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution </span><span class="s3">= </span><span class="s1">distribution</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">src_root </span><span class="s3">= </span><span class="s1">src_root</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">installation_dir </span><span class="s3">= </span><span class="s1">installation_dir</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">editable_name </span><span class="s3">= </span><span class="s1">editable_name</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">outputs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">_get_nspkg_file</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Installation target.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">installation_dir</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">editable_name </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">nspkg_ext</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_root</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Where the modules/packages should be loaded from.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">repr</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">src_root</span><span class="s3">))</span>
+
+
+<span class="s1">_FINDER_TEMPLATE </span><span class="s3">= </span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">from __future__ import annotations 
+import sys 
+from importlib.machinery import ModuleSpec, PathFinder 
+from importlib.machinery import all_suffixes as module_suffixes 
+from importlib.util import spec_from_file_location 
+from itertools import chain 
+from pathlib import Path 
+ 
+MAPPING: dict[str, str] = {mapping!r} 
+NAMESPACES: dict[str, list[str]] = {namespaces!r} 
+PATH_PLACEHOLDER = {name!r} + &quot;.__path_hook__&quot; 
+ 
+ 
+class _EditableFinder:  # MetaPathFinder 
+    @classmethod 
+    def find_spec(cls, fullname: str, path=None, target=None) -&gt; ModuleSpec | None:  # type: ignore 
+        # Top-level packages and modules (we know these exist in the FS) 
+        if fullname in MAPPING: 
+            pkg_path = MAPPING[fullname] 
+            return cls._find_spec(fullname, Path(pkg_path)) 
+ 
+        # Handle immediate children modules (required for namespaces to work) 
+        # To avoid problems with case sensitivity in the file system we delegate 
+        # to the importlib.machinery implementation. 
+        parent, _, child = fullname.rpartition(&quot;.&quot;) 
+        if parent and parent in MAPPING: 
+            return PathFinder.find_spec(fullname, path=[MAPPING[parent]]) 
+ 
+        # Other levels of nesting should be handled automatically by importlib 
+        # using the parent path. 
+        return None 
+ 
+    @classmethod 
+    def _find_spec(cls, fullname: str, candidate_path: Path) -&gt; ModuleSpec | None: 
+        init = candidate_path / &quot;__init__.py&quot; 
+        candidates = (candidate_path.with_suffix(x) for x in module_suffixes()) 
+        for candidate in chain([init], candidates): 
+            if candidate.exists(): 
+                return spec_from_file_location(fullname, candidate) 
+        return None 
+ 
+ 
+class _EditableNamespaceFinder:  # PathEntryFinder 
+    @classmethod 
+    def _path_hook(cls, path) -&gt; type[_EditableNamespaceFinder]: 
+        if path == PATH_PLACEHOLDER: 
+            return cls 
+        raise ImportError 
+ 
+    @classmethod 
+    def _paths(cls, fullname: str) -&gt; list[str]: 
+        paths = NAMESPACES[fullname] 
+        if not paths and fullname in MAPPING: 
+            paths = [MAPPING[fullname]] 
+        # Always add placeholder, for 2 reasons: 
+        # 1. __path__ cannot be empty for the spec to be considered namespace. 
+        # 2. In the case of nested namespaces, we need to force 
+        #    import machinery to query _EditableNamespaceFinder again. 
+        return [*paths, PATH_PLACEHOLDER] 
+ 
+    @classmethod 
+    def find_spec(cls, fullname: str, target=None) -&gt; ModuleSpec | None:  # type: ignore 
+        if fullname in NAMESPACES: 
+            spec = ModuleSpec(fullname, None, is_package=True) 
+            spec.submodule_search_locations = cls._paths(fullname) 
+            return spec 
+        return None 
+ 
+    @classmethod 
+    def find_module(cls, _fullname) -&gt; None: 
+        return None 
+ 
+ 
+def install(): 
+    if not any(finder == _EditableFinder for finder in sys.meta_path): 
+        sys.meta_path.append(_EditableFinder) 
+ 
+    if not NAMESPACES: 
+        return 
+ 
+    if not any(hook == _EditableNamespaceFinder._path_hook for hook in sys.path_hooks): 
+        # PathEntryFinder is needed to create NamespaceSpec without private APIS 
+        sys.path_hooks.append(_EditableNamespaceFinder._path_hook) 
+    if PATH_PLACEHOLDER not in sys.path: 
+        sys.path.append(PATH_PLACEHOLDER)  # Used just to trigger the path hook 
+&quot;&quot;&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_finder_template</span><span class="s3">(</span>
+    <span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">], </span><span class="s1">namespaces</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create a string containing the code for the``MetaPathFinder`` and 
+    ``PathEntryFinder``. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">mapping </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">mapping</span><span class="s3">.</span><span class="s1">items</span><span class="s3">(), </span><span class="s1">key</span><span class="s3">=</span><span class="s2">lambda </span><span class="s1">p</span><span class="s3">: </span><span class="s1">p</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]))</span>
+    <span class="s2">return </span><span class="s1">_FINDER_TEMPLATE</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">name</span><span class="s3">=</span><span class="s1">name</span><span class="s3">, </span><span class="s1">mapping</span><span class="s3">=</span><span class="s1">mapping</span><span class="s3">, </span><span class="s1">namespaces</span><span class="s3">=</span><span class="s1">namespaces</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">LinksNotSupported</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">.</span><span class="s1">FileError</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;File system does not seem to support either symlinks or hard links.&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">_DebuggingTips</span><span class="s3">(</span><span class="s1">SetuptoolsWarning</span><span class="s3">):</span>
+    <span class="s1">_SUMMARY </span><span class="s3">= </span><span class="s4">&quot;Problem in editable installation.&quot;</span>
+    <span class="s1">_DETAILS </span><span class="s3">= </span><span class="s4">&quot;&quot;&quot; 
+    An error happened while installing `{project}` in editable mode. 
+ 
+    The following steps are recommended to help debug this problem: 
+ 
+    - Try to install the project normally, without using the editable mode. 
+      Does the error still persist? 
+      (If it does, try fixing the problem before attempting the editable mode). 
+    - If you are using binary extensions, make sure you have all OS-level 
+      dependencies installed (e.g. compilers, toolchains, binary libraries, ...). 
+    - Try the latest version of setuptools (maybe the error was already fixed). 
+    - If you (or your project dependencies) are using any setuptools extension 
+      or customization, make sure they support the editable mode. 
+ 
+    After following the steps above, if the problem still persists and 
+    you think this is related to how setuptools handles editable installations, 
+    please submit a reproducible example 
+    (see https://stackoverflow.com/help/minimal-reproducible-example) to: 
+ 
+        https://github.com/pypa/setuptools/issues 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_SEE_DOCS </span><span class="s3">= </span><span class="s4">&quot;userguide/development_mode.html&quot;</span>
+</pre>
+</body>
+</html>

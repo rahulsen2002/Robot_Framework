@@ -1,0 +1,412 @@
+<html>
+<head>
+<title>_in_process.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_in_process.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;This is invoked in a subprocess to call the build backend hooks. 
+ 
+It expects: 
+- Command line args: hook_name, control_dir 
+- Environment variables: 
+      _PYPROJECT_HOOKS_BUILD_BACKEND=entry.point:spec 
+      _PYPROJECT_HOOKS_BACKEND_PATH=paths (separated with os.pathsep) 
+- control_dir/input.json: 
+  - {&quot;kwargs&quot;: {...}} 
+ 
+Results: 
+- control_dir/output.json 
+  - {&quot;return_val&quot;: ...} 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">json</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">shutil</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+<span class="s2">from </span><span class="s1">glob </span><span class="s2">import </span><span class="s1">glob</span>
+<span class="s2">from </span><span class="s1">importlib </span><span class="s2">import </span><span class="s1">import_module</span>
+<span class="s2">from </span><span class="s1">importlib</span><span class="s3">.</span><span class="s1">machinery </span><span class="s2">import </span><span class="s1">PathFinder</span>
+<span class="s2">from </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path </span><span class="s2">import </span><span class="s1">join </span><span class="s2">as </span><span class="s1">pjoin</span>
+
+<span class="s4"># This file is run as a script, and `import wrappers` is not zip-safe, so we</span>
+<span class="s4"># include write_json() and read_json() from wrappers.py.</span>
+
+
+<span class="s2">def </span><span class="s1">write_json</span><span class="s3">(</span><span class="s1">obj</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+        <span class="s1">json</span><span class="s3">.</span><span class="s1">dump</span><span class="s3">(</span><span class="s1">obj</span><span class="s3">, </span><span class="s1">f</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">read_json</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">json</span><span class="s3">.</span><span class="s1">load</span><span class="s3">(</span><span class="s1">f</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">BackendUnavailable</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Raised if we cannot import the backend&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">message</span><span class="s3">, </span><span class="s1">traceback</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">message</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">message </span><span class="s3">= </span><span class="s1">message</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">traceback </span><span class="s3">= </span><span class="s1">traceback</span>
+
+
+<span class="s2">class </span><span class="s1">HookMissing</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Raised if a hook is missing and we are not executing the fallback&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">hook_name</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">hook_name</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">hook_name </span><span class="s3">= </span><span class="s1">hook_name</span>
+
+
+<span class="s2">def </span><span class="s1">_build_backend</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot;Find and load the build backend&quot;&quot;&quot;</span>
+    <span class="s1">backend_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;_PYPROJECT_HOOKS_BACKEND_PATH&quot;</span><span class="s3">)</span>
+    <span class="s1">ep </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">[</span><span class="s5">&quot;_PYPROJECT_HOOKS_BUILD_BACKEND&quot;</span><span class="s3">]</span>
+    <span class="s1">mod_path</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">obj_path </span><span class="s3">= </span><span class="s1">ep</span><span class="s3">.</span><span class="s1">partition</span><span class="s3">(</span><span class="s5">&quot;:&quot;</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">backend_path</span><span class="s3">:</span>
+        <span class="s4"># Ensure in-tree backend directories have the highest priority when importing.</span>
+        <span class="s1">extra_pathitems </span><span class="s3">= </span><span class="s1">backend_path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">pathsep</span><span class="s3">)</span>
+        <span class="s1">sys</span><span class="s3">.</span><span class="s1">meta_path</span><span class="s3">.</span><span class="s1">insert</span><span class="s3">(</span><span class="s6">0</span><span class="s3">, </span><span class="s1">_BackendPathFinder</span><span class="s3">(</span><span class="s1">extra_pathitems</span><span class="s3">, </span><span class="s1">mod_path</span><span class="s3">))</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">obj </span><span class="s3">= </span><span class="s1">import_module</span><span class="s3">(</span><span class="s1">mod_path</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s5">f&quot;Cannot import </span><span class="s2">{</span><span class="s1">mod_path</span><span class="s2">!r}</span><span class="s5">&quot;</span>
+        <span class="s2">raise </span><span class="s1">BackendUnavailable</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">, </span><span class="s1">traceback</span><span class="s3">.</span><span class="s1">format_exc</span><span class="s3">())</span>
+
+    <span class="s2">if </span><span class="s1">obj_path</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">path_part </span><span class="s2">in </span><span class="s1">obj_path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">):</span>
+            <span class="s1">obj </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">obj</span><span class="s3">, </span><span class="s1">path_part</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">obj</span>
+
+
+<span class="s2">class </span><span class="s1">_BackendPathFinder</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Implements the MetaPathFinder interface to locate modules in ``backend-path``. 
+ 
+    Since the environment provided by the frontend can contain all sorts of 
+    MetaPathFinders, the only way to ensure the backend is loaded from the 
+    right place is to prepend our own. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">backend_path</span><span class="s3">, </span><span class="s1">backend_module</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">backend_path </span><span class="s3">= </span><span class="s1">backend_path</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">backend_module </span><span class="s3">= </span><span class="s1">backend_module</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">backend_parent</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">= </span><span class="s1">backend_module</span><span class="s3">.</span><span class="s1">partition</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">find_spec</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">fullname</span><span class="s3">, </span><span class="s1">_path</span><span class="s3">, </span><span class="s1">_target</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s5">&quot;.&quot; </span><span class="s2">in </span><span class="s1">fullname</span><span class="s3">:</span>
+            <span class="s4"># Rely on importlib to find nested modules based on parent's path</span>
+            <span class="s2">return None</span>
+
+        <span class="s4"># Ignore other items in _path or sys.path and use backend_path instead:</span>
+        <span class="s1">spec </span><span class="s3">= </span><span class="s1">PathFinder</span><span class="s3">.</span><span class="s1">find_spec</span><span class="s3">(</span><span class="s1">fullname</span><span class="s3">, </span><span class="s1">path</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">backend_path</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">spec </span><span class="s2">is None and </span><span class="s1">fullname </span><span class="s3">== </span><span class="s1">self</span><span class="s3">.</span><span class="s1">backend_parent</span><span class="s3">:</span>
+            <span class="s4"># According to the spec, the backend MUST be loaded from backend-path.</span>
+            <span class="s4"># Therefore, we can halt the import machinery and raise a clean error.</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s5">f&quot;Cannot find module </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">backend_module</span><span class="s2">!r} </span><span class="s5">in </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">backend_path</span><span class="s2">!r}</span><span class="s5">&quot;</span>
+            <span class="s2">raise </span><span class="s1">BackendUnavailable</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">spec</span>
+
+    <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info </span><span class="s3">&gt;= (</span><span class="s6">3</span><span class="s3">, </span><span class="s6">8</span><span class="s3">):</span>
+
+        <span class="s2">def </span><span class="s1">find_distributions</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+            <span class="s4"># Delayed import: Python 3.7 does not contain importlib.metadata</span>
+            <span class="s2">from </span><span class="s1">importlib</span><span class="s3">.</span><span class="s1">metadata </span><span class="s2">import </span><span class="s1">DistributionFinder</span><span class="s3">, </span><span class="s1">MetadataPathFinder</span>
+
+            <span class="s1">context </span><span class="s3">= </span><span class="s1">DistributionFinder</span><span class="s3">.</span><span class="s1">Context</span><span class="s3">(</span><span class="s1">path</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">backend_path</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">MetadataPathFinder</span><span class="s3">.</span><span class="s1">find_distributions</span><span class="s3">(</span><span class="s1">context</span><span class="s3">=</span><span class="s1">context</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_supported_features</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot;Return the list of options features supported by the backend. 
+ 
+    Returns a list of strings. 
+    The only possible value is 'build_editable'. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s1">features </span><span class="s3">= []</span>
+    <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">backend</span><span class="s3">, </span><span class="s5">&quot;build_editable&quot;</span><span class="s3">):</span>
+        <span class="s1">features</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s5">&quot;build_editable&quot;</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">features</span>
+
+
+<span class="s2">def </span><span class="s1">get_requires_for_build_wheel</span><span class="s3">(</span><span class="s1">config_settings</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke the optional get_requires_for_build_wheel hook 
+ 
+    Returns [] if the hook is not defined. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">get_requires_for_build_wheel</span>
+    <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hook</span><span class="s3">(</span><span class="s1">config_settings</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_requires_for_build_editable</span><span class="s3">(</span><span class="s1">config_settings</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke the optional get_requires_for_build_editable hook 
+ 
+    Returns [] if the hook is not defined. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">get_requires_for_build_editable</span>
+    <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hook</span><span class="s3">(</span><span class="s1">config_settings</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">prepare_metadata_for_build_wheel</span><span class="s3">(</span>
+    <span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">, </span><span class="s1">_allow_fallback</span>
+<span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke optional prepare_metadata_for_build_wheel 
+ 
+    Implements a fallback by building a wheel if the hook isn't defined, 
+    unless _allow_fallback is False in which case HookMissing is raised. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">prepare_metadata_for_build_wheel</span>
+    <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">_allow_fallback</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">HookMissing</span><span class="s3">()</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hook</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">)</span>
+    <span class="s4"># fallback to build_wheel outside the try block to avoid exception chaining</span>
+    <span class="s4"># which can be confusing to users and is not relevant</span>
+    <span class="s1">whl_basename </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">build_wheel</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">_get_wheel_metadata_from_wheel</span><span class="s3">(</span>
+        <span class="s1">whl_basename</span><span class="s3">, </span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">prepare_metadata_for_build_editable</span><span class="s3">(</span>
+    <span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">, </span><span class="s1">_allow_fallback</span>
+<span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke optional prepare_metadata_for_build_editable 
+ 
+    Implements a fallback by building an editable wheel if the hook isn't 
+    defined, unless _allow_fallback is False in which case HookMissing is 
+    raised. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">prepare_metadata_for_build_editable</span>
+    <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">_allow_fallback</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">HookMissing</span><span class="s3">()</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">build_hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">build_editable</span>
+        <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">HookMissing</span><span class="s3">(</span><span class="s1">hook_name</span><span class="s3">=</span><span class="s5">&quot;build_editable&quot;</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">whl_basename </span><span class="s3">= </span><span class="s1">build_hook</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">_get_wheel_metadata_from_wheel</span><span class="s3">(</span>
+                <span class="s1">whl_basename</span><span class="s3">, </span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span>
+            <span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hook</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">)</span>
+
+
+<span class="s1">WHEEL_BUILT_MARKER </span><span class="s3">= </span><span class="s5">&quot;PYPROJECT_HOOKS_ALREADY_BUILT_WHEEL&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_dist_info_files</span><span class="s3">(</span><span class="s1">whl_zip</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Identify the .dist-info folder inside a wheel ZipFile.&quot;&quot;&quot;</span>
+    <span class="s1">res </span><span class="s3">= []</span>
+    <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">whl_zip</span><span class="s3">.</span><span class="s1">namelist</span><span class="s3">():</span>
+        <span class="s1">m </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s5">r&quot;[^/\\]+-[^/\\]+\.dist-info/&quot;</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">m</span><span class="s3">:</span>
+            <span class="s1">res</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">res</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">res</span>
+    <span class="s2">raise </span><span class="s1">Exception</span><span class="s3">(</span><span class="s5">&quot;No .dist-info folder found in wheel&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_wheel_metadata_from_wheel</span><span class="s3">(</span><span class="s1">whl_basename</span><span class="s3">, </span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Extract the metadata from a wheel. 
+ 
+    Fallback for when the build backend does not 
+    define the 'get_wheel_metadata' hook. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s1">zipfile </span><span class="s2">import </span><span class="s1">ZipFile</span>
+
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">WHEEL_BUILT_MARKER</span><span class="s3">), </span><span class="s5">&quot;wb&quot;</span><span class="s3">):</span>
+        <span class="s2">pass  </span><span class="s4"># Touch marker file</span>
+
+    <span class="s1">whl_file </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">whl_basename</span><span class="s3">)</span>
+    <span class="s2">with </span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">whl_file</span><span class="s3">) </span><span class="s2">as </span><span class="s1">zipf</span><span class="s3">:</span>
+        <span class="s1">dist_info </span><span class="s3">= </span><span class="s1">_dist_info_files</span><span class="s3">(</span><span class="s1">zipf</span><span class="s3">)</span>
+        <span class="s1">zipf</span><span class="s3">.</span><span class="s1">extractall</span><span class="s3">(</span><span class="s1">path</span><span class="s3">=</span><span class="s1">metadata_directory</span><span class="s3">, </span><span class="s1">members</span><span class="s3">=</span><span class="s1">dist_info</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">dist_info</span><span class="s3">[</span><span class="s6">0</span><span class="s3">].</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;/&quot;</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">_find_already_built_wheel</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Check for a wheel already built during the get_wheel_metadata hook.&quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">metadata_directory</span><span class="s3">:</span>
+        <span class="s2">return None</span>
+    <span class="s1">metadata_parent </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">pjoin</span><span class="s3">(</span><span class="s1">metadata_parent</span><span class="s3">, </span><span class="s1">WHEEL_BUILT_MARKER</span><span class="s3">)):</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">whl_files </span><span class="s3">= </span><span class="s1">glob</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">metadata_parent</span><span class="s3">, </span><span class="s5">&quot;*.whl&quot;</span><span class="s3">))</span>
+    <span class="s2">if not </span><span class="s1">whl_files</span><span class="s3">:</span>
+        <span class="s1">print</span><span class="s3">(</span><span class="s5">&quot;Found wheel built marker, but no .whl files&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">whl_files</span><span class="s3">) &gt; </span><span class="s6">1</span><span class="s3">:</span>
+        <span class="s1">print</span><span class="s3">(</span>
+            <span class="s5">&quot;Found multiple .whl files; unspecified behaviour. &quot;</span>
+            <span class="s5">&quot;Will call build_wheel.&quot;</span>
+        <span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s4"># Exactly one .whl file</span>
+    <span class="s2">return </span><span class="s1">whl_files</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">build_wheel</span><span class="s3">(</span><span class="s1">wheel_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">, </span><span class="s1">metadata_directory</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke the mandatory build_wheel hook. 
+ 
+    If a wheel was already built in the 
+    prepare_metadata_for_build_wheel fallback, this 
+    will copy it rather than rebuilding the wheel. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">prebuilt_whl </span><span class="s3">= </span><span class="s1">_find_already_built_wheel</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">prebuilt_whl</span><span class="s3">:</span>
+        <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copy2</span><span class="s3">(</span><span class="s1">prebuilt_whl</span><span class="s3">, </span><span class="s1">wheel_directory</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">prebuilt_whl</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">_build_backend</span><span class="s3">().</span><span class="s1">build_wheel</span><span class="s3">(</span>
+        <span class="s1">wheel_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">, </span><span class="s1">metadata_directory</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">build_editable</span><span class="s3">(</span><span class="s1">wheel_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">, </span><span class="s1">metadata_directory</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke the optional build_editable hook. 
+ 
+    If a wheel was already built in the 
+    prepare_metadata_for_build_editable fallback, this 
+    will copy it rather than rebuilding the wheel. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">build_editable</span>
+    <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">HookMissing</span><span class="s3">()</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">prebuilt_whl </span><span class="s3">= </span><span class="s1">_find_already_built_wheel</span><span class="s3">(</span><span class="s1">metadata_directory</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">prebuilt_whl</span><span class="s3">:</span>
+            <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copy2</span><span class="s3">(</span><span class="s1">prebuilt_whl</span><span class="s3">, </span><span class="s1">wheel_directory</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">prebuilt_whl</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">hook</span><span class="s3">(</span><span class="s1">wheel_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">, </span><span class="s1">metadata_directory</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_requires_for_build_sdist</span><span class="s3">(</span><span class="s1">config_settings</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke the optional get_requires_for_build_wheel hook 
+ 
+    Returns [] if the hook is not defined. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">hook </span><span class="s3">= </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">get_requires_for_build_sdist</span>
+    <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">[]</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hook</span><span class="s3">(</span><span class="s1">config_settings</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_DummyException</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Nothing should ever raise this exception&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">GotUnsupportedOperation</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;For internal use when backend raises UnsupportedOperation&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">traceback</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">traceback </span><span class="s3">= </span><span class="s1">traceback</span>
+
+
+<span class="s2">def </span><span class="s1">build_sdist</span><span class="s3">(</span><span class="s1">sdist_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Invoke the mandatory build_sdist hook.&quot;&quot;&quot;</span>
+    <span class="s1">backend </span><span class="s3">= </span><span class="s1">_build_backend</span><span class="s3">()</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">backend</span><span class="s3">.</span><span class="s1">build_sdist</span><span class="s3">(</span><span class="s1">sdist_directory</span><span class="s3">, </span><span class="s1">config_settings</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">backend</span><span class="s3">, </span><span class="s5">&quot;UnsupportedOperation&quot;</span><span class="s3">, </span><span class="s1">_DummyException</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">GotUnsupportedOperation</span><span class="s3">(</span><span class="s1">traceback</span><span class="s3">.</span><span class="s1">format_exc</span><span class="s3">())</span>
+
+
+<span class="s1">HOOK_NAMES </span><span class="s3">= {</span>
+    <span class="s5">&quot;get_requires_for_build_wheel&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;prepare_metadata_for_build_wheel&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;build_wheel&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;get_requires_for_build_editable&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;prepare_metadata_for_build_editable&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;build_editable&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;get_requires_for_build_sdist&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;build_sdist&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;_supported_features&quot;</span><span class="s3">,</span>
+<span class="s3">}</span>
+
+
+<span class="s2">def </span><span class="s1">main</span><span class="s3">():</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">argv</span><span class="s3">) &lt; </span><span class="s6">3</span><span class="s3">:</span>
+        <span class="s1">sys</span><span class="s3">.</span><span class="s1">exit</span><span class="s3">(</span><span class="s5">&quot;Needs args: hook_name, control_dir&quot;</span><span class="s3">)</span>
+    <span class="s1">hook_name </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">argv</span><span class="s3">[</span><span class="s6">1</span><span class="s3">]</span>
+    <span class="s1">control_dir </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">argv</span><span class="s3">[</span><span class="s6">2</span><span class="s3">]</span>
+    <span class="s2">if </span><span class="s1">hook_name </span><span class="s2">not in </span><span class="s1">HOOK_NAMES</span><span class="s3">:</span>
+        <span class="s1">sys</span><span class="s3">.</span><span class="s1">exit</span><span class="s3">(</span><span class="s5">&quot;Unknown hook: %s&quot; </span><span class="s3">% </span><span class="s1">hook_name</span><span class="s3">)</span>
+
+    <span class="s4"># Remove the parent directory from sys.path to avoid polluting the backend</span>
+    <span class="s4"># import namespace with this directory.</span>
+    <span class="s1">here </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">__file__</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">here </span><span class="s2">in </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">path</span><span class="s3">:</span>
+        <span class="s1">sys</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">here</span><span class="s3">)</span>
+
+    <span class="s1">hook </span><span class="s3">= </span><span class="s1">globals</span><span class="s3">()[</span><span class="s1">hook_name</span><span class="s3">]</span>
+
+    <span class="s1">hook_input </span><span class="s3">= </span><span class="s1">read_json</span><span class="s3">(</span><span class="s1">pjoin</span><span class="s3">(</span><span class="s1">control_dir</span><span class="s3">, </span><span class="s5">&quot;input.json&quot;</span><span class="s3">))</span>
+
+    <span class="s1">json_out </span><span class="s3">= {</span><span class="s5">&quot;unsupported&quot;</span><span class="s3">: </span><span class="s2">False</span><span class="s3">, </span><span class="s5">&quot;return_val&quot;</span><span class="s3">: </span><span class="s2">None</span><span class="s3">}</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;return_val&quot;</span><span class="s3">] = </span><span class="s1">hook</span><span class="s3">(**</span><span class="s1">hook_input</span><span class="s3">[</span><span class="s5">&quot;kwargs&quot;</span><span class="s3">])</span>
+    <span class="s2">except </span><span class="s1">BackendUnavailable </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;no_backend&quot;</span><span class="s3">] = </span><span class="s2">True</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;traceback&quot;</span><span class="s3">] = </span><span class="s1">e</span><span class="s3">.</span><span class="s1">traceback</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;backend_error&quot;</span><span class="s3">] = </span><span class="s1">e</span><span class="s3">.</span><span class="s1">message</span>
+    <span class="s2">except </span><span class="s1">GotUnsupportedOperation </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;unsupported&quot;</span><span class="s3">] = </span><span class="s2">True</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;traceback&quot;</span><span class="s3">] = </span><span class="s1">e</span><span class="s3">.</span><span class="s1">traceback</span>
+    <span class="s2">except </span><span class="s1">HookMissing </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;hook_missing&quot;</span><span class="s3">] = </span><span class="s2">True</span>
+        <span class="s1">json_out</span><span class="s3">[</span><span class="s5">&quot;missing_hook_name&quot;</span><span class="s3">] = </span><span class="s1">e</span><span class="s3">.</span><span class="s1">hook_name </span><span class="s2">or </span><span class="s1">hook_name</span>
+
+    <span class="s1">write_json</span><span class="s3">(</span><span class="s1">json_out</span><span class="s3">, </span><span class="s1">pjoin</span><span class="s3">(</span><span class="s1">control_dir</span><span class="s3">, </span><span class="s5">&quot;output.json&quot;</span><span class="s3">), </span><span class="s1">indent</span><span class="s3">=</span><span class="s6">2</span><span class="s3">)</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ </span><span class="s3">== </span><span class="s5">&quot;__main__&quot;</span><span class="s3">:</span>
+    <span class="s1">main</span><span class="s3">()</span>
+</pre>
+</body>
+</html>

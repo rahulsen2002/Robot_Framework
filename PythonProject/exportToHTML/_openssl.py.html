@@ -1,0 +1,88 @@
+<html>
+<head>
+<title>_openssl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #7a7e85;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_openssl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">ssl</span>
+<span class="s0">import </span><span class="s1">typing</span>
+
+<span class="s2"># candidates based on https://github.com/tiran/certifi-system-store by Christian Heimes</span>
+<span class="s1">_CA_FILE_CANDIDATES </span><span class="s3">= [</span>
+    <span class="s2"># Alpine, Arch, Fedora 34+, OpenWRT, RHEL 9+, BSD</span>
+    <span class="s4">&quot;/etc/ssl/cert.pem&quot;</span><span class="s3">,</span>
+    <span class="s2"># Fedora &lt;= 34, RHEL &lt;= 9, CentOS &lt;= 9</span>
+    <span class="s4">&quot;/etc/pki/tls/cert.pem&quot;</span><span class="s3">,</span>
+    <span class="s2"># Debian, Ubuntu (requires ca-certificates)</span>
+    <span class="s4">&quot;/etc/ssl/certs/ca-certificates.crt&quot;</span><span class="s3">,</span>
+    <span class="s2"># SUSE</span>
+    <span class="s4">&quot;/etc/ssl/ca-bundle.pem&quot;</span><span class="s3">,</span>
+<span class="s3">]</span>
+
+<span class="s1">_HASHED_CERT_FILENAME_RE </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s4">r&quot;^[0-9a-fA-F]{8}\.[0-9]$&quot;</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">contextlib</span><span class="s3">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">_configure_context</span><span class="s3">(</span><span class="s1">ctx</span><span class="s3">: </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLContext</span><span class="s3">) </span><span class="s1">-&gt; typing</span><span class="s3">.</span><span class="s1">Iterator</span><span class="s3">[</span><span class="s0">None</span><span class="s3">]:</span>
+    <span class="s2"># First, check whether the default locations from OpenSSL</span>
+    <span class="s2"># seem like they will give us a usable set of CA certs.</span>
+    <span class="s2"># ssl.get_default_verify_paths already takes care of:</span>
+    <span class="s2"># - getting cafile from either the SSL_CERT_FILE env var</span>
+    <span class="s2">#   or the path configured when OpenSSL was compiled,</span>
+    <span class="s2">#   and verifying that that path exists</span>
+    <span class="s2"># - getting capath from either the SSL_CERT_DIR env var</span>
+    <span class="s2">#   or the path configured when OpenSSL was compiled,</span>
+    <span class="s2">#   and verifying that that path exists</span>
+    <span class="s2"># In addition we'll check whether capath appears to contain certs.</span>
+    <span class="s1">defaults </span><span class="s3">= </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">get_default_verify_paths</span><span class="s3">()</span>
+    <span class="s0">if </span><span class="s1">defaults</span><span class="s3">.</span><span class="s1">cafile </span><span class="s0">or </span><span class="s3">(</span><span class="s1">defaults</span><span class="s3">.</span><span class="s1">capath </span><span class="s0">and </span><span class="s1">_capath_contains_certs</span><span class="s3">(</span><span class="s1">defaults</span><span class="s3">.</span><span class="s1">capath</span><span class="s3">)):</span>
+        <span class="s1">ctx</span><span class="s3">.</span><span class="s1">set_default_verify_paths</span><span class="s3">()</span>
+    <span class="s0">else</span><span class="s3">:</span>
+        <span class="s2"># cafile from OpenSSL doesn't exist</span>
+        <span class="s2"># and capath from OpenSSL doesn't contain certs.</span>
+        <span class="s2"># Let's search other common locations instead.</span>
+        <span class="s0">for </span><span class="s1">cafile </span><span class="s0">in </span><span class="s1">_CA_FILE_CANDIDATES</span><span class="s3">:</span>
+            <span class="s0">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">cafile</span><span class="s3">):</span>
+                <span class="s1">ctx</span><span class="s3">.</span><span class="s1">load_verify_locations</span><span class="s3">(</span><span class="s1">cafile</span><span class="s3">=</span><span class="s1">cafile</span><span class="s3">)</span>
+                <span class="s0">break</span>
+
+    <span class="s0">yield</span>
+
+
+<span class="s0">def </span><span class="s1">_capath_contains_certs</span><span class="s3">(</span><span class="s1">capath</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s5">&quot;&quot;&quot;Check whether capath exists and contains certs in the expected format.&quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">capath</span><span class="s3">):</span>
+        <span class="s0">return False</span>
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">listdir</span><span class="s3">(</span><span class="s1">capath</span><span class="s3">):</span>
+        <span class="s0">if </span><span class="s1">_HASHED_CERT_FILENAME_RE</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+            <span class="s0">return True</span>
+    <span class="s0">return False</span>
+
+
+<span class="s0">def </span><span class="s1">_verify_peercerts_impl</span><span class="s3">(</span>
+    <span class="s1">ssl_context</span><span class="s3">: </span><span class="s1">ssl</span><span class="s3">.</span><span class="s1">SSLContext</span><span class="s3">,</span>
+    <span class="s1">cert_chain</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">],</span>
+    <span class="s1">server_hostname</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s0">None </span><span class="s3">= </span><span class="s0">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s3">:</span>
+    <span class="s2"># This is a no-op because we've enabled SSLContext's built-in</span>
+    <span class="s2"># verification via verify_mode=CERT_REQUIRED, and don't need to repeat it.</span>
+    <span class="s0">pass</span>
+</pre>
+</body>
+</html>

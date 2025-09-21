@@ -1,0 +1,143 @@
+<html>
+<head>
+<title>filewrapper.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+filewrapper.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># SPDX-FileCopyrightText: 2015 Eric Larson</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: Apache-2.0</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">mmap</span>
+<span class="s2">from </span><span class="s1">tempfile </span><span class="s2">import </span><span class="s1">NamedTemporaryFile</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">http</span><span class="s3">.</span><span class="s1">client </span><span class="s2">import </span><span class="s1">HTTPResponse</span>
+
+
+<span class="s2">class </span><span class="s1">CallbackFileWrapper</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Small wrapper around a fp object which will tee everything read into a 
+    buffer, and when that file is closed it will execute a callback with the 
+    contents of that buffer. 
+ 
+    All attributes are proxied to the underlying file object. 
+ 
+    This class uses members with a double underscore (__) leading prefix so as 
+    not to accidentally shadow an attribute. 
+ 
+    The data is stored in a temporary file until it is all available.  As long 
+    as the temporary files directory is disk-based (sometimes it's a 
+    memory-backed-``tmpfs`` on Linux), data will be unloaded to disk if memory 
+    pressure is high.  For small files the disk usually won't be used at all, 
+    it'll all be in the filesystem memory cache, so there should be no 
+    performance impact. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">fp</span><span class="s3">: </span><span class="s1">HTTPResponse</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">[[</span><span class="s1">bytes</span><span class="s3">], </span><span class="s2">None</span><span class="s3">] | </span><span class="s2">None</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__buf </span><span class="s3">= </span><span class="s1">NamedTemporaryFile</span><span class="s3">(</span><span class="s5">&quot;rb+&quot;</span><span class="s3">, </span><span class="s1">delete</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__fp </span><span class="s3">= </span><span class="s1">fp</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__callback </span><span class="s3">= </span><span class="s1">callback</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; Any</span><span class="s3">:</span>
+        <span class="s0"># The vagaries of garbage collection means that self.__fp is</span>
+        <span class="s0"># not always set.  By using __getattribute__ and the private</span>
+        <span class="s0"># name[0] allows looking up the attribute value and raising an</span>
+        <span class="s0"># AttributeError when it doesn't exist. This stop things from</span>
+        <span class="s0"># infinitely recursing calls to getattr in the case where</span>
+        <span class="s0"># self.__fp hasn't been set.</span>
+        <span class="s0">#</span>
+        <span class="s0"># [0] https://docs.python.org/2/reference/expressions.html#atom-identifiers</span>
+        <span class="s1">fp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__getattribute__</span><span class="s3">(</span><span class="s5">&quot;_CallbackFileWrapper__fp&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">fp</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__is_fp_closed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__fp</span><span class="s3">.</span><span class="s1">fp </span><span class="s2">is None</span>
+
+        <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+            <span class="s2">pass</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">closed</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__fp</span><span class="s3">.</span><span class="s1">closed</span>
+            <span class="s2">return </span><span class="s1">closed</span>
+
+        <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+            <span class="s2">pass</span>
+
+        <span class="s0"># We just don't cache it then.</span>
+        <span class="s0"># TODO: Add some logging here...</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">_close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__callback</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__buf</span><span class="s3">.</span><span class="s1">tell</span><span class="s3">() == </span><span class="s6">0</span><span class="s3">:</span>
+                <span class="s0"># Empty file:</span>
+                <span class="s1">result </span><span class="s3">= </span><span class="s7">b&quot;&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s0"># Return the data without actually loading it into memory,</span>
+                <span class="s0"># relying on Python's buffer API and mmap(). mmap() just gives</span>
+                <span class="s0"># a view directly into the filesystem's memory cache, so it</span>
+                <span class="s0"># doesn't result in duplicate memory use.</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">__buf</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s6">0</span><span class="s3">, </span><span class="s6">0</span><span class="s3">)</span>
+                <span class="s1">result </span><span class="s3">= </span><span class="s1">memoryview</span><span class="s3">(</span>
+                    <span class="s1">mmap</span><span class="s3">.</span><span class="s1">mmap</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">__buf</span><span class="s3">.</span><span class="s1">fileno</span><span class="s3">(), </span><span class="s6">0</span><span class="s3">, </span><span class="s1">access</span><span class="s3">=</span><span class="s1">mmap</span><span class="s3">.</span><span class="s1">ACCESS_READ</span><span class="s3">)</span>
+                <span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">__callback</span><span class="s3">(</span><span class="s1">result</span><span class="s3">)</span>
+
+        <span class="s0"># We assign this to None here, because otherwise we can get into</span>
+        <span class="s0"># really tricky problems where the CPython interpreter dead locks</span>
+        <span class="s0"># because the callback is holding a reference to something which</span>
+        <span class="s0"># has a __del__ method. Setting this to None breaks the cycle</span>
+        <span class="s0"># and allows the garbage collector to do it's thing normally.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__callback </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s0"># Closing the temporary file releases memory and frees disk space.</span>
+        <span class="s0"># Important when caching big files.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__buf</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">amt</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s1">data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__fp</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">amt</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">:</span>
+            <span class="s0"># We may be dealing with b'', a sign that things are over:</span>
+            <span class="s0"># it's passed e.g. after we've already closed self.__buf.</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">__buf</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__is_fp_closed</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_close</span><span class="s3">()</span>
+
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">_safe_read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">amt</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s1">data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__fp</span><span class="s3">.</span><span class="s1">_safe_read</span><span class="s3">(</span><span class="s1">amt</span><span class="s3">)  </span><span class="s0"># type: ignore[attr-defined]</span>
+        <span class="s2">if </span><span class="s1">amt </span><span class="s3">== </span><span class="s6">2 </span><span class="s2">and </span><span class="s1">data </span><span class="s3">== </span><span class="s7">b&quot;</span><span class="s2">\r\n</span><span class="s7">&quot;</span><span class="s3">:</span>
+            <span class="s0"># urllib executes this read to toss the CRLF at the end</span>
+            <span class="s0"># of the chunk.</span>
+            <span class="s2">return </span><span class="s1">data</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__buf</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__is_fp_closed</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_close</span><span class="s3">()</span>
+
+        <span class="s2">return </span><span class="s1">data</span>
+</pre>
+</body>
+</html>

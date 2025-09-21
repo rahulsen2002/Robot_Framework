@@ -1,0 +1,168 @@
+<html>
+<head>
+<title>file_cache.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #2aacb8;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+file_cache.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># SPDX-FileCopyrightText: 2015 Eric Larson</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: Apache-2.0</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">hashlib</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">tempfile</span>
+<span class="s2">from </span><span class="s1">textwrap </span><span class="s2">import </span><span class="s1">dedent</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">IO</span><span class="s3">, </span><span class="s1">TYPE_CHECKING</span>
+<span class="s2">from </span><span class="s1">pathlib </span><span class="s2">import </span><span class="s1">Path</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">cache </span><span class="s2">import </span><span class="s1">BaseCache</span><span class="s3">, </span><span class="s1">SeparateBodyBaseCache</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">controller </span><span class="s2">import </span><span class="s1">CacheController</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">datetime</span>
+
+    <span class="s2">from </span><span class="s1">filelock </span><span class="s2">import </span><span class="s1">BaseFileLock</span>
+
+
+<span class="s2">class </span><span class="s1">_FileCacheMixin</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Shared implementation for both FileCache variants.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">directory</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">Path</span><span class="s3">,</span>
+        <span class="s1">forever</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">filemode</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s5">0o0600</span><span class="s3">,</span>
+        <span class="s1">dirmode</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s5">0o0700</span><span class="s3">,</span>
+        <span class="s1">lock_class</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">BaseFileLock</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">lock_class </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">from </span><span class="s1">filelock </span><span class="s2">import </span><span class="s1">FileLock</span>
+
+                <span class="s1">lock_class </span><span class="s3">= </span><span class="s1">FileLock</span>
+        <span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+            <span class="s1">notice </span><span class="s3">= </span><span class="s1">dedent</span><span class="s3">(</span>
+                <span class="s6">&quot;&quot;&quot; 
+            NOTE: In order to use the FileCache you must have 
+            filelock installed. You can install it via pip: 
+              pip install cachecontrol[filecache] 
+            &quot;&quot;&quot;</span>
+            <span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">ImportError</span><span class="s3">(</span><span class="s1">notice</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">directory </span><span class="s3">= </span><span class="s1">directory</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">forever </span><span class="s3">= </span><span class="s1">forever</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filemode </span><span class="s3">= </span><span class="s1">filemode</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dirmode </span><span class="s3">= </span><span class="s1">dirmode</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">lock_class </span><span class="s3">= </span><span class="s1">lock_class</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">encode</span><span class="s3">(</span><span class="s1">x</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">hashlib</span><span class="s3">.</span><span class="s1">sha224</span><span class="s3">(</span><span class="s1">x</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">()).</span><span class="s1">hexdigest</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0"># NOTE: This method should not change as some may depend on it.</span>
+        <span class="s0">#       See: https://github.com/ionrock/cachecontrol/issues/63</span>
+        <span class="s1">hashed </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s1">parts </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">hashed</span><span class="s3">[:</span><span class="s5">5</span><span class="s3">]) + [</span><span class="s1">hashed</span><span class="s3">]</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">directory</span><span class="s3">, *</span><span class="s1">parts</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">get</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bytes </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">key</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s6">&quot;rb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">fh</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">fh</span><span class="s3">.</span><span class="s1">read</span><span class="s3">()</span>
+
+        <span class="s2">except </span><span class="s1">FileNotFoundError</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">set</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">expires</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s1">datetime </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">key</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_write</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_write</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Safely write the data to the given path. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Make sure the directory exists</span>
+        <span class="s1">dirname </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">makedirs</span><span class="s3">(</span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dirmode</span><span class="s3">, </span><span class="s1">exist_ok</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">lock_class</span><span class="s3">(</span><span class="s1">path </span><span class="s3">+ </span><span class="s6">&quot;.lock&quot;</span><span class="s3">):</span>
+            <span class="s0"># Write our actual file</span>
+            <span class="s3">(</span><span class="s1">fd</span><span class="s3">, </span><span class="s1">name</span><span class="s3">) = </span><span class="s1">tempfile</span><span class="s3">.</span><span class="s1">mkstemp</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">=</span><span class="s1">dirname</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">, </span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">finally</span><span class="s3">:</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">close</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chmod</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">filemode</span><span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_delete</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">suffix</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">key</span><span class="s3">) + </span><span class="s1">suffix</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">forever</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">FileNotFoundError</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">FileCache</span><span class="s3">(</span><span class="s1">_FileCacheMixin</span><span class="s3">, </span><span class="s1">BaseCache</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Traditional FileCache: body is stored in memory, so not suitable for large 
+    downloads. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">delete</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_delete</span><span class="s3">(</span><span class="s1">key</span><span class="s3">, </span><span class="s6">&quot;&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">SeparateBodyFileCache</span><span class="s3">(</span><span class="s1">_FileCacheMixin</span><span class="s3">, </span><span class="s1">SeparateBodyBaseCache</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Memory-efficient FileCache: body is stored in a separate file, reducing 
+    peak memory usage. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">get_body</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; IO</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">key</span><span class="s3">) + </span><span class="s6">&quot;.body&quot;</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">open</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s6">&quot;rb&quot;</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">FileNotFoundError</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">set_body</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">body</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">key</span><span class="s3">) + </span><span class="s6">&quot;.body&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_write</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">body</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">delete</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_delete</span><span class="s3">(</span><span class="s1">key</span><span class="s3">, </span><span class="s6">&quot;&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_delete</span><span class="s3">(</span><span class="s1">key</span><span class="s3">, </span><span class="s6">&quot;.body&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">url_to_file_path</span><span class="s3">(</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">filecache</span><span class="s3">: </span><span class="s1">FileCache</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Return the file cache path based on the URL. 
+ 
+    This does not ensure the file exists! 
+    &quot;&quot;&quot;</span>
+    <span class="s1">key </span><span class="s3">= </span><span class="s1">CacheController</span><span class="s3">.</span><span class="s1">cache_url</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">filecache</span><span class="s3">.</span><span class="s1">_fn</span><span class="s3">(</span><span class="s1">key</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

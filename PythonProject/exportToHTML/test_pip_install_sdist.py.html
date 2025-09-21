@@ -1,0 +1,245 @@
+<html>
+<head>
+<title>test_pip_install_sdist.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #5f826b; font-style: italic;}
+.s3 { color: #cf8e6d;}
+.s4 { color: #bcbec4;}
+.s5 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_pip_install_sdist.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># https://github.com/python/mypy/issues/16936</span>
+<span class="s0"># mypy: disable-error-code=&quot;has-type&quot;</span>
+<span class="s2">&quot;&quot;&quot;Integration tests for setuptools that focus on building packages via pip. 
+ 
+The idea behind these tests is not to exhaustively check all the possible 
+combinations of packages, operating systems, supporting libraries, etc, but 
+rather check a limited number of popular packages and how they interact with 
+the exposed public API. This way if any change in API is introduced, we hope to 
+identify backward compatibility problems before publishing a release. 
+ 
+The number of tested packages is purposefully kept small, to minimise duration 
+and the associated maintenance cost (changes in the way these packages define 
+their build process may require changes in the tests). 
+&quot;&quot;&quot;</span>
+
+<span class="s3">import </span><span class="s1">json</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">shutil</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">enum </span><span class="s3">import </span><span class="s1">Enum</span>
+<span class="s3">from </span><span class="s1">glob </span><span class="s3">import </span><span class="s1">glob</span>
+<span class="s3">from </span><span class="s1">hashlib </span><span class="s3">import </span><span class="s1">md5</span>
+<span class="s3">from </span><span class="s1">urllib</span><span class="s4">.</span><span class="s1">request </span><span class="s3">import </span><span class="s1">urlopen</span>
+
+<span class="s3">import </span><span class="s1">pytest</span>
+<span class="s3">from </span><span class="s1">packaging</span><span class="s4">.</span><span class="s1">requirements </span><span class="s3">import </span><span class="s1">Requirement</span>
+
+<span class="s3">from </span><span class="s4">.</span><span class="s1">helpers </span><span class="s3">import </span><span class="s1">Archive</span><span class="s4">, </span><span class="s1">run</span>
+
+<span class="s1">pytestmark </span><span class="s4">= </span><span class="s1">pytest</span><span class="s4">.</span><span class="s1">mark</span><span class="s4">.</span><span class="s1">integration</span>
+
+
+<span class="s4">(</span><span class="s1">LATEST</span><span class="s4">,) = </span><span class="s1">Enum</span><span class="s4">(</span><span class="s5">&quot;v&quot;</span><span class="s4">, </span><span class="s5">&quot;LATEST&quot;</span><span class="s4">)  </span><span class="s0"># type: ignore[misc] # https://github.com/python/mypy/issues/16936</span>
+<span class="s5">&quot;&quot;&quot;Default version to be checked&quot;&quot;&quot;</span>
+<span class="s0"># There are positive and negative aspects of checking the latest version of the</span>
+<span class="s0"># packages.</span>
+<span class="s0"># The main positive aspect is that the latest version might have already</span>
+<span class="s0"># removed the use of APIs deprecated in previous releases of setuptools.</span>
+
+
+<span class="s0"># Packages to be tested:</span>
+<span class="s0"># (Please notice the test environment cannot support EVERY library required for</span>
+<span class="s0"># compiling binary extensions. In Ubuntu/Debian nomenclature, we only assume</span>
+<span class="s0"># that `build-essential`, `gfortran` and `libopenblas-dev` are installed,</span>
+<span class="s0"># due to their relevance to the numerical/scientific programming ecosystem)</span>
+<span class="s1">EXAMPLES </span><span class="s4">= [</span>
+    <span class="s4">(</span><span class="s5">&quot;pip&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># just in case...</span>
+    <span class="s4">(</span><span class="s5">&quot;pytest&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># uses setuptools_scm</span>
+    <span class="s4">(</span><span class="s5">&quot;mypy&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># custom build_py + ext_modules</span>
+    <span class="s0"># --- Popular packages: https://hugovk.github.io/top-pypi-packages/ ---</span>
+    <span class="s4">(</span><span class="s5">&quot;botocore&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),</span>
+    <span class="s4">(</span><span class="s5">&quot;kiwisolver&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># build_ext</span>
+    <span class="s4">(</span><span class="s5">&quot;brotli&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># not in the list but used by urllib3</span>
+    <span class="s4">(</span><span class="s5">&quot;pyyaml&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># cython + custom build_ext + custom distclass</span>
+    <span class="s4">(</span><span class="s5">&quot;charset-normalizer&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),  </span><span class="s0"># uses mypyc, used by aiohttp</span>
+    <span class="s4">(</span><span class="s5">&quot;protobuf&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),</span>
+    <span class="s0"># (&quot;requests&quot;, LATEST),  # XXX: https://github.com/psf/requests/pull/6920</span>
+    <span class="s4">(</span><span class="s5">&quot;celery&quot;</span><span class="s4">, </span><span class="s1">LATEST</span><span class="s4">),</span>
+    <span class="s0"># When adding packages to this list, make sure they expose a `__version__`</span>
+    <span class="s0"># attribute, or modify the tests below</span>
+<span class="s4">]</span>
+
+
+<span class="s0"># Some packages have &quot;optional&quot; dependencies that modify their build behaviour</span>
+<span class="s0"># and are not listed in pyproject.toml, others still use `setup_requires`</span>
+<span class="s1">EXTRA_BUILD_DEPS </span><span class="s4">= {</span>
+    <span class="s5">&quot;pyyaml&quot;</span><span class="s4">: (</span><span class="s5">&quot;Cython&lt;3.0&quot;</span><span class="s4">,),  </span><span class="s0"># constraint to avoid errors</span>
+    <span class="s5">&quot;charset-normalizer&quot;</span><span class="s4">: (</span><span class="s5">&quot;mypy&gt;=1.4.1&quot;</span><span class="s4">,),  </span><span class="s0"># no pyproject.toml available</span>
+<span class="s4">}</span>
+
+<span class="s1">EXTRA_ENV_VARS </span><span class="s4">= {</span>
+    <span class="s5">&quot;pyyaml&quot;</span><span class="s4">: {</span><span class="s5">&quot;PYYAML_FORCE_CYTHON&quot;</span><span class="s4">: </span><span class="s5">&quot;1&quot;</span><span class="s4">},</span>
+    <span class="s5">&quot;charset-normalizer&quot;</span><span class="s4">: {</span><span class="s5">&quot;CHARSET_NORMALIZER_USE_MYPYC&quot;</span><span class="s4">: </span><span class="s5">&quot;1&quot;</span><span class="s4">},</span>
+<span class="s4">}</span>
+
+<span class="s1">IMPORT_NAME </span><span class="s4">= {</span>
+    <span class="s5">&quot;pyyaml&quot;</span><span class="s4">: </span><span class="s5">&quot;yaml&quot;</span><span class="s4">,</span>
+    <span class="s5">&quot;protobuf&quot;</span><span class="s4">: </span><span class="s5">&quot;google.protobuf&quot;</span><span class="s4">,</span>
+<span class="s4">}</span>
+
+
+<span class="s1">VIRTUALENV </span><span class="s4">= (</span><span class="s1">sys</span><span class="s4">.</span><span class="s1">executable</span><span class="s4">, </span><span class="s5">&quot;-m&quot;</span><span class="s4">, </span><span class="s5">&quot;virtualenv&quot;</span><span class="s4">)</span>
+
+
+<span class="s0"># By default, pip will try to build packages in isolation (PEP 517), which</span>
+<span class="s0"># means it will download the previous stable version of setuptools.</span>
+<span class="s0"># `pip` flags can avoid that (the version of setuptools under test</span>
+<span class="s0"># should be the one to be used)</span>
+<span class="s1">INSTALL_OPTIONS </span><span class="s4">= (</span>
+    <span class="s5">&quot;--ignore-installed&quot;</span><span class="s4">,</span>
+    <span class="s5">&quot;--no-build-isolation&quot;</span><span class="s4">,</span>
+    <span class="s0"># Omit &quot;--no-binary :all:&quot; the sdist is supplied directly.</span>
+    <span class="s0"># Allows dependencies as wheels.</span>
+<span class="s4">)</span>
+<span class="s0"># The downside of `--no-build-isolation` is that pip will not download build</span>
+<span class="s0"># dependencies. The test script will have to also handle that.</span>
+
+
+<span class="s4">@</span><span class="s1">pytest</span><span class="s4">.</span><span class="s1">fixture</span>
+<span class="s3">def </span><span class="s1">venv_python</span><span class="s4">(</span><span class="s1">tmp_path</span><span class="s4">):</span>
+    <span class="s1">run</span><span class="s4">([*</span><span class="s1">VIRTUALENV</span><span class="s4">, </span><span class="s1">str</span><span class="s4">(</span><span class="s1">tmp_path </span><span class="s4">/ </span><span class="s5">&quot;.venv&quot;</span><span class="s4">)])</span>
+    <span class="s1">possible_path </span><span class="s4">= (</span><span class="s1">str</span><span class="s4">(</span><span class="s1">p</span><span class="s4">.</span><span class="s1">parent</span><span class="s4">) </span><span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">tmp_path</span><span class="s4">.</span><span class="s1">glob</span><span class="s4">(</span><span class="s5">&quot;.venv/*/python*&quot;</span><span class="s4">))</span>
+    <span class="s3">return </span><span class="s1">shutil</span><span class="s4">.</span><span class="s1">which</span><span class="s4">(</span><span class="s5">&quot;python&quot;</span><span class="s4">, </span><span class="s1">path</span><span class="s4">=</span><span class="s1">os</span><span class="s4">.</span><span class="s1">pathsep</span><span class="s4">.</span><span class="s1">join</span><span class="s4">(</span><span class="s1">possible_path</span><span class="s4">))</span>
+
+
+<span class="s4">@</span><span class="s1">pytest</span><span class="s4">.</span><span class="s1">fixture</span><span class="s4">(</span><span class="s1">autouse</span><span class="s4">=</span><span class="s3">True</span><span class="s4">)</span>
+<span class="s3">def </span><span class="s1">_prepare</span><span class="s4">(</span><span class="s1">tmp_path</span><span class="s4">, </span><span class="s1">venv_python</span><span class="s4">, </span><span class="s1">monkeypatch</span><span class="s4">):</span>
+    <span class="s1">download_path </span><span class="s4">= </span><span class="s1">os</span><span class="s4">.</span><span class="s1">getenv</span><span class="s4">(</span><span class="s5">&quot;DOWNLOAD_PATH&quot;</span><span class="s4">, </span><span class="s1">str</span><span class="s4">(</span><span class="s1">tmp_path</span><span class="s4">))</span>
+    <span class="s1">os</span><span class="s4">.</span><span class="s1">makedirs</span><span class="s4">(</span><span class="s1">download_path</span><span class="s4">, </span><span class="s1">exist_ok</span><span class="s4">=</span><span class="s3">True</span><span class="s4">)</span>
+
+    <span class="s0"># Environment vars used for building some of the packages</span>
+    <span class="s1">monkeypatch</span><span class="s4">.</span><span class="s1">setenv</span><span class="s4">(</span><span class="s5">&quot;USE_MYPYC&quot;</span><span class="s4">, </span><span class="s5">&quot;1&quot;</span><span class="s4">)</span>
+
+    <span class="s3">yield</span>
+
+    <span class="s0"># Let's provide the maximum amount of information possible in the case</span>
+    <span class="s0"># it is necessary to debug the tests directly from the CI logs.</span>
+    <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~&quot;</span><span class="s4">)</span>
+    <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;Temporary directory:&quot;</span><span class="s4">)</span>
+    <span class="s1">map</span><span class="s4">(</span><span class="s1">print</span><span class="s4">, </span><span class="s1">tmp_path</span><span class="s4">.</span><span class="s1">glob</span><span class="s4">(</span><span class="s5">&quot;*&quot;</span><span class="s4">))</span>
+    <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;Virtual environment:&quot;</span><span class="s4">)</span>
+    <span class="s1">run</span><span class="s4">([</span><span class="s1">venv_python</span><span class="s4">, </span><span class="s5">&quot;-m&quot;</span><span class="s4">, </span><span class="s5">&quot;pip&quot;</span><span class="s4">, </span><span class="s5">&quot;freeze&quot;</span><span class="s4">])</span>
+
+
+<span class="s4">@</span><span class="s1">pytest</span><span class="s4">.</span><span class="s1">mark</span><span class="s4">.</span><span class="s1">parametrize</span><span class="s4">((</span><span class="s5">&quot;package&quot;</span><span class="s4">, </span><span class="s5">&quot;version&quot;</span><span class="s4">), </span><span class="s1">EXAMPLES</span><span class="s4">)</span>
+<span class="s4">@</span><span class="s1">pytest</span><span class="s4">.</span><span class="s1">mark</span><span class="s4">.</span><span class="s1">uses_network</span>
+<span class="s3">def </span><span class="s1">test_install_sdist</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">version</span><span class="s4">, </span><span class="s1">tmp_path</span><span class="s4">, </span><span class="s1">venv_python</span><span class="s4">, </span><span class="s1">setuptools_wheel</span><span class="s4">):</span>
+    <span class="s1">venv_pip </span><span class="s4">= (</span><span class="s1">venv_python</span><span class="s4">, </span><span class="s5">&quot;-m&quot;</span><span class="s4">, </span><span class="s5">&quot;pip&quot;</span><span class="s4">)</span>
+    <span class="s1">sdist </span><span class="s4">= </span><span class="s1">retrieve_sdist</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">version</span><span class="s4">, </span><span class="s1">tmp_path</span><span class="s4">)</span>
+    <span class="s1">deps </span><span class="s4">= </span><span class="s1">build_deps</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">sdist</span><span class="s4">)</span>
+    <span class="s3">if </span><span class="s1">deps</span><span class="s4">:</span>
+        <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~&quot;</span><span class="s4">)</span>
+        <span class="s1">print</span><span class="s4">(</span><span class="s5">&quot;Dependencies:&quot;</span><span class="s4">, </span><span class="s1">deps</span><span class="s4">)</span>
+        <span class="s1">run</span><span class="s4">([*</span><span class="s1">venv_pip</span><span class="s4">, </span><span class="s5">&quot;install&quot;</span><span class="s4">, *</span><span class="s1">deps</span><span class="s4">])</span>
+
+    <span class="s0"># Use a virtualenv to simulate PEP 517 isolation</span>
+    <span class="s0"># but install fresh setuptools wheel to ensure the version under development</span>
+    <span class="s1">env </span><span class="s4">= </span><span class="s1">EXTRA_ENV_VARS</span><span class="s4">.</span><span class="s1">get</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, {})</span>
+    <span class="s1">run</span><span class="s4">([*</span><span class="s1">venv_pip</span><span class="s4">, </span><span class="s5">&quot;install&quot;</span><span class="s4">, </span><span class="s5">&quot;--force-reinstall&quot;</span><span class="s4">, </span><span class="s1">setuptools_wheel</span><span class="s4">])</span>
+    <span class="s1">run</span><span class="s4">([*</span><span class="s1">venv_pip</span><span class="s4">, </span><span class="s5">&quot;install&quot;</span><span class="s4">, *</span><span class="s1">INSTALL_OPTIONS</span><span class="s4">, </span><span class="s1">sdist</span><span class="s4">], </span><span class="s1">env</span><span class="s4">)</span>
+
+    <span class="s0"># Execute a simple script to make sure the package was installed correctly</span>
+    <span class="s1">pkg </span><span class="s4">= </span><span class="s1">IMPORT_NAME</span><span class="s4">.</span><span class="s1">get</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">package</span><span class="s4">).</span><span class="s1">replace</span><span class="s4">(</span><span class="s5">&quot;-&quot;</span><span class="s4">, </span><span class="s5">&quot;_&quot;</span><span class="s4">)</span>
+    <span class="s1">script </span><span class="s4">= </span><span class="s5">f&quot;import </span><span class="s3">{</span><span class="s1">pkg</span><span class="s3">}</span><span class="s5">; print(getattr(</span><span class="s3">{</span><span class="s1">pkg</span><span class="s3">}</span><span class="s5">, '__version__', 0))&quot;</span>
+    <span class="s1">run</span><span class="s4">([</span><span class="s1">venv_python</span><span class="s4">, </span><span class="s5">&quot;-c&quot;</span><span class="s4">, </span><span class="s1">script</span><span class="s4">])</span>
+
+
+<span class="s0"># ---- Helper Functions ----</span>
+
+
+<span class="s3">def </span><span class="s1">retrieve_sdist</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">version</span><span class="s4">, </span><span class="s1">tmp_path</span><span class="s4">):</span>
+    <span class="s2">&quot;&quot;&quot;Either use cached sdist file or download it from PyPI&quot;&quot;&quot;</span>
+    <span class="s0"># `pip download` cannot be used due to</span>
+    <span class="s0"># https://github.com/pypa/pip/issues/1884</span>
+    <span class="s0"># https://discuss.python.org/t/pep-625-file-name-of-a-source-distribution/4686</span>
+    <span class="s0"># We have to find the correct distribution file and download it</span>
+    <span class="s1">download_path </span><span class="s4">= </span><span class="s1">os</span><span class="s4">.</span><span class="s1">getenv</span><span class="s4">(</span><span class="s5">&quot;DOWNLOAD_PATH&quot;</span><span class="s4">, </span><span class="s1">str</span><span class="s4">(</span><span class="s1">tmp_path</span><span class="s4">))</span>
+    <span class="s1">dist </span><span class="s4">= </span><span class="s1">retrieve_pypi_sdist_metadata</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">version</span><span class="s4">)</span>
+
+    <span class="s0"># Remove old files to prevent cache to grow indefinitely</span>
+    <span class="s3">for </span><span class="s1">file </span><span class="s3">in </span><span class="s1">glob</span><span class="s4">(</span><span class="s1">os</span><span class="s4">.</span><span class="s1">path</span><span class="s4">.</span><span class="s1">join</span><span class="s4">(</span><span class="s1">download_path</span><span class="s4">, </span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">package</span><span class="s3">}</span><span class="s5">*&quot;</span><span class="s4">)):</span>
+        <span class="s3">if </span><span class="s1">dist</span><span class="s4">[</span><span class="s5">&quot;filename&quot;</span><span class="s4">] != </span><span class="s1">file</span><span class="s4">:</span>
+            <span class="s1">os</span><span class="s4">.</span><span class="s1">unlink</span><span class="s4">(</span><span class="s1">file</span><span class="s4">)</span>
+
+    <span class="s1">dist_file </span><span class="s4">= </span><span class="s1">os</span><span class="s4">.</span><span class="s1">path</span><span class="s4">.</span><span class="s1">join</span><span class="s4">(</span><span class="s1">download_path</span><span class="s4">, </span><span class="s1">dist</span><span class="s4">[</span><span class="s5">&quot;filename&quot;</span><span class="s4">])</span>
+    <span class="s3">if not </span><span class="s1">os</span><span class="s4">.</span><span class="s1">path</span><span class="s4">.</span><span class="s1">exists</span><span class="s4">(</span><span class="s1">dist_file</span><span class="s4">):</span>
+        <span class="s1">download</span><span class="s4">(</span><span class="s1">dist</span><span class="s4">[</span><span class="s5">&quot;url&quot;</span><span class="s4">], </span><span class="s1">dist_file</span><span class="s4">, </span><span class="s1">dist</span><span class="s4">[</span><span class="s5">&quot;md5_digest&quot;</span><span class="s4">])</span>
+    <span class="s3">return </span><span class="s1">dist_file</span>
+
+
+<span class="s3">def </span><span class="s1">retrieve_pypi_sdist_metadata</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">version</span><span class="s4">):</span>
+    <span class="s0"># https://warehouse.pypa.io/api-reference/json.html</span>
+    <span class="s1">id_ </span><span class="s4">= </span><span class="s1">package </span><span class="s3">if </span><span class="s1">version </span><span class="s3">is </span><span class="s1">LATEST </span><span class="s3">else </span><span class="s5">f&quot;</span><span class="s3">{</span><span class="s1">package</span><span class="s3">}</span><span class="s5">/</span><span class="s3">{</span><span class="s1">version</span><span class="s3">}</span><span class="s5">&quot;</span>
+    <span class="s3">with </span><span class="s1">urlopen</span><span class="s4">(</span><span class="s5">f&quot;https://pypi.org/pypi/</span><span class="s3">{</span><span class="s1">id_</span><span class="s3">}</span><span class="s5">/json&quot;</span><span class="s4">) </span><span class="s3">as </span><span class="s1">f</span><span class="s4">:</span>
+        <span class="s1">metadata </span><span class="s4">= </span><span class="s1">json</span><span class="s4">.</span><span class="s1">load</span><span class="s4">(</span><span class="s1">f</span><span class="s4">)</span>
+
+    <span class="s3">if </span><span class="s1">metadata</span><span class="s4">[</span><span class="s5">&quot;info&quot;</span><span class="s4">][</span><span class="s5">&quot;yanked&quot;</span><span class="s4">]:</span>
+        <span class="s3">raise </span><span class="s1">ValueError</span><span class="s4">(</span><span class="s5">f&quot;Release for </span><span class="s3">{</span><span class="s1">package</span><span class="s3">} {</span><span class="s1">version</span><span class="s3">} </span><span class="s5">was yanked&quot;</span><span class="s4">)</span>
+
+    <span class="s1">version </span><span class="s4">= </span><span class="s1">metadata</span><span class="s4">[</span><span class="s5">&quot;info&quot;</span><span class="s4">][</span><span class="s5">&quot;version&quot;</span><span class="s4">]</span>
+    <span class="s1">release </span><span class="s4">= </span><span class="s1">metadata</span><span class="s4">[</span><span class="s5">&quot;releases&quot;</span><span class="s4">][</span><span class="s1">version</span><span class="s4">] </span><span class="s3">if </span><span class="s1">version </span><span class="s3">is </span><span class="s1">LATEST </span><span class="s3">else </span><span class="s1">metadata</span><span class="s4">[</span><span class="s5">&quot;urls&quot;</span><span class="s4">]</span>
+    <span class="s4">(</span><span class="s1">sdist</span><span class="s4">,) = </span><span class="s1">filter</span><span class="s4">(</span><span class="s3">lambda </span><span class="s1">d</span><span class="s4">: </span><span class="s1">d</span><span class="s4">[</span><span class="s5">&quot;packagetype&quot;</span><span class="s4">] == </span><span class="s5">&quot;sdist&quot;</span><span class="s4">, </span><span class="s1">release</span><span class="s4">)</span>
+    <span class="s3">return </span><span class="s1">sdist</span>
+
+
+<span class="s3">def </span><span class="s1">download</span><span class="s4">(</span><span class="s1">url</span><span class="s4">, </span><span class="s1">dest</span><span class="s4">, </span><span class="s1">md5_digest</span><span class="s4">):</span>
+    <span class="s3">with </span><span class="s1">urlopen</span><span class="s4">(</span><span class="s1">url</span><span class="s4">) </span><span class="s3">as </span><span class="s1">f</span><span class="s4">:</span>
+        <span class="s1">data </span><span class="s4">= </span><span class="s1">f</span><span class="s4">.</span><span class="s1">read</span><span class="s4">()</span>
+
+    <span class="s3">assert </span><span class="s1">md5</span><span class="s4">(</span><span class="s1">data</span><span class="s4">).</span><span class="s1">hexdigest</span><span class="s4">() == </span><span class="s1">md5_digest</span>
+
+    <span class="s3">with </span><span class="s1">open</span><span class="s4">(</span><span class="s1">dest</span><span class="s4">, </span><span class="s5">&quot;wb&quot;</span><span class="s4">) </span><span class="s3">as </span><span class="s1">f</span><span class="s4">:</span>
+        <span class="s1">f</span><span class="s4">.</span><span class="s1">write</span><span class="s4">(</span><span class="s1">data</span><span class="s4">)</span>
+
+    <span class="s3">assert </span><span class="s1">os</span><span class="s4">.</span><span class="s1">path</span><span class="s4">.</span><span class="s1">exists</span><span class="s4">(</span><span class="s1">dest</span><span class="s4">)</span>
+
+
+<span class="s3">def </span><span class="s1">build_deps</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, </span><span class="s1">sdist_file</span><span class="s4">):</span>
+    <span class="s2">&quot;&quot;&quot;Find out what are the build dependencies for a package. 
+ 
+    &quot;Manually&quot; install them, since pip will not install build 
+    deps with `--no-build-isolation`. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># delay importing, since pytest discovery phase may hit this file from a</span>
+    <span class="s0"># testenv without tomli</span>
+    <span class="s3">from </span><span class="s1">setuptools</span><span class="s4">.</span><span class="s1">compat</span><span class="s4">.</span><span class="s1">py310 </span><span class="s3">import </span><span class="s1">tomllib</span>
+
+    <span class="s1">archive </span><span class="s4">= </span><span class="s1">Archive</span><span class="s4">(</span><span class="s1">sdist_file</span><span class="s4">)</span>
+    <span class="s1">info </span><span class="s4">= </span><span class="s1">tomllib</span><span class="s4">.</span><span class="s1">loads</span><span class="s4">(</span><span class="s1">_read_pyproject</span><span class="s4">(</span><span class="s1">archive</span><span class="s4">))</span>
+    <span class="s1">deps </span><span class="s4">= </span><span class="s1">info</span><span class="s4">.</span><span class="s1">get</span><span class="s4">(</span><span class="s5">&quot;build-system&quot;</span><span class="s4">, {}).</span><span class="s1">get</span><span class="s4">(</span><span class="s5">&quot;requires&quot;</span><span class="s4">, [])</span>
+    <span class="s1">deps </span><span class="s4">+= </span><span class="s1">EXTRA_BUILD_DEPS</span><span class="s4">.</span><span class="s1">get</span><span class="s4">(</span><span class="s1">package</span><span class="s4">, [])</span>
+    <span class="s0"># Remove setuptools from requirements (and deduplicate)</span>
+    <span class="s1">requirements </span><span class="s4">= {</span><span class="s1">Requirement</span><span class="s4">(</span><span class="s1">d</span><span class="s4">).</span><span class="s1">name</span><span class="s4">: </span><span class="s1">d </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">deps</span><span class="s4">}</span>
+    <span class="s3">return </span><span class="s4">[</span><span class="s1">v </span><span class="s3">for </span><span class="s1">k</span><span class="s4">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">requirements</span><span class="s4">.</span><span class="s1">items</span><span class="s4">() </span><span class="s3">if </span><span class="s1">k </span><span class="s4">!= </span><span class="s5">&quot;setuptools&quot;</span><span class="s4">]</span>
+
+
+<span class="s3">def </span><span class="s1">_read_pyproject</span><span class="s4">(</span><span class="s1">archive</span><span class="s4">):</span>
+    <span class="s1">contents </span><span class="s4">= (</span>
+        <span class="s1">archive</span><span class="s4">.</span><span class="s1">get_content</span><span class="s4">(</span><span class="s1">member</span><span class="s4">)</span>
+        <span class="s3">for </span><span class="s1">member </span><span class="s3">in </span><span class="s1">archive</span>
+        <span class="s3">if </span><span class="s1">os</span><span class="s4">.</span><span class="s1">path</span><span class="s4">.</span><span class="s1">basename</span><span class="s4">(</span><span class="s1">archive</span><span class="s4">.</span><span class="s1">get_name</span><span class="s4">(</span><span class="s1">member</span><span class="s4">)) == </span><span class="s5">&quot;pyproject.toml&quot;</span>
+    <span class="s4">)</span>
+    <span class="s3">return </span><span class="s1">next</span><span class="s4">(</span><span class="s1">contents</span><span class="s4">, </span><span class="s5">&quot;&quot;</span><span class="s4">)</span>
+</pre>
+</body>
+</html>

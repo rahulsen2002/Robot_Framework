@@ -1,0 +1,306 @@
+<html>
+<head>
+<title>_headers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #2aacb8;}
+.s5 { color: #a5c261;}
+.s6 { color: #6aab73;}
+.s7 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_headers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">AnyStr</span><span class="s2">, </span><span class="s1">cast</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">overload</span><span class="s2">, </span><span class="s1">Sequence</span><span class="s2">, </span><span class="s1">Tuple</span><span class="s2">, </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">Union</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_abnf </span><span class="s0">import </span><span class="s1">field_name</span><span class="s2">, </span><span class="s1">field_value</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">bytesify</span><span class="s2">, </span><span class="s1">LocalProtocolError</span><span class="s2">, </span><span class="s1">validate</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">_events </span><span class="s0">import </span><span class="s1">Request</span>
+
+<span class="s0">try</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Literal</span>
+<span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Literal  </span><span class="s3"># type: ignore</span>
+
+<span class="s1">CONTENT_LENGTH_MAX_DIGITS </span><span class="s2">= </span><span class="s4">20  </span><span class="s3"># allow up to 1 billion TB - 1</span>
+
+
+<span class="s3"># Facts</span>
+<span class="s3"># -----</span>
+<span class="s3">#</span>
+<span class="s3"># Headers are:</span>
+<span class="s3">#   keys: case-insensitive ascii</span>
+<span class="s3">#   values: mixture of ascii and raw bytes</span>
+<span class="s3">#</span>
+<span class="s3"># &quot;Historically, HTTP has allowed field content with text in the ISO-8859-1</span>
+<span class="s3"># charset [ISO-8859-1], supporting other charsets only through use of</span>
+<span class="s3"># [RFC2047] encoding.  In practice, most HTTP header field values use only a</span>
+<span class="s3"># subset of the US-ASCII charset [USASCII]. Newly defined header fields SHOULD</span>
+<span class="s3"># limit their field values to US-ASCII octets.  A recipient SHOULD treat other</span>
+<span class="s3"># octets in field content (obs-text) as opaque data.&quot;</span>
+<span class="s3"># And it deprecates all non-ascii values</span>
+<span class="s3">#</span>
+<span class="s3"># Leading/trailing whitespace in header names is forbidden</span>
+<span class="s3">#</span>
+<span class="s3"># Values get leading/trailing whitespace stripped</span>
+<span class="s3">#</span>
+<span class="s3"># Content-Disposition actually needs to contain unicode semantically; to</span>
+<span class="s3"># accomplish this it has a terrifically weird way of encoding the filename</span>
+<span class="s3"># itself as ascii (and even this still has lots of cross-browser</span>
+<span class="s3"># incompatibilities)</span>
+<span class="s3">#</span>
+<span class="s3"># Order is important:</span>
+<span class="s3"># &quot;a proxy MUST NOT change the order of these field values when forwarding a</span>
+<span class="s3"># message&quot;</span>
+<span class="s3"># (and there are several headers where the order indicates a preference)</span>
+<span class="s3">#</span>
+<span class="s3"># Multiple occurences of the same header:</span>
+<span class="s3"># &quot;A sender MUST NOT generate multiple header fields with the same field name</span>
+<span class="s3"># in a message unless either the entire field value for that header field is</span>
+<span class="s3"># defined as a comma-separated list [or the header is Set-Cookie which gets a</span>
+<span class="s3"># special exception]&quot; - RFC 7230. (cookies are in RFC 6265)</span>
+<span class="s3">#</span>
+<span class="s3"># So every header aside from Set-Cookie can be merged by b&quot;, &quot;.join if it</span>
+<span class="s3"># occurs repeatedly. But, of course, they can't necessarily be split by</span>
+<span class="s3"># .split(b&quot;,&quot;), because quoting.</span>
+<span class="s3">#</span>
+<span class="s3"># Given all this mess (case insensitive, duplicates allowed, order is</span>
+<span class="s3"># important, ...), there doesn't appear to be any standard way to handle</span>
+<span class="s3"># headers in Python -- they're almost like dicts, but... actually just</span>
+<span class="s3"># aren't. For now we punt and just use a super simple representation: headers</span>
+<span class="s3"># are a list of pairs</span>
+<span class="s3">#</span>
+<span class="s3">#   [(name1, value1), (name2, value2), ...]</span>
+<span class="s3">#</span>
+<span class="s3"># where all entries are bytestrings, names are lowercase and have no</span>
+<span class="s3"># leading/trailing whitespace, and values are bytestrings with no</span>
+<span class="s3"># leading/trailing whitespace. Searching and updating are done via naive O(n)</span>
+<span class="s3"># methods.</span>
+<span class="s3">#</span>
+<span class="s3"># Maybe a dict-of-lists would be better?</span>
+
+<span class="s1">_content_length_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s5">rb&quot;[0-9]+&quot;</span><span class="s2">)</span>
+<span class="s1">_field_name_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">field_name</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s6">&quot;ascii&quot;</span><span class="s2">))</span>
+<span class="s1">_field_value_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">field_value</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s6">&quot;ascii&quot;</span><span class="s2">))</span>
+
+
+<span class="s0">class </span><span class="s1">Headers</span><span class="s2">(</span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]]):</span>
+    <span class="s7">&quot;&quot;&quot; 
+    A list-like interface that allows iterating over headers as byte-pairs 
+    of (lowercased-name, value). 
+ 
+    Internally we actually store the representation as three-tuples, 
+    including both the raw original casing, in order to preserve casing 
+    over-the-wire, and the lowercased name, for case-insensitive comparisions. 
+ 
+    r = Request( 
+        method=&quot;GET&quot;, 
+        target=&quot;/&quot;, 
+        headers=[(&quot;Host&quot;, &quot;example.org&quot;), (&quot;Connection&quot;, &quot;keep-alive&quot;)], 
+        http_version=&quot;1.1&quot;, 
+    ) 
+    assert r.headers == [ 
+        (b&quot;host&quot;, b&quot;example.org&quot;), 
+        (b&quot;connection&quot;, b&quot;keep-alive&quot;) 
+    ] 
+    assert r.headers.raw_items() == [ 
+        (b&quot;Host&quot;, b&quot;example.org&quot;), 
+        (b&quot;Connection&quot;, b&quot;keep-alive&quot;) 
+    ] 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s2">= </span><span class="s6">&quot;_full_items&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">full_items</span><span class="s2">: </span><span class="s1">List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_full_items </span><span class="s2">= </span><span class="s1">full_items</span>
+
+    <span class="s0">def </span><span class="s1">__bool__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_full_items</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">list</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) == </span><span class="s1">list</span><span class="s2">(</span><span class="s1">other</span><span class="s2">)  </span><span class="s3"># type: ignore</span>
+
+    <span class="s0">def </span><span class="s1">__len__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_full_items</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s6">&quot;&lt;Headers(%s)&gt;&quot; </span><span class="s2">% </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">list</span><span class="s2">(</span><span class="s1">self</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">__getitem__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">idx</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]:  </span><span class="s3"># type: ignore[override]</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_full_items</span><span class="s2">[</span><span class="s1">idx</span><span class="s2">]</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">raw_items</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]]:</span>
+        <span class="s0">return </span><span class="s2">[(</span><span class="s1">raw_name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">) </span><span class="s0">for </span><span class="s1">raw_name</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_full_items</span><span class="s2">]</span>
+
+
+<span class="s1">HeaderTypes </span><span class="s2">= </span><span class="s1">Union</span><span class="s2">[</span>
+    <span class="s1">List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]],</span>
+    <span class="s1">List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]],</span>
+    <span class="s1">List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]],</span>
+    <span class="s1">List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]],</span>
+<span class="s2">]</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">normalize_and_validate</span><span class="s2">(</span><span class="s1">headers</span><span class="s2">: </span><span class="s1">Headers</span><span class="s2">, </span><span class="s1">_parsed</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s0">True</span><span class="s2">]) </span><span class="s1">-&gt; Headers</span><span class="s2">:</span>
+    <span class="s2">...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">normalize_and_validate</span><span class="s2">(</span><span class="s1">headers</span><span class="s2">: </span><span class="s1">HeaderTypes</span><span class="s2">, </span><span class="s1">_parsed</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s0">False</span><span class="s2">]) </span><span class="s1">-&gt; Headers</span><span class="s2">:</span>
+    <span class="s2">...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">normalize_and_validate</span><span class="s2">(</span>
+    <span class="s1">headers</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">Headers</span><span class="s2">, </span><span class="s1">HeaderTypes</span><span class="s2">], </span><span class="s1">_parsed</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+<span class="s2">) </span><span class="s1">-&gt; Headers</span><span class="s2">:</span>
+    <span class="s2">...</span>
+
+
+<span class="s0">def </span><span class="s1">normalize_and_validate</span><span class="s2">(</span>
+    <span class="s1">headers</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">Headers</span><span class="s2">, </span><span class="s1">HeaderTypes</span><span class="s2">], </span><span class="s1">_parsed</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+<span class="s2">) </span><span class="s1">-&gt; Headers</span><span class="s2">:</span>
+    <span class="s1">new_headers </span><span class="s2">= []</span>
+    <span class="s1">seen_content_length </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">saw_transfer_encoding </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s0">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">headers</span><span class="s2">:</span>
+        <span class="s3"># For headers coming out of the parser, we can safely skip some steps,</span>
+        <span class="s3"># because it always returns bytes and has already run these regexes</span>
+        <span class="s3"># over the data:</span>
+        <span class="s0">if not </span><span class="s1">_parsed</span><span class="s2">:</span>
+            <span class="s1">name </span><span class="s2">= </span><span class="s1">bytesify</span><span class="s2">(</span><span class="s1">name</span><span class="s2">)</span>
+            <span class="s1">value </span><span class="s2">= </span><span class="s1">bytesify</span><span class="s2">(</span><span class="s1">value</span><span class="s2">)</span>
+            <span class="s1">validate</span><span class="s2">(</span><span class="s1">_field_name_re</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s6">&quot;Illegal header name {!r}&quot;</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+            <span class="s1">validate</span><span class="s2">(</span><span class="s1">_field_value_re</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s6">&quot;Illegal header value {!r}&quot;</span><span class="s2">, </span><span class="s1">value</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">value</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">)</span>
+
+        <span class="s1">raw_name </span><span class="s2">= </span><span class="s1">name</span>
+        <span class="s1">name </span><span class="s2">= </span><span class="s1">name</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">name </span><span class="s2">== </span><span class="s5">b&quot;content-length&quot;</span><span class="s2">:</span>
+            <span class="s1">lengths </span><span class="s2">= {</span><span class="s1">length</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">() </span><span class="s0">for </span><span class="s1">length </span><span class="s0">in </span><span class="s1">value</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s5">b&quot;,&quot;</span><span class="s2">)}</span>
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">lengths</span><span class="s2">) != </span><span class="s4">1</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">LocalProtocolError</span><span class="s2">(</span><span class="s6">&quot;conflicting Content-Length headers&quot;</span><span class="s2">)</span>
+            <span class="s1">value </span><span class="s2">= </span><span class="s1">lengths</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">()</span>
+            <span class="s1">validate</span><span class="s2">(</span><span class="s1">_content_length_re</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s6">&quot;bad Content-Length&quot;</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">value</span><span class="s2">) &gt; </span><span class="s1">CONTENT_LENGTH_MAX_DIGITS</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">LocalProtocolError</span><span class="s2">(</span><span class="s6">&quot;bad Content-Length&quot;</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">seen_content_length </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s1">seen_content_length </span><span class="s2">= </span><span class="s1">value</span>
+                <span class="s1">new_headers</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">raw_name</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">))</span>
+            <span class="s0">elif </span><span class="s1">seen_content_length </span><span class="s2">!= </span><span class="s1">value</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">LocalProtocolError</span><span class="s2">(</span><span class="s6">&quot;conflicting Content-Length headers&quot;</span><span class="s2">)</span>
+        <span class="s0">elif </span><span class="s1">name </span><span class="s2">== </span><span class="s5">b&quot;transfer-encoding&quot;</span><span class="s2">:</span>
+            <span class="s3"># &quot;A server that receives a request message with a transfer coding</span>
+            <span class="s3"># it does not understand SHOULD respond with 501 (Not</span>
+            <span class="s3"># Implemented).&quot;</span>
+            <span class="s3"># https://tools.ietf.org/html/rfc7230#section-3.3.1</span>
+            <span class="s0">if </span><span class="s1">saw_transfer_encoding</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">LocalProtocolError</span><span class="s2">(</span>
+                    <span class="s6">&quot;multiple Transfer-Encoding headers&quot;</span><span class="s2">, </span><span class="s1">error_status_hint</span><span class="s2">=</span><span class="s4">501</span>
+                <span class="s2">)</span>
+            <span class="s3"># &quot;All transfer-coding names are case-insensitive&quot;</span>
+            <span class="s3"># -- https://tools.ietf.org/html/rfc7230#section-4</span>
+            <span class="s1">value </span><span class="s2">= </span><span class="s1">value</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+            <span class="s0">if </span><span class="s1">value </span><span class="s2">!= </span><span class="s5">b&quot;chunked&quot;</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">LocalProtocolError</span><span class="s2">(</span>
+                    <span class="s6">&quot;Only Transfer-Encoding: chunked is supported&quot;</span><span class="s2">,</span>
+                    <span class="s1">error_status_hint</span><span class="s2">=</span><span class="s4">501</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s1">saw_transfer_encoding </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s1">new_headers</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">raw_name</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">))</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">new_headers</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">raw_name</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">))</span>
+    <span class="s0">return </span><span class="s1">Headers</span><span class="s2">(</span><span class="s1">new_headers</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_comma_header</span><span class="s2">(</span><span class="s1">headers</span><span class="s2">: </span><span class="s1">Headers</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">) </span><span class="s1">-&gt; List</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]:</span>
+    <span class="s3"># Should only be used for headers whose value is a list of</span>
+    <span class="s3"># comma-separated, case-insensitive values.</span>
+    <span class="s3">#</span>
+    <span class="s3"># The header name `name` is expected to be lower-case bytes.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Connection: meets these criteria (including cast insensitivity).</span>
+    <span class="s3">#</span>
+    <span class="s3"># Content-Length: technically is just a single value (1*DIGIT), but the</span>
+    <span class="s3"># standard makes reference to implementations that do multiple values, and</span>
+    <span class="s3"># using this doesn't hurt. Ditto, case insensitivity doesn't things either</span>
+    <span class="s3"># way.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Transfer-Encoding: is more complex (allows for quoted strings), so</span>
+    <span class="s3"># splitting on , is actually wrong. For example, this is legal:</span>
+    <span class="s3">#</span>
+    <span class="s3">#    Transfer-Encoding: foo; options=&quot;1,2&quot;, chunked</span>
+    <span class="s3">#</span>
+    <span class="s3"># and should be parsed as</span>
+    <span class="s3">#</span>
+    <span class="s3">#    foo; options=&quot;1,2&quot;</span>
+    <span class="s3">#    chunked</span>
+    <span class="s3">#</span>
+    <span class="s3"># but this naive function will parse it as</span>
+    <span class="s3">#</span>
+    <span class="s3">#    foo; options=&quot;1</span>
+    <span class="s3">#    2&quot;</span>
+    <span class="s3">#    chunked</span>
+    <span class="s3">#</span>
+    <span class="s3"># However, this is okay because the only thing we are going to do with</span>
+    <span class="s3"># any Transfer-Encoding is reject ones that aren't just &quot;chunked&quot;, so</span>
+    <span class="s3"># both of these will be treated the same anyway.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Expect: the only legal value is the literal string</span>
+    <span class="s3"># &quot;100-continue&quot;. Splitting on commas is harmless. Case insensitive.</span>
+    <span class="s3">#</span>
+    <span class="s1">out</span><span class="s2">: </span><span class="s1">List</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">] = []</span>
+    <span class="s0">for </span><span class="s1">_</span><span class="s2">, </span><span class="s1">found_name</span><span class="s2">, </span><span class="s1">found_raw_value </span><span class="s0">in </span><span class="s1">headers</span><span class="s2">.</span><span class="s1">_full_items</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">found_name </span><span class="s2">== </span><span class="s1">name</span><span class="s2">:</span>
+            <span class="s1">found_raw_value </span><span class="s2">= </span><span class="s1">found_raw_value</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+            <span class="s0">for </span><span class="s1">found_split_value </span><span class="s0">in </span><span class="s1">found_raw_value</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s5">b&quot;,&quot;</span><span class="s2">):</span>
+                <span class="s1">found_split_value </span><span class="s2">= </span><span class="s1">found_split_value</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">()</span>
+                <span class="s0">if </span><span class="s1">found_split_value</span><span class="s2">:</span>
+                    <span class="s1">out</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">found_split_value</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">out</span>
+
+
+<span class="s0">def </span><span class="s1">set_comma_header</span><span class="s2">(</span><span class="s1">headers</span><span class="s2">: </span><span class="s1">Headers</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">new_values</span><span class="s2">: </span><span class="s1">List</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]) </span><span class="s1">-&gt; Headers</span><span class="s2">:</span>
+    <span class="s3"># The header name `name` is expected to be lower-case bytes.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Note that when we store the header we use title casing for the header</span>
+    <span class="s3"># names, in order to match the conventional HTTP header style.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Simply calling `.title()` is a blunt approach, but it's correct</span>
+    <span class="s3"># here given the cases where we're using `set_comma_header`...</span>
+    <span class="s3">#</span>
+    <span class="s3"># Connection, Content-Length, Transfer-Encoding.</span>
+    <span class="s1">new_headers</span><span class="s2">: </span><span class="s1">List</span><span class="s2">[</span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]] = []</span>
+    <span class="s0">for </span><span class="s1">found_raw_name</span><span class="s2">, </span><span class="s1">found_name</span><span class="s2">, </span><span class="s1">found_raw_value </span><span class="s0">in </span><span class="s1">headers</span><span class="s2">.</span><span class="s1">_full_items</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">found_name </span><span class="s2">!= </span><span class="s1">name</span><span class="s2">:</span>
+            <span class="s1">new_headers</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">found_raw_name</span><span class="s2">, </span><span class="s1">found_raw_value</span><span class="s2">))</span>
+    <span class="s0">for </span><span class="s1">new_value </span><span class="s0">in </span><span class="s1">new_values</span><span class="s2">:</span>
+        <span class="s1">new_headers</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">name</span><span class="s2">.</span><span class="s1">title</span><span class="s2">(), </span><span class="s1">new_value</span><span class="s2">))</span>
+    <span class="s0">return </span><span class="s1">normalize_and_validate</span><span class="s2">(</span><span class="s1">new_headers</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">has_expect_100_continue</span><span class="s2">(</span><span class="s1">request</span><span class="s2">: </span><span class="s6">&quot;Request&quot;</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s3"># https://tools.ietf.org/html/rfc7231#section-5.1.1</span>
+    <span class="s3"># &quot;A server that receives a 100-continue expectation in an HTTP/1.0 request</span>
+    <span class="s3"># MUST ignore that expectation.&quot;</span>
+    <span class="s0">if </span><span class="s1">request</span><span class="s2">.</span><span class="s1">http_version </span><span class="s2">&lt; </span><span class="s5">b&quot;1.1&quot;</span><span class="s2">:</span>
+        <span class="s0">return False</span>
+    <span class="s1">expect </span><span class="s2">= </span><span class="s1">get_comma_header</span><span class="s2">(</span><span class="s1">request</span><span class="s2">.</span><span class="s1">headers</span><span class="s2">, </span><span class="s5">b&quot;expect&quot;</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s5">b&quot;100-continue&quot; </span><span class="s0">in </span><span class="s1">expect</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,700 @@
+<html>
+<head>
+<title>_app.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #2aacb8;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_app.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">selectors</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Union</span>
+
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">_logging</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_abnf </span><span class="s0">import </span><span class="s1">ABNF</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_core </span><span class="s0">import </span><span class="s1">WebSocket</span><span class="s2">, </span><span class="s1">getdefaulttimeout</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_exceptions </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">WebSocketConnectionClosedException</span><span class="s2">,</span>
+    <span class="s1">WebSocketException</span><span class="s2">,</span>
+    <span class="s1">WebSocketTimeoutException</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_ssl_compat </span><span class="s0">import </span><span class="s1">SSLEOFError</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_url </span><span class="s0">import </span><span class="s1">parse_url</span>
+
+<span class="s3">&quot;&quot;&quot; 
+_app.py 
+websocket - WebSocket client library for Python 
+ 
+Copyright 2024 engn33r 
+ 
+Licensed under the Apache License, Version 2.0 (the &quot;License&quot;); 
+you may not use this file except in compliance with the License. 
+You may obtain a copy of the License at 
+ 
+    http://www.apache.org/licenses/LICENSE-2.0 
+ 
+Unless required by applicable law or agreed to in writing, software 
+distributed under the License is distributed on an &quot;AS IS&quot; BASIS, 
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
+See the License for the specific language governing permissions and 
+limitations under the License. 
+&quot;&quot;&quot;</span>
+
+<span class="s1">__all__ </span><span class="s2">= [</span><span class="s3">&quot;WebSocketApp&quot;</span><span class="s2">]</span>
+
+<span class="s1">RECONNECT </span><span class="s2">= </span><span class="s4">0</span>
+
+
+<span class="s0">def </span><span class="s1">setReconnect</span><span class="s2">(</span><span class="s1">reconnectInterval</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">global </span><span class="s1">RECONNECT</span>
+    <span class="s1">RECONNECT </span><span class="s2">= </span><span class="s1">reconnectInterval</span>
+
+
+<span class="s0">class </span><span class="s1">DispatcherBase</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    DispatcherBase 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">app</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">ping_timeout</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">app </span><span class="s2">= </span><span class="s1">app</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout </span><span class="s2">= </span><span class="s1">ping_timeout</span>
+
+    <span class="s0">def </span><span class="s1">timeout</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">], </span><span class="s1">callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">)</span>
+        <span class="s1">callback</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">reconnect</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">reconnector</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">_logging</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span>
+                <span class="s3">f&quot;reconnect() - retrying in </span><span class="s0">{</span><span class="s1">seconds</span><span class="s0">} </span><span class="s3">seconds [</span><span class="s0">{</span><span class="s1">len</span><span class="s2">(</span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">stack</span><span class="s2">())</span><span class="s0">} </span><span class="s3">frames in stack]&quot;</span>
+            <span class="s2">)</span>
+            <span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">)</span>
+            <span class="s1">reconnector</span><span class="s2">(</span><span class="s1">reconnecting</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">KeyboardInterrupt </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+            <span class="s1">_logging</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s3">f&quot;User exited </span><span class="s0">{</span><span class="s1">e</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+            <span class="s0">raise </span><span class="s1">e</span>
+
+
+<span class="s0">class </span><span class="s1">Dispatcher</span><span class="s2">(</span><span class="s1">DispatcherBase</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Dispatcher 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">read</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">,</span>
+        <span class="s1">read_callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">,</span>
+        <span class="s1">check_callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">sel </span><span class="s2">= </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">DefaultSelector</span><span class="s2">()</span>
+        <span class="s1">sel</span><span class="s2">.</span><span class="s1">register</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">app</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">EVENT_READ</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">while </span><span class="s1">self</span><span class="s2">.</span><span class="s1">app</span><span class="s2">.</span><span class="s1">keep_running</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">sel</span><span class="s2">.</span><span class="s1">select</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span><span class="s2">):</span>
+                    <span class="s0">if not </span><span class="s1">read_callback</span><span class="s2">():</span>
+                        <span class="s0">break</span>
+                <span class="s1">check_callback</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">sel</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">SSLDispatcher</span><span class="s2">(</span><span class="s1">DispatcherBase</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    SSLDispatcher 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">read</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">,</span>
+        <span class="s1">read_callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">,</span>
+        <span class="s1">check_callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">sock </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">app</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">sock</span>
+        <span class="s1">sel </span><span class="s2">= </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">DefaultSelector</span><span class="s2">()</span>
+        <span class="s1">sel</span><span class="s2">.</span><span class="s1">register</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">EVENT_READ</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">while </span><span class="s1">self</span><span class="s2">.</span><span class="s1">app</span><span class="s2">.</span><span class="s1">keep_running</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">select</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">sel</span><span class="s2">):</span>
+                    <span class="s0">if not </span><span class="s1">read_callback</span><span class="s2">():</span>
+                        <span class="s0">break</span>
+                <span class="s1">check_callback</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">sel</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">select</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sock</span><span class="s2">, </span><span class="s1">sel</span><span class="s2">: </span><span class="s1">selectors</span><span class="s2">.</span><span class="s1">DefaultSelector</span><span class="s2">):</span>
+        <span class="s1">sock </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">app</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">sock</span>
+        <span class="s0">if </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">pending</span><span class="s2">():</span>
+            <span class="s0">return </span><span class="s2">[</span>
+                <span class="s1">sock</span><span class="s2">,</span>
+            <span class="s2">]</span>
+
+        <span class="s1">r </span><span class="s2">= </span><span class="s1">sel</span><span class="s2">.</span><span class="s1">select</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">r</span><span class="s2">) &gt; </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">r</span><span class="s2">[</span><span class="s4">0</span><span class="s2">][</span><span class="s4">0</span><span class="s2">]</span>
+
+
+<span class="s0">class </span><span class="s1">WrappedDispatcher</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    WrappedDispatcher 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">app</span><span class="s2">, </span><span class="s1">ping_timeout</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">], </span><span class="s1">dispatcher</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">app </span><span class="s2">= </span><span class="s1">app</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout </span><span class="s2">= </span><span class="s1">ping_timeout</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">dispatcher </span><span class="s2">= </span><span class="s1">dispatcher</span>
+        <span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s4">2</span><span class="s2">, </span><span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">abort</span><span class="s2">)  </span><span class="s6"># keyboard interrupt</span>
+
+    <span class="s0">def </span><span class="s1">read</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">,</span>
+        <span class="s1">read_callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">,</span>
+        <span class="s1">check_callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">read_callback</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">timeout</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span><span class="s2">, </span><span class="s1">check_callback</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">timeout</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">float</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">timeout</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">reconnect</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">reconnector</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">timeout</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">, </span><span class="s1">reconnector</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">WebSocketApp</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Higher level of APIs are provided. The interface is like JavaScript WebSocket object. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">header</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">list</span><span class="s2">, </span><span class="s1">dict</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s0">None</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_open</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">WebSocket</span><span class="s2">], </span><span class="s0">None</span><span class="s2">]] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_reconnect</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">WebSocket</span><span class="s2">], </span><span class="s0">None</span><span class="s2">]] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_message</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">WebSocket</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">], </span><span class="s0">None</span><span class="s2">]] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_error</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">WebSocket</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">], </span><span class="s0">None</span><span class="s2">]] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_close</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">WebSocket</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">], </span><span class="s0">None</span><span class="s2">]] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_ping</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_pong</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_cont_message</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">keep_running</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">get_mask_key</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">cookie</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">subprotocols</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">list</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">on_data</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">socket</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        WebSocketApp initialization 
+ 
+        Parameters 
+        ---------- 
+        url: str 
+            Websocket url. 
+        header: list or dict or Callable 
+            Custom header for websocket handshake. 
+            If the parameter is a callable object, it is called just before the connection attempt. 
+            The returned dict or list is used as custom header value. 
+            This could be useful in order to properly setup timestamp dependent headers. 
+        on_open: function 
+            Callback object which is called at opening websocket. 
+            on_open has one argument. 
+            The 1st argument is this class object. 
+        on_reconnect: function 
+            Callback object which is called at reconnecting websocket. 
+            on_reconnect has one argument. 
+            The 1st argument is this class object. 
+        on_message: function 
+            Callback object which is called when received data. 
+            on_message has 2 arguments. 
+            The 1st argument is this class object. 
+            The 2nd argument is utf-8 data received from the server. 
+        on_error: function 
+            Callback object which is called when we get error. 
+            on_error has 2 arguments. 
+            The 1st argument is this class object. 
+            The 2nd argument is exception object. 
+        on_close: function 
+            Callback object which is called when connection is closed. 
+            on_close has 3 arguments. 
+            The 1st argument is this class object. 
+            The 2nd argument is close_status_code. 
+            The 3rd argument is close_msg. 
+        on_cont_message: function 
+            Callback object which is called when a continuation 
+            frame is received. 
+            on_cont_message has 3 arguments. 
+            The 1st argument is this class object. 
+            The 2nd argument is utf-8 string which we get from the server. 
+            The 3rd argument is continue flag. if 0, the data continue 
+            to next frame data 
+        on_data: function 
+            Callback object which is called when a message received. 
+            This is called before on_message or on_cont_message, 
+            and then on_message or on_cont_message is called. 
+            on_data has 4 argument. 
+            The 1st argument is this class object. 
+            The 2nd argument is utf-8 string which we get from the server. 
+            The 3rd argument is data type. ABNF.OPCODE_TEXT or ABNF.OPCODE_BINARY will be came. 
+            The 4th argument is continue flag. If 0, the data continue 
+        keep_running: bool 
+            This parameter is obsolete and ignored. 
+        get_mask_key: function 
+            A callable function to get new mask keys, see the 
+            WebSocket.set_mask_key's docstring for more information. 
+        cookie: str 
+            Cookie value. 
+        subprotocols: list 
+            List of available sub protocols. Default is None. 
+        socket: socket 
+            Pre-initialized stream socket. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">url </span><span class="s2">= </span><span class="s1">url</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">header </span><span class="s2">= </span><span class="s1">header </span><span class="s0">if </span><span class="s1">header </span><span class="s0">is not None else </span><span class="s2">[]</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">cookie </span><span class="s2">= </span><span class="s1">cookie</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_open </span><span class="s2">= </span><span class="s1">on_open</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_reconnect </span><span class="s2">= </span><span class="s1">on_reconnect</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_message </span><span class="s2">= </span><span class="s1">on_message</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_data </span><span class="s2">= </span><span class="s1">on_data</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_error </span><span class="s2">= </span><span class="s1">on_error</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_close </span><span class="s2">= </span><span class="s1">on_close</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_ping </span><span class="s2">= </span><span class="s1">on_ping</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_pong </span><span class="s2">= </span><span class="s1">on_pong</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">on_cont_message </span><span class="s2">= </span><span class="s1">on_cont_message</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">get_mask_key </span><span class="s2">= </span><span class="s1">get_mask_key</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">WebSocket</span><span class="s2">] = </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">last_pong_tm </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">] = </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stop_ping</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">] = </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_interval </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">] = </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_payload </span><span class="s2">= </span><span class="s3">&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">subprotocols </span><span class="s2">= </span><span class="s1">subprotocols</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">prepared_socket </span><span class="s2">= </span><span class="s1">socket</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">has_errored </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">has_done_teardown </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">has_done_teardown_lock </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Lock</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">send</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">str</span><span class="s2">], </span><span class="s1">opcode</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_TEXT</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        send message 
+ 
+        Parameters 
+        ---------- 
+        data: str 
+            Message to send. If you set opcode to OPCODE_TEXT, 
+            data must be utf-8 string or unicode. 
+        opcode: int 
+            Operation code of data. Default is OPCODE_TEXT. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock </span><span class="s0">or </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">data</span><span class="s2">, </span><span class="s1">opcode</span><span class="s2">) == </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketConnectionClosedException</span><span class="s2">(</span><span class="s3">&quot;Connection is already closed.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">send_text</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">text_data</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Sends UTF-8 encoded text. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock </span><span class="s0">or </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">text_data</span><span class="s2">, </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_TEXT</span><span class="s2">) == </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketConnectionClosedException</span><span class="s2">(</span><span class="s3">&quot;Connection is already closed.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">send_bytes</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytearray</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Sends a sequence of bytes. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock </span><span class="s0">or </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">data</span><span class="s2">, </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_BINARY</span><span class="s2">) == </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketConnectionClosedException</span><span class="s2">(</span><span class="s3">&quot;Connection is already closed.&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Close websocket connection. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(**</span><span class="s1">kwargs</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">sock </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">_start_ping_thread</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">last_pong_tm </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stop_ping </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">(</span><span class="s1">target</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_send_ping</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread</span><span class="s2">.</span><span class="s1">daemon </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread</span><span class="s2">.</span><span class="s1">start</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">_stop_ping_thread</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stop_ping</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">stop_ping</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread</span><span class="s2">.</span><span class="s1">is_alive</span><span class="s2">():</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_thread</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">3</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">last_pong_tm </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_send_ping</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stop_ping</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_interval</span><span class="s2">) </span><span class="s0">or </span><span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running </span><span class="s0">is False</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s0">while not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stop_ping</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_interval</span><span class="s2">) </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running </span><span class="s0">is True</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">= </span><span class="s1">time</span><span class="s2">.</span><span class="s1">time</span><span class="s2">()</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">_logging</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span><span class="s3">&quot;Sending ping&quot;</span><span class="s2">)</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ping</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_payload</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">Exception </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                    <span class="s1">_logging</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span><span class="s3">f&quot;Failed to send ping: </span><span class="s0">{</span><span class="s1">e</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">run_forever</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sockopt</span><span class="s2">: </span><span class="s1">tuple </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">sslopt</span><span class="s2">: </span><span class="s1">dict </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">ping_interval</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] = </span><span class="s4">0</span><span class="s2">,</span>
+        <span class="s1">ping_timeout</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">ping_payload</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s3">&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">http_proxy_host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">http_proxy_port</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">http_no_proxy</span><span class="s2">: </span><span class="s1">list </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">http_proxy_auth</span><span class="s2">: </span><span class="s1">tuple </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">http_proxy_timeout</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">float</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">skip_utf8_validation</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">origin</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">dispatcher</span><span class="s2">=</span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">suppress_origin</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">proxy_type</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">reconnect</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Run event loop for WebSocket framework. 
+ 
+        This loop is an infinite loop and is alive while websocket is available. 
+ 
+        Parameters 
+        ---------- 
+        sockopt: tuple 
+            Values for socket.setsockopt. 
+            sockopt must be tuple 
+            and each element is argument of sock.setsockopt. 
+        sslopt: dict 
+            Optional dict object for ssl socket option. 
+        ping_interval: int or float 
+            Automatically send &quot;ping&quot; command 
+            every specified period (in seconds). 
+            If set to 0, no ping is sent periodically. 
+        ping_timeout: int or float 
+            Timeout (in seconds) if the pong message is not received. 
+        ping_payload: str 
+            Payload message to send with each ping. 
+        http_proxy_host: str 
+            HTTP proxy host name. 
+        http_proxy_port: int or str 
+            HTTP proxy port. If not set, set to 80. 
+        http_no_proxy: list 
+            Whitelisted host names that don't use the proxy. 
+        http_proxy_timeout: int or float 
+            HTTP proxy timeout, default is 60 sec as per python-socks. 
+        http_proxy_auth: tuple 
+            HTTP proxy auth information. tuple of username and password. Default is None. 
+        skip_utf8_validation: bool 
+            skip utf8 validation. 
+        host: str 
+            update host header. 
+        origin: str 
+            update origin header. 
+        dispatcher: Dispatcher object 
+            customize reading data from socket. 
+        suppress_origin: bool 
+            suppress outputting origin header. 
+        proxy_type: str 
+            type of proxy from: http, socks4, socks4a, socks5, socks5h 
+        reconnect: int 
+            delay interval when reconnecting 
+ 
+        Returns 
+        ------- 
+        teardown: bool 
+            False if the `WebSocketApp` is closed or caught KeyboardInterrupt, 
+            True if any other exception was raised during a loop. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">if </span><span class="s1">reconnect </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">reconnect </span><span class="s2">= </span><span class="s1">RECONNECT</span>
+
+        <span class="s0">if </span><span class="s1">ping_timeout </span><span class="s0">is not None and </span><span class="s1">ping_timeout </span><span class="s2">&lt;= </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketException</span><span class="s2">(</span><span class="s3">&quot;Ensure ping_timeout &gt; 0&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">ping_interval </span><span class="s0">is not None and </span><span class="s1">ping_interval </span><span class="s2">&lt; </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketException</span><span class="s2">(</span><span class="s3">&quot;Ensure ping_interval &gt;= 0&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">ping_timeout </span><span class="s0">and </span><span class="s1">ping_interval </span><span class="s0">and </span><span class="s1">ping_interval </span><span class="s2">&lt;= </span><span class="s1">ping_timeout</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketException</span><span class="s2">(</span><span class="s3">&quot;Ensure ping_interval &gt; ping_timeout&quot;</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">sockopt</span><span class="s2">:</span>
+            <span class="s1">sockopt </span><span class="s2">= ()</span>
+        <span class="s0">if not </span><span class="s1">sslopt</span><span class="s2">:</span>
+            <span class="s1">sslopt </span><span class="s2">= {}</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">WebSocketException</span><span class="s2">(</span><span class="s3">&quot;socket is already opened&quot;</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_interval </span><span class="s2">= </span><span class="s1">ping_interval</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout </span><span class="s2">= </span><span class="s1">ping_timeout</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ping_payload </span><span class="s2">= </span><span class="s1">ping_payload</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">has_done_teardown </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running </span><span class="s2">= </span><span class="s0">True</span>
+
+        <span class="s0">def </span><span class="s1">teardown</span><span class="s2">(</span><span class="s1">close_frame</span><span class="s2">: </span><span class="s1">ABNF </span><span class="s2">= </span><span class="s0">None</span><span class="s2">):</span>
+            <span class="s5">&quot;&quot;&quot; 
+            Tears down the connection. 
+ 
+            Parameters 
+            ---------- 
+            close_frame: ABNF frame 
+                If close_frame is set, the on_close handler is invoked 
+                with the statusCode and reason from the provided frame. 
+            &quot;&quot;&quot;</span>
+
+            <span class="s6"># teardown() is called in many code paths to ensure resources are cleaned up and on_close is fired.</span>
+            <span class="s6"># To ensure the work is only done once, we use this bool and lock.</span>
+            <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">has_done_teardown_lock</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">has_done_teardown</span><span class="s2">:</span>
+                    <span class="s0">return</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">has_done_teardown </span><span class="s2">= </span><span class="s0">True</span>
+
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_stop_ping_thread</span><span class="s2">()</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running </span><span class="s2">= </span><span class="s0">False</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s1">close_status_code</span><span class="s2">, </span><span class="s1">close_reason </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_get_close_args</span><span class="s2">(</span>
+                <span class="s1">close_frame </span><span class="s0">if </span><span class="s1">close_frame </span><span class="s0">else None</span>
+            <span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">sock </span><span class="s2">= </span><span class="s0">None</span>
+
+            <span class="s6"># Finally call the callback AFTER all teardown is complete</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_close</span><span class="s2">, </span><span class="s1">close_status_code</span><span class="s2">, </span><span class="s1">close_reason</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">setSock</span><span class="s2">(</span><span class="s1">reconnecting</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">reconnecting </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">shutdown</span><span class="s2">()</span>
+
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">sock </span><span class="s2">= </span><span class="s1">WebSocket</span><span class="s2">(</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">get_mask_key</span><span class="s2">,</span>
+                <span class="s1">sockopt</span><span class="s2">=</span><span class="s1">sockopt</span><span class="s2">,</span>
+                <span class="s1">sslopt</span><span class="s2">=</span><span class="s1">sslopt</span><span class="s2">,</span>
+                <span class="s1">fire_cont_frame</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_cont_message </span><span class="s0">is not None</span><span class="s2">,</span>
+                <span class="s1">skip_utf8_validation</span><span class="s2">=</span><span class="s1">skip_utf8_validation</span><span class="s2">,</span>
+                <span class="s1">enable_multithread</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">settimeout</span><span class="s2">(</span><span class="s1">getdefaulttimeout</span><span class="s2">())</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">header </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">header</span><span class="s2">() </span><span class="s0">if </span><span class="s1">callable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">header</span><span class="s2">) </span><span class="s0">else </span><span class="s1">self</span><span class="s2">.</span><span class="s1">header</span>
+
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">connect</span><span class="s2">(</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">url</span><span class="s2">,</span>
+                    <span class="s1">header</span><span class="s2">=</span><span class="s1">header</span><span class="s2">,</span>
+                    <span class="s1">cookie</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">cookie</span><span class="s2">,</span>
+                    <span class="s1">http_proxy_host</span><span class="s2">=</span><span class="s1">http_proxy_host</span><span class="s2">,</span>
+                    <span class="s1">http_proxy_port</span><span class="s2">=</span><span class="s1">http_proxy_port</span><span class="s2">,</span>
+                    <span class="s1">http_no_proxy</span><span class="s2">=</span><span class="s1">http_no_proxy</span><span class="s2">,</span>
+                    <span class="s1">http_proxy_auth</span><span class="s2">=</span><span class="s1">http_proxy_auth</span><span class="s2">,</span>
+                    <span class="s1">http_proxy_timeout</span><span class="s2">=</span><span class="s1">http_proxy_timeout</span><span class="s2">,</span>
+                    <span class="s1">subprotocols</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">subprotocols</span><span class="s2">,</span>
+                    <span class="s1">host</span><span class="s2">=</span><span class="s1">host</span><span class="s2">,</span>
+                    <span class="s1">origin</span><span class="s2">=</span><span class="s1">origin</span><span class="s2">,</span>
+                    <span class="s1">suppress_origin</span><span class="s2">=</span><span class="s1">suppress_origin</span><span class="s2">,</span>
+                    <span class="s1">proxy_type</span><span class="s2">=</span><span class="s1">proxy_type</span><span class="s2">,</span>
+                    <span class="s1">socket</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">prepared_socket</span><span class="s2">,</span>
+                <span class="s2">)</span>
+
+                <span class="s1">_logging</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s3">&quot;Websocket connected&quot;</span><span class="s2">)</span>
+
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_interval</span><span class="s2">:</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_start_ping_thread</span><span class="s2">()</span>
+
+                <span class="s0">if </span><span class="s1">reconnecting </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_reconnect</span><span class="s2">:</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_reconnect</span><span class="s2">)</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_open</span><span class="s2">)</span>
+
+                <span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">read</span><span class="s2">, </span><span class="s1">check</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s2">(</span>
+                <span class="s1">WebSocketConnectionClosedException</span><span class="s2">,</span>
+                <span class="s1">ConnectionRefusedError</span><span class="s2">,</span>
+                <span class="s1">KeyboardInterrupt</span><span class="s2">,</span>
+                <span class="s1">SystemExit</span><span class="s2">,</span>
+                <span class="s1">Exception</span><span class="s2">,</span>
+            <span class="s2">) </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                <span class="s1">handleDisconnect</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">reconnecting</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">read</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s1">teardown</span><span class="s2">()</span>
+
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">op_code</span><span class="s2">, </span><span class="s1">frame </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">recv_data_frame</span><span class="s2">(</span><span class="s0">True</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s2">(</span>
+                <span class="s1">WebSocketConnectionClosedException</span><span class="s2">,</span>
+                <span class="s1">KeyboardInterrupt</span><span class="s2">,</span>
+                <span class="s1">SSLEOFError</span><span class="s2">,</span>
+            <span class="s2">) </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">custom_dispatcher</span><span class="s2">:</span>
+                    <span class="s0">return </span><span class="s1">handleDisconnect</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">reconnect</span><span class="s2">))</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">e</span>
+
+            <span class="s0">if </span><span class="s1">op_code </span><span class="s2">== </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_CLOSE</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s1">teardown</span><span class="s2">(</span><span class="s1">frame</span><span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">op_code </span><span class="s2">== </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_PING</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_ping</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">op_code </span><span class="s2">== </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_PONG</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">last_pong_tm </span><span class="s2">= </span><span class="s1">time</span><span class="s2">.</span><span class="s1">time</span><span class="s2">()</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_pong</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">op_code </span><span class="s2">== </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_CONT </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_cont_message</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_data</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">opcode</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">fin</span><span class="s2">)</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_cont_message</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">fin</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">data </span><span class="s2">= </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">data</span>
+                <span class="s0">if </span><span class="s1">op_code </span><span class="s2">== </span><span class="s1">ABNF</span><span class="s2">.</span><span class="s1">OPCODE_TEXT </span><span class="s0">and not </span><span class="s1">skip_utf8_validation</span><span class="s2">:</span>
+                    <span class="s1">data </span><span class="s2">= </span><span class="s1">data</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s3">&quot;utf-8&quot;</span><span class="s2">)</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_data</span><span class="s2">, </span><span class="s1">data</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">opcode</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_message</span><span class="s2">, </span><span class="s1">data</span><span class="s2">)</span>
+
+            <span class="s0">return True</span>
+
+        <span class="s0">def </span><span class="s1">check</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span><span class="s2">:</span>
+                <span class="s1">has_timeout_expired </span><span class="s2">= (</span>
+                    <span class="s1">time</span><span class="s2">.</span><span class="s1">time</span><span class="s2">() - </span><span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">&gt; </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span>
+                <span class="s2">)</span>
+                <span class="s1">has_pong_not_arrived_after_last_ping </span><span class="s2">= (</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">last_pong_tm </span><span class="s2">- </span><span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">&lt; </span><span class="s4">0</span>
+                <span class="s2">)</span>
+                <span class="s1">has_pong_arrived_too_late </span><span class="s2">= (</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">last_pong_tm </span><span class="s2">- </span><span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm </span><span class="s2">&gt; </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ping_timeout</span>
+                <span class="s2">)</span>
+
+                <span class="s0">if </span><span class="s2">(</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">last_ping_tm</span>
+                    <span class="s0">and </span><span class="s1">has_timeout_expired</span>
+                    <span class="s0">and </span><span class="s2">(</span>
+                        <span class="s1">has_pong_not_arrived_after_last_ping</span>
+                        <span class="s0">or </span><span class="s1">has_pong_arrived_too_late</span>
+                    <span class="s2">)</span>
+                <span class="s2">):</span>
+                    <span class="s0">raise </span><span class="s1">WebSocketTimeoutException</span><span class="s2">(</span><span class="s3">&quot;ping/pong timed out&quot;</span><span class="s2">)</span>
+            <span class="s0">return True</span>
+
+        <span class="s0">def </span><span class="s1">handleDisconnect</span><span class="s2">(</span>
+            <span class="s1">e</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span>
+                <span class="s1">WebSocketConnectionClosedException</span><span class="s2">,</span>
+                <span class="s1">ConnectionRefusedError</span><span class="s2">,</span>
+                <span class="s1">KeyboardInterrupt</span><span class="s2">,</span>
+                <span class="s1">SystemExit</span><span class="s2">,</span>
+                <span class="s1">Exception</span><span class="s2">,</span>
+            <span class="s2">],</span>
+            <span class="s1">reconnecting</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">has_errored </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_stop_ping_thread</span><span class="s2">()</span>
+            <span class="s0">if not </span><span class="s1">reconnecting</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_error</span><span class="s2">, </span><span class="s1">e</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, (</span><span class="s1">KeyboardInterrupt</span><span class="s2">, </span><span class="s1">SystemExit</span><span class="s2">)):</span>
+                <span class="s1">teardown</span><span class="s2">()</span>
+                <span class="s6"># Propagate further</span>
+                <span class="s0">raise</span>
+
+            <span class="s0">if </span><span class="s1">reconnect</span><span class="s2">:</span>
+                <span class="s1">_logging</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">e</span><span class="s0">} </span><span class="s3">- reconnect&quot;</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">custom_dispatcher</span><span class="s2">:</span>
+                    <span class="s1">_logging</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span>
+                        <span class="s3">f&quot;Calling custom dispatcher reconnect [</span><span class="s0">{</span><span class="s1">len</span><span class="s2">(</span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">stack</span><span class="s2">())</span><span class="s0">} </span><span class="s3">frames in stack]&quot;</span>
+                    <span class="s2">)</span>
+                    <span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">reconnect</span><span class="s2">(</span><span class="s1">reconnect</span><span class="s2">, </span><span class="s1">setSock</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">_logging</span><span class="s2">.</span><span class="s1">error</span><span class="s2">(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">e</span><span class="s0">} </span><span class="s3">- goodbye&quot;</span><span class="s2">)</span>
+                <span class="s1">teardown</span><span class="s2">()</span>
+
+        <span class="s1">custom_dispatcher </span><span class="s2">= </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">dispatcher</span><span class="s2">)</span>
+        <span class="s1">dispatcher </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">create_dispatcher</span><span class="s2">(</span>
+            <span class="s1">ping_timeout</span><span class="s2">, </span><span class="s1">dispatcher</span><span class="s2">, </span><span class="s1">parse_url</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">url</span><span class="s2">)[</span><span class="s4">3</span><span class="s2">]</span>
+        <span class="s2">)</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">setSock</span><span class="s2">()</span>
+            <span class="s0">if not </span><span class="s1">custom_dispatcher </span><span class="s0">and </span><span class="s1">reconnect</span><span class="s2">:</span>
+                <span class="s0">while </span><span class="s1">self</span><span class="s2">.</span><span class="s1">keep_running</span><span class="s2">:</span>
+                    <span class="s1">_logging</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span>
+                        <span class="s3">f&quot;Calling dispatcher reconnect [</span><span class="s0">{</span><span class="s1">len</span><span class="s2">(</span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">stack</span><span class="s2">())</span><span class="s0">} </span><span class="s3">frames in stack]&quot;</span>
+                    <span class="s2">)</span>
+                    <span class="s1">dispatcher</span><span class="s2">.</span><span class="s1">reconnect</span><span class="s2">(</span><span class="s1">reconnect</span><span class="s2">, </span><span class="s1">setSock</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">, </span><span class="s1">Exception</span><span class="s2">) </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+            <span class="s1">_logging</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span><span class="s3">f&quot;tearing down on exception </span><span class="s0">{</span><span class="s1">e</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+            <span class="s1">teardown</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">if not </span><span class="s1">custom_dispatcher</span><span class="s2">:</span>
+                <span class="s6"># Ensure teardown was called before returning from run_forever</span>
+                <span class="s1">teardown</span><span class="s2">()</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">has_errored</span>
+
+    <span class="s0">def </span><span class="s1">create_dispatcher</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">ping_timeout</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">],</span>
+        <span class="s1">dispatcher</span><span class="s2">: </span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">DispatcherBase</span><span class="s2">] = </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">is_ssl</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; Union</span><span class="s2">[</span><span class="s1">Dispatcher</span><span class="s2">, </span><span class="s1">SSLDispatcher</span><span class="s2">, </span><span class="s1">WrappedDispatcher</span><span class="s2">]:</span>
+        <span class="s0">if </span><span class="s1">dispatcher</span><span class="s2">:  </span><span class="s6"># If custom dispatcher is set, use WrappedDispatcher</span>
+            <span class="s0">return </span><span class="s1">WrappedDispatcher</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">ping_timeout</span><span class="s2">, </span><span class="s1">dispatcher</span><span class="s2">)</span>
+        <span class="s1">timeout </span><span class="s2">= </span><span class="s1">ping_timeout </span><span class="s0">or </span><span class="s4">10</span>
+        <span class="s0">if </span><span class="s1">is_ssl</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">SSLDispatcher</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">Dispatcher</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_get_close_args</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">close_frame</span><span class="s2">: </span><span class="s1">ABNF</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        _get_close_args extracts the close code and reason from the close body 
+        if it exists (RFC6455 says WebSocket Connection Close Code is optional) 
+        &quot;&quot;&quot;</span>
+        <span class="s6"># Need to catch the case where close_frame is None</span>
+        <span class="s6"># Otherwise the following if statement causes an error</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_close </span><span class="s0">or not </span><span class="s1">close_frame</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]</span>
+
+        <span class="s6"># Extract close frame status code</span>
+        <span class="s0">if </span><span class="s1">close_frame</span><span class="s2">.</span><span class="s1">data </span><span class="s0">and </span><span class="s1">len</span><span class="s2">(</span><span class="s1">close_frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">) &gt;= </span><span class="s4">2</span><span class="s2">:</span>
+            <span class="s1">close_status_code </span><span class="s2">= </span><span class="s4">256 </span><span class="s2">* </span><span class="s1">int</span><span class="s2">(</span><span class="s1">close_frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">[</span><span class="s4">0</span><span class="s2">]) + </span><span class="s1">int</span><span class="s2">(</span>
+                <span class="s1">close_frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">[</span><span class="s4">1</span><span class="s2">]</span>
+            <span class="s2">)</span>
+            <span class="s1">reason </span><span class="s2">= </span><span class="s1">close_frame</span><span class="s2">.</span><span class="s1">data</span><span class="s2">[</span><span class="s4">2</span><span class="s2">:]</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">reason</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">):</span>
+                <span class="s1">reason </span><span class="s2">= </span><span class="s1">reason</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s3">&quot;utf-8&quot;</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s2">[</span><span class="s1">close_status_code</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">]</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s6"># Most likely reached this because len(close_frame_data.data) &lt; 2</span>
+            <span class="s0">return </span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">_callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">callback</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">callback</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">)</span>
+
+            <span class="s0">except </span><span class="s1">Exception </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                <span class="s1">_logging</span><span class="s2">.</span><span class="s1">error</span><span class="s2">(</span><span class="s3">f&quot;error from callback </span><span class="s0">{</span><span class="s1">callback</span><span class="s0">}</span><span class="s3">: </span><span class="s0">{</span><span class="s1">e</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">on_error</span><span class="s2">:</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">on_error</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">e</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

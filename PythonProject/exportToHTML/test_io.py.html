@@ -1,0 +1,545 @@
+<html>
+<head>
+<title>test_io.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #a5c261;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_io.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">random</span>
+<span class="s0">import </span><span class="s1">select</span>
+<span class="s0">import </span><span class="s1">socket </span><span class="s0">as </span><span class="s1">stdlib_socket</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Awaitable</span><span class="s2">, </span><span class="s1">Callable</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">suppress</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">TypeVar</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">... </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">...</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">assert_checkpoints</span><span class="s2">, </span><span class="s1">wait_all_tasks_blocked</span>
+
+<span class="s3"># Cross-platform tests for IO handling</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Generator</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">ParamSpec</span>
+
+    <span class="s1">ArgsT </span><span class="s2">= </span><span class="s1">ParamSpec</span><span class="s2">(</span><span class="s4">&quot;ArgsT&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s5">b&quot;x&quot; </span><span class="s2">* </span><span class="s6">65536</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">BlockingIOError</span><span class="s2">:</span>
+        <span class="s0">pass</span>
+
+
+<span class="s0">def </span><span class="s1">drain_socket</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s1">sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s6">65536</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">BlockingIOError</span><span class="s2">:</span>
+        <span class="s0">pass</span>
+
+
+<span class="s1">WaitSocket </span><span class="s2">= </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">], </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]]</span>
+<span class="s1">SocketPair </span><span class="s2">= </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">]</span>
+<span class="s1">RetT </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;RetT&quot;</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">fixture</span>
+<span class="s0">def </span><span class="s1">socketpair</span><span class="s2">() </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">SocketPair</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s1">pair </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s0">for </span><span class="s1">sock </span><span class="s0">in </span><span class="s1">pair</span><span class="s2">:</span>
+        <span class="s1">sock</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s0">yield </span><span class="s1">pair</span>
+    <span class="s0">for </span><span class="s1">sock </span><span class="s0">in </span><span class="s1">pair</span><span class="s2">:</span>
+        <span class="s1">sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">also_using_fileno</span><span class="s2">(</span>
+    <span class="s1">fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket </span><span class="s2">| </span><span class="s1">int</span><span class="s2">], </span><span class="s1">RetT</span><span class="s2">],</span>
+<span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">], </span><span class="s1">RetT</span><span class="s2">]]:</span>
+    <span class="s0">def </span><span class="s1">fileno_wrapper</span><span class="s2">(</span><span class="s1">fileobj</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">) </span><span class="s1">-&gt; RetT</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">fn</span><span class="s2">(</span><span class="s1">fileobj</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+
+    <span class="s1">name </span><span class="s2">= </span><span class="s4">f&quot;&lt;</span><span class="s0">{</span><span class="s1">fn</span><span class="s2">.</span><span class="s1">__name__</span><span class="s0">} </span><span class="s4">on fileno&gt;&quot;</span>
+    <span class="s1">fileno_wrapper</span><span class="s2">.</span><span class="s1">__name__ </span><span class="s2">= </span><span class="s1">fileno_wrapper</span><span class="s2">.</span><span class="s1">__qualname__ </span><span class="s2">= </span><span class="s1">name</span>
+    <span class="s0">return </span><span class="s2">[</span><span class="s1">fn</span><span class="s2">, </span><span class="s1">fileno_wrapper</span><span class="s2">]</span>
+
+
+<span class="s3"># Decorators that feed in different settings for wait_readable / wait_writable</span>
+<span class="s3"># / notify_closing.</span>
+<span class="s3"># Note that if you use all three decorators on the same test, it will run all</span>
+<span class="s3"># N**3 *combinations*</span>
+<span class="s1">read_socket_test </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+    <span class="s4">&quot;wait_readable&quot;</span><span class="s2">,</span>
+    <span class="s1">also_using_fileno</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">),</span>
+    <span class="s1">ids</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">fn</span><span class="s2">: </span><span class="s1">fn</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s1">write_socket_test </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+    <span class="s4">&quot;wait_writable&quot;</span><span class="s2">,</span>
+    <span class="s1">also_using_fileno</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">),</span>
+    <span class="s1">ids</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">fn</span><span class="s2">: </span><span class="s1">fn</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s1">notify_closing_test </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+    <span class="s4">&quot;notify_closing&quot;</span><span class="s2">,</span>
+    <span class="s1">also_using_fileno</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">notify_closing</span><span class="s2">),</span>
+    <span class="s1">ids</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">fn</span><span class="s2">: </span><span class="s1">fn</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+
+<span class="s3"># XX These tests are all a bit dicey because they can't distinguish between</span>
+<span class="s3"># wait_on_{read,writ}able blocking the way it should, versus blocking</span>
+<span class="s3"># momentarily and then immediately resuming.</span>
+<span class="s2">@</span><span class="s1">read_socket_test</span>
+<span class="s2">@</span><span class="s1">write_socket_test</span>
+<span class="s0">async def </span><span class="s1">test_wait_basic</span><span class="s2">(</span>
+    <span class="s1">socketpair</span><span class="s2">: </span><span class="s1">SocketPair</span><span class="s2">,</span>
+    <span class="s1">wait_readable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+    <span class="s1">wait_writable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">= </span><span class="s1">socketpair</span>
+
+    <span class="s3"># They start out writable()</span>
+    <span class="s0">with </span><span class="s1">assert_checkpoints</span><span class="s2">():</span>
+        <span class="s0">await </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+
+    <span class="s3"># But readable() blocks until data arrives</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">async def </span><span class="s1">block_on_read</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">assert_checkpoints</span><span class="s2">():</span>
+                <span class="s0">await </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;cancelled&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;readable&quot;</span><span class="s2">)</span>
+            <span class="s0">assert </span><span class="s1">a</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s6">10</span><span class="s2">) == </span><span class="s5">b&quot;x&quot;</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">block_on_read</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== []</span>
+        <span class="s1">b</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s5">b&quot;x&quot;</span><span class="s2">)</span>
+
+    <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+
+    <span class="s3"># Now writable will block, but readable won't</span>
+    <span class="s0">with </span><span class="s1">assert_checkpoints</span><span class="s2">():</span>
+        <span class="s0">await </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">b</span><span class="s2">)</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">async def </span><span class="s1">block_on_write</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">assert_checkpoints</span><span class="s2">():</span>
+                <span class="s0">await </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;cancelled&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;writable&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">block_on_write</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== []</span>
+        <span class="s1">drain_socket</span><span class="s2">(</span><span class="s1">b</span><span class="s2">)</span>
+
+    <span class="s3"># check cancellation</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">block_on_read</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s4">&quot;cancelled&quot;</span><span class="s2">]</span>
+
+    <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">block_on_write</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s4">&quot;cancelled&quot;</span><span class="s2">]</span>
+
+
+<span class="s2">@</span><span class="s1">read_socket_test</span>
+<span class="s0">async def </span><span class="s1">test_double_read</span><span class="s2">(</span><span class="s1">socketpair</span><span class="s2">: </span><span class="s1">SocketPair</span><span class="s2">, </span><span class="s1">wait_readable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">_b </span><span class="s2">= </span><span class="s1">socketpair</span>
+
+    <span class="s3"># You can't have two tasks trying to read from a socket at the same time</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BusyResourceError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">write_socket_test</span>
+<span class="s0">async def </span><span class="s1">test_double_write</span><span class="s2">(</span><span class="s1">socketpair</span><span class="s2">: </span><span class="s1">SocketPair</span><span class="s2">, </span><span class="s1">wait_writable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">_b </span><span class="s2">= </span><span class="s1">socketpair</span>
+
+    <span class="s3"># You can't have two tasks trying to write to a socket at the same time</span>
+    <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_writable</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BusyResourceError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">read_socket_test</span>
+<span class="s2">@</span><span class="s1">write_socket_test</span>
+<span class="s2">@</span><span class="s1">notify_closing_test</span>
+<span class="s0">async def </span><span class="s1">test_interrupted_by_close</span><span class="s2">(</span>
+    <span class="s1">socketpair</span><span class="s2">: </span><span class="s1">SocketPair</span><span class="s2">,</span>
+    <span class="s1">wait_readable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+    <span class="s1">wait_writable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+    <span class="s1">notify_closing</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">], </span><span class="s1">object</span><span class="s2">],</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">_b </span><span class="s2">= </span><span class="s1">socketpair</span>
+
+    <span class="s0">async def </span><span class="s1">reader</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">writer</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+
+    <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">reader</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">writer</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">notify_closing</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">read_socket_test</span>
+<span class="s2">@</span><span class="s1">write_socket_test</span>
+<span class="s0">async def </span><span class="s1">test_socket_simultaneous_read_write</span><span class="s2">(</span>
+    <span class="s1">socketpair</span><span class="s2">: </span><span class="s1">SocketPair</span><span class="s2">,</span>
+    <span class="s1">wait_readable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+    <span class="s1">wait_writable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">record</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+
+    <span class="s0">async def </span><span class="s1">r_task</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;r_task&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">w_task</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;w_task&quot;</span><span class="s2">)</span>
+
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">= </span><span class="s1">socketpair</span>
+    <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">r_task</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">w_task</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== []</span>
+        <span class="s1">b</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s5">b&quot;x&quot;</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s4">&quot;r_task&quot;</span><span class="s2">]</span>
+        <span class="s1">drain_socket</span><span class="s2">(</span><span class="s1">b</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s4">&quot;r_task&quot;</span><span class="s2">, </span><span class="s4">&quot;w_task&quot;</span><span class="s2">]</span>
+
+
+<span class="s2">@</span><span class="s1">read_socket_test</span>
+<span class="s2">@</span><span class="s1">write_socket_test</span>
+<span class="s0">async def </span><span class="s1">test_socket_actual_streaming</span><span class="s2">(</span>
+    <span class="s1">socketpair</span><span class="s2">: </span><span class="s1">SocketPair</span><span class="s2">,</span>
+    <span class="s1">wait_readable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+    <span class="s1">wait_writable</span><span class="s2">: </span><span class="s1">WaitSocket</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">= </span><span class="s1">socketpair</span>
+
+    <span class="s3"># Use a small send buffer on one of the sockets to increase the chance of</span>
+    <span class="s3"># getting partial writes</span>
+    <span class="s1">a</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">SOL_SOCKET</span><span class="s2">, </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">SO_SNDBUF</span><span class="s2">, </span><span class="s6">10000</span><span class="s2">)</span>
+
+    <span class="s1">N </span><span class="s2">= </span><span class="s6">1000000  </span><span class="s3"># 1 megabyte</span>
+    <span class="s1">MAX_CHUNK </span><span class="s2">= </span><span class="s6">65536</span>
+
+    <span class="s1">results</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] = {}</span>
+
+    <span class="s0">async def </span><span class="s1">sender</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s1">seed</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">key</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">r </span><span class="s2">= </span><span class="s1">random</span><span class="s2">.</span><span class="s1">Random</span><span class="s2">(</span><span class="s1">seed</span><span class="s2">)</span>
+        <span class="s1">sent </span><span class="s2">= </span><span class="s6">0</span>
+        <span class="s0">while </span><span class="s1">sent </span><span class="s2">&lt; </span><span class="s1">N</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;sent&quot;</span><span class="s2">, </span><span class="s1">sent</span><span class="s2">)</span>
+            <span class="s1">chunk </span><span class="s2">= </span><span class="s1">bytearray</span><span class="s2">(</span><span class="s1">r</span><span class="s2">.</span><span class="s1">randrange</span><span class="s2">(</span><span class="s1">MAX_CHUNK</span><span class="s2">))</span>
+            <span class="s0">while </span><span class="s1">chunk</span><span class="s2">:</span>
+                <span class="s0">with </span><span class="s1">assert_checkpoints</span><span class="s2">():</span>
+                    <span class="s0">await </span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+                <span class="s1">this_chunk_size </span><span class="s2">= </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s1">chunk</span><span class="s2">)</span>
+                <span class="s1">sent </span><span class="s2">+= </span><span class="s1">this_chunk_size</span>
+                <span class="s0">del </span><span class="s1">chunk</span><span class="s2">[:</span><span class="s1">this_chunk_size</span><span class="s2">]</span>
+        <span class="s1">sock</span><span class="s2">.</span><span class="s1">shutdown</span><span class="s2">(</span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">SHUT_WR</span><span class="s2">)</span>
+        <span class="s1">results</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">sent</span>
+
+    <span class="s0">async def </span><span class="s1">receiver</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">: </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s1">key</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">received </span><span class="s2">= </span><span class="s6">0</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;received&quot;</span><span class="s2">, </span><span class="s1">received</span><span class="s2">)</span>
+            <span class="s0">with </span><span class="s1">assert_checkpoints</span><span class="s2">():</span>
+                <span class="s0">await </span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+            <span class="s1">this_chunk_size </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s1">MAX_CHUNK</span><span class="s2">))</span>
+            <span class="s0">if not </span><span class="s1">this_chunk_size</span><span class="s2">:</span>
+                <span class="s0">break</span>
+            <span class="s1">received </span><span class="s2">+= </span><span class="s1">this_chunk_size</span>
+        <span class="s1">results</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">received</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sender</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s6">0</span><span class="s2">, </span><span class="s4">&quot;send_a&quot;</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sender</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s6">1</span><span class="s2">, </span><span class="s4">&quot;send_b&quot;</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">receiver</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s4">&quot;recv_a&quot;</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">receiver</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s4">&quot;recv_b&quot;</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">results</span><span class="s2">[</span><span class="s4">&quot;send_a&quot;</span><span class="s2">] == </span><span class="s1">results</span><span class="s2">[</span><span class="s4">&quot;recv_b&quot;</span><span class="s2">]</span>
+    <span class="s0">assert </span><span class="s1">results</span><span class="s2">[</span><span class="s4">&quot;send_b&quot;</span><span class="s2">] == </span><span class="s1">results</span><span class="s2">[</span><span class="s4">&quot;recv_a&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_notify_closing_on_invalid_object</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># It should either be a no-op (generally on Unix, where we don't know</span>
+    <span class="s3"># which fds are valid), or an OSError (on Windows, where we currently only</span>
+    <span class="s3"># support sockets, so we have to do some validation to figure out whether</span>
+    <span class="s3"># it's a socket or a regular handle).</span>
+    <span class="s1">got_oserror </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">got_no_error </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">notify_closing</span><span class="s2">(-</span><span class="s6">1</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+        <span class="s1">got_oserror </span><span class="s2">= </span><span class="s0">True</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">got_no_error </span><span class="s2">= </span><span class="s0">True</span>
+    <span class="s0">assert </span><span class="s1">got_oserror </span><span class="s0">or </span><span class="s1">got_no_error</span>
+
+
+<span class="s0">async def </span><span class="s1">test_wait_on_invalid_object</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># We definitely want to raise an error everywhere if you pass in an</span>
+    <span class="s3"># invalid fd to wait_*</span>
+    <span class="s0">for </span><span class="s1">wait </span><span class="s0">in </span><span class="s2">[</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">]:</span>
+        <span class="s0">with </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">() </span><span class="s0">as </span><span class="s1">s</span><span class="s2">:</span>
+            <span class="s1">fileno </span><span class="s2">= </span><span class="s1">s</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span>
+        <span class="s3"># We just closed the socket and don't do anything else in between, so</span>
+        <span class="s3"># we can be confident that the fileno hasn't be reassigned.</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span>
+            <span class="s1">OSError</span><span class="s2">,</span>
+            <span class="s1">match</span><span class="s2">=</span><span class="s4">r&quot;^\[\w+ \d+] (Bad file descriptor|An operation was attempted on something that is not a socket)$&quot;</span><span class="s2">,</span>
+        <span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">wait</span><span class="s2">(</span><span class="s1">fileno</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_io_manager_statistics</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">check</span><span class="s2">(*, </span><span class="s1">expected_readers</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">statistics </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_statistics</span><span class="s2">()</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s1">statistics</span><span class="s2">)</span>
+        <span class="s1">iostats </span><span class="s2">= </span><span class="s1">statistics</span><span class="s2">.</span><span class="s1">io_statistics</span>
+        <span class="s0">if </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">backend </span><span class="s2">== </span><span class="s4">&quot;epoll&quot; </span><span class="s0">or </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">backend </span><span class="s2">== </span><span class="s4">&quot;windows&quot;</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">tasks_waiting_read </span><span class="s2">== </span><span class="s1">expected_readers</span>
+            <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">tasks_waiting_write </span><span class="s2">== </span><span class="s1">expected_writers</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">backend </span><span class="s2">== </span><span class="s4">&quot;kqueue&quot;</span>
+            <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">monitors </span><span class="s2">== </span><span class="s6">0</span>
+            <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">tasks_waiting </span><span class="s2">== </span><span class="s1">expected_readers </span><span class="s2">+ </span><span class="s1">expected_writers</span>
+
+    <span class="s1">a1</span><span class="s2">, </span><span class="s1">b1 </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s1">a2</span><span class="s2">, </span><span class="s1">b2 </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s1">a3</span><span class="s2">, </span><span class="s1">b3 </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s0">for </span><span class="s1">sock </span><span class="s0">in </span><span class="s2">[</span><span class="s1">a1</span><span class="s2">, </span><span class="s1">b1</span><span class="s2">, </span><span class="s1">a2</span><span class="s2">, </span><span class="s1">b2</span><span class="s2">, </span><span class="s1">a3</span><span class="s2">, </span><span class="s1">b3</span><span class="s2">]:</span>
+        <span class="s1">sock</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">a1</span><span class="s2">, </span><span class="s1">b1</span><span class="s2">, </span><span class="s1">a2</span><span class="s2">, </span><span class="s1">b2</span><span class="s2">, </span><span class="s1">a3</span><span class="s2">, </span><span class="s1">b3</span><span class="s2">:</span>
+        <span class="s3"># let the call_soon_task settle down</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+
+        <span class="s3"># 1 for call_soon_task</span>
+        <span class="s1">check</span><span class="s2">(</span><span class="s1">expected_readers</span><span class="s2">=</span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">=</span><span class="s6">0</span><span class="s2">)</span>
+
+        <span class="s3"># We want:</span>
+        <span class="s3"># - one socket with a writer blocked</span>
+        <span class="s3"># - two sockets with a reader blocked</span>
+        <span class="s3"># - a socket with both blocked</span>
+        <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a1</span><span class="s2">)</span>
+        <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a3</span><span class="s2">)</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">, </span><span class="s1">a1</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">a2</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">b2</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">, </span><span class="s1">a3</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">a3</span><span class="s2">)</span>
+
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+
+            <span class="s3"># +1 for call_soon_task</span>
+            <span class="s1">check</span><span class="s2">(</span><span class="s1">expected_readers</span><span class="s2">=</span><span class="s6">3 </span><span class="s2">+ </span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">=</span><span class="s6">2</span><span class="s2">)</span>
+
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+        <span class="s3"># 1 for call_soon_task</span>
+        <span class="s1">check</span><span class="s2">(</span><span class="s1">expected_readers</span><span class="s2">=</span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">=</span><span class="s6">0</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">filterwarnings</span><span class="s2">(</span><span class="s4">&quot;ignore:.*UnboundedQueue:trio.TrioDeprecationWarning&quot;</span><span class="s2">)</span>
+<span class="s0">async def </span><span class="s1">test_io_manager_kqueue_monitors_statistics</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">check</span><span class="s2">(</span>
+        <span class="s2">*,</span>
+        <span class="s1">expected_monitors</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+        <span class="s1">expected_readers</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+        <span class="s1">expected_writers</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">statistics </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_statistics</span><span class="s2">()</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s1">statistics</span><span class="s2">)</span>
+        <span class="s1">iostats </span><span class="s2">= </span><span class="s1">statistics</span><span class="s2">.</span><span class="s1">io_statistics</span>
+        <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">backend </span><span class="s2">== </span><span class="s4">&quot;kqueue&quot;</span>
+        <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">monitors </span><span class="s2">== </span><span class="s1">expected_monitors</span>
+        <span class="s0">assert </span><span class="s1">iostats</span><span class="s2">.</span><span class="s1">tasks_waiting </span><span class="s2">== </span><span class="s1">expected_readers </span><span class="s2">+ </span><span class="s1">expected_writers</span>
+
+    <span class="s1">a1</span><span class="s2">, </span><span class="s1">b1 </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s0">for </span><span class="s1">sock </span><span class="s0">in </span><span class="s2">[</span><span class="s1">a1</span><span class="s2">, </span><span class="s1">b1</span><span class="s2">]:</span>
+        <span class="s1">sock</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">a1</span><span class="s2">, </span><span class="s1">b1</span><span class="s2">:</span>
+        <span class="s3"># let the call_soon_task settle down</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s4">&quot;win32&quot; </span><span class="s0">and </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s4">&quot;linux&quot;</span><span class="s2">:</span>
+            <span class="s3"># 1 for call_soon_task</span>
+            <span class="s1">check</span><span class="s2">(</span><span class="s1">expected_monitors</span><span class="s2">=</span><span class="s6">0</span><span class="s2">, </span><span class="s1">expected_readers</span><span class="s2">=</span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">=</span><span class="s6">0</span><span class="s2">)</span>
+
+            <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">monitor_kevent</span><span class="s2">(</span><span class="s1">a1</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">(), </span><span class="s1">select</span><span class="s2">.</span><span class="s1">KQ_FILTER_READ</span><span class="s2">):</span>
+                <span class="s0">with </span><span class="s2">(</span>
+                    <span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BusyResourceError</span><span class="s2">),</span>
+                    <span class="s1">_core</span><span class="s2">.</span><span class="s1">monitor_kevent</span><span class="s2">(</span><span class="s1">a1</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">(), </span><span class="s1">select</span><span class="s2">.</span><span class="s1">KQ_FILTER_READ</span><span class="s2">),</span>
+                <span class="s2">):</span>
+                    <span class="s0">pass  </span><span class="s3"># pragma: no cover</span>
+                <span class="s1">check</span><span class="s2">(</span><span class="s1">expected_monitors</span><span class="s2">=</span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_readers</span><span class="s2">=</span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">=</span><span class="s6">0</span><span class="s2">)</span>
+
+            <span class="s1">check</span><span class="s2">(</span><span class="s1">expected_monitors</span><span class="s2">=</span><span class="s6">0</span><span class="s2">, </span><span class="s1">expected_readers</span><span class="s2">=</span><span class="s6">1</span><span class="s2">, </span><span class="s1">expected_writers</span><span class="s2">=</span><span class="s6">0</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_can_survive_unnotified_close</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># An &quot;unnotified&quot; close is when the user closes an fd/socket/handle</span>
+    <span class="s3"># directly, without calling notify_closing first. This should never happen</span>
+    <span class="s3"># -- users should call notify_closing before closing things. But, just in</span>
+    <span class="s3"># case they don't, we would still like to avoid exploding.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Acceptable behaviors:</span>
+    <span class="s3"># - wait_* never return, but can be cancelled cleanly</span>
+    <span class="s3"># - wait_* exit cleanly</span>
+    <span class="s3"># - wait_* raise an OSError</span>
+    <span class="s3">#</span>
+    <span class="s3"># Not acceptable:</span>
+    <span class="s3"># - getting stuck in an uncancellable state</span>
+    <span class="s3"># - TrioInternalError blowing up the whole run</span>
+    <span class="s3">#</span>
+    <span class="s3"># This test exercises some tricky &quot;unnotified close&quot; scenarios, to make</span>
+    <span class="s3"># sure we get the &quot;acceptable&quot; behaviors.</span>
+
+    <span class="s0">async def </span><span class="s1">allow_OSError</span><span class="s2">(</span>
+        <span class="s1">async_func</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[</span><span class="s1">ArgsT</span><span class="s2">, </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]],</span>
+        <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">ArgsT</span><span class="s2">.</span><span class="s1">args</span><span class="s2">,</span>
+        <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">ArgsT</span><span class="s2">.</span><span class="s1">kwargs</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">suppress</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">async_func</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">() </span><span class="s0">as </span><span class="s1">s</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">allow_OSError</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">s</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">s</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+    <span class="s3"># We hit different paths on Windows depending on whether we close the last</span>
+    <span class="s3"># handle to the object (which produces a LOCAL_CLOSE notification and</span>
+    <span class="s3"># wakes up wait_readable), or only close one of the handles (which leaves</span>
+    <span class="s3"># wait_readable pending until cancelled).</span>
+    <span class="s0">with </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">() </span><span class="s0">as </span><span class="s1">s</span><span class="s2">, </span><span class="s1">s</span><span class="s2">.</span><span class="s1">dup</span><span class="s2">() </span><span class="s0">as </span><span class="s1">s2</span><span class="s2">:  </span><span class="s3"># noqa: F841</span>
+        <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">allow_OSError</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">s</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">s</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+    <span class="s3"># A more elaborate case, with two tasks waiting. On windows and epoll,</span>
+    <span class="s3"># the two tasks get muxed together onto a single underlying wait</span>
+    <span class="s3"># operation. So when they're cancelled, there's a brief moment where one</span>
+    <span class="s3"># of the tasks is cancelled but the other isn't, so we try to re-issue the</span>
+    <span class="s3"># underlying wait operation. But here, the handle we were going to use to</span>
+    <span class="s3"># do that has been pulled out from under our feet... so test that we can</span>
+    <span class="s3"># survive this.</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">a</span><span class="s2">.</span><span class="s1">dup</span><span class="s2">() </span><span class="s0">as </span><span class="s1">a2</span><span class="s2">:</span>
+        <span class="s1">a</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">b</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">allow_OSError</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">allow_OSError</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">a</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+    <span class="s3"># A similar case, but now the single-task-wakeup happens due to I/O</span>
+    <span class="s3"># arriving, not a cancellation, so the operation gets re-issued from</span>
+    <span class="s3"># handle_io context rather than abort context.</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">= </span><span class="s1">stdlib_socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">a</span><span class="s2">.</span><span class="s1">dup</span><span class="s2">() </span><span class="s0">as </span><span class="s1">a2</span><span class="s2">:</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s4">f&quot;a=</span><span class="s0">{</span><span class="s1">a</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span><span class="s0">}</span><span class="s4">, b=</span><span class="s0">{</span><span class="s1">b</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span><span class="s0">}</span><span class="s4">, a2=</span><span class="s0">{</span><span class="s1">a2</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s1">a</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">b</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">fill_socket</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+        <span class="s1">e </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+
+        <span class="s3"># We want to wait for the kernel to process the wakeup on 'a', if any.</span>
+        <span class="s3"># But depending on the platform, we might not get a wakeup on 'a'. So</span>
+        <span class="s3"># we put one task to sleep waiting on 'a', and we put a second task to</span>
+        <span class="s3"># sleep waiting on 'a2', with the idea that the 'a2' notification will</span>
+        <span class="s3"># definitely arrive, and when it does then we can assume that whatever</span>
+        <span class="s3"># notification was going to arrive for 'a' has also arrived.</span>
+        <span class="s0">async def </span><span class="s1">wait_readable_a2_then_set</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">a2</span><span class="s2">)</span>
+            <span class="s1">e</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+        <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">allow_OSError</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">allow_OSError</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">, </span><span class="s1">a</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_readable_a2_then_set</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">a</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s1">b</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s5">b&quot;x&quot;</span><span class="s2">)</span>
+            <span class="s3"># Make sure that the wakeup has been received and everything has</span>
+            <span class="s3"># settled before cancelling the wait_writable.</span>
+            <span class="s0">await </span><span class="s1">e</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

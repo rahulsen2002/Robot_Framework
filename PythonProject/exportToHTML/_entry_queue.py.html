@@ -1,0 +1,245 @@
+<html>
+<head>
+<title>_entry_queue.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_entry_queue.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">deque</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">NoReturn</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">NoPublicConstructor</span><span class="s2">, </span><span class="s1">final</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_wakeup_socketpair </span><span class="s0">import </span><span class="s1">WakeupSocketpair</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">TypeVarTuple</span><span class="s2">, </span><span class="s1">Unpack</span>
+
+    <span class="s1">PosArgsT </span><span class="s2">= </span><span class="s1">TypeVarTuple</span><span class="s2">(</span><span class="s3">&quot;PosArgsT&quot;</span><span class="s2">)</span>
+
+<span class="s1">Function </span><span class="s2">= </span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">object</span><span class="s2">]  </span><span class="s4"># type: ignore[explicit-any]</span>
+<span class="s1">Job </span><span class="s2">= </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">Function</span><span class="s2">, </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, ...]]</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span>
+<span class="s0">class </span><span class="s1">EntryQueue</span><span class="s2">:</span>
+    <span class="s4"># This used to use a queue.Queue. but that was broken, because Queues are</span>
+    <span class="s4"># implemented in Python, and not reentrant -- so it was thread-safe, but</span>
+    <span class="s4"># not signal-safe. deque is implemented in C, so each operation is atomic</span>
+    <span class="s4"># WRT threads (and this is guaranteed in the docs), AND each operation is</span>
+    <span class="s4"># atomic WRT signal delivery (signal handlers can run on either side, but</span>
+    <span class="s4"># not *during* a deque operation). dict makes similar guarantees - and</span>
+    <span class="s4"># it's even ordered!</span>
+    <span class="s1">queue</span><span class="s2">: </span><span class="s1">deque</span><span class="s2">[</span><span class="s1">Job</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">deque</span><span class="s2">)</span>
+    <span class="s1">idempotent_queue</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">Job</span><span class="s2">, </span><span class="s0">None</span><span class="s2">] = </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">dict</span><span class="s2">)</span>
+
+    <span class="s1">wakeup</span><span class="s2">: </span><span class="s1">WakeupSocketpair </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">WakeupSocketpair</span><span class="s2">)</span>
+    <span class="s1">done</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s4"># Must be a reentrant lock, because it's acquired from signal handlers.</span>
+    <span class="s4"># RLock is signal-safe as of cpython 3.2. NB that this does mean that the</span>
+    <span class="s4"># lock is effectively *disabled* when we enter from signal context. The</span>
+    <span class="s4"># way we use the lock this is OK though, because when</span>
+    <span class="s4"># run_sync_soon is called from a signal it's atomic WRT the</span>
+    <span class="s4"># main thread -- it just might happen at some inconvenient place. But if</span>
+    <span class="s4"># you look at the one place where the main thread holds the lock, it's</span>
+    <span class="s4"># just to make 1 assignment, so that's atomic WRT a signal anyway.</span>
+    <span class="s1">lock</span><span class="s2">: </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">RLock </span><span class="s2">= </span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">Factory</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">RLock</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">task</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s4"># RLock has two implementations: a signal-safe version in _thread, and</span>
+        <span class="s4"># and signal-UNsafe version in threading. We need the signal safe</span>
+        <span class="s4"># version. Python 3.2 and later should always use this anyway, but,</span>
+        <span class="s4"># since the symptoms if this goes wrong are just &quot;weird rare</span>
+        <span class="s4"># deadlocks&quot;, then let's make a little check.</span>
+        <span class="s4"># See:</span>
+        <span class="s4">#     https://bugs.python.org/issue13697#msg237140</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">lock</span><span class="s2">.</span><span class="s1">__class__</span><span class="s2">.</span><span class="s1">__module__ </span><span class="s2">== </span><span class="s3">&quot;_thread&quot;</span>
+
+        <span class="s0">def </span><span class="s1">run_cb</span><span class="s2">(</span><span class="s1">job</span><span class="s2">: </span><span class="s1">Job</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s4"># We run this with KI protection enabled; it's the callback's</span>
+            <span class="s4"># job to disable it if it wants it disabled. Exceptions are</span>
+            <span class="s4"># treated like system task exceptions (i.e., converted into</span>
+            <span class="s4"># TrioInternalError and cause everything to shut down).</span>
+            <span class="s1">sync_fn</span><span class="s2">, </span><span class="s1">args </span><span class="s2">= </span><span class="s1">job</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">sync_fn</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">BaseException </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+
+                <span class="s0">async def </span><span class="s1">kill_everything</span><span class="s2">(  </span><span class="s4"># noqa: RUF029  # await not used</span>
+                    <span class="s1">exc</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+                <span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">exc</span>
+
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">_core</span><span class="s2">.</span><span class="s1">spawn_system_task</span><span class="s2">(</span><span class="s1">kill_everything</span><span class="s2">, </span><span class="s1">exc</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">RuntimeError</span><span class="s2">:</span>
+                    <span class="s4"># We're quite late in the shutdown process and the</span>
+                    <span class="s4"># system nursery is already closed.</span>
+                    <span class="s4"># TODO(2020-06): this is a gross hack and should</span>
+                    <span class="s4"># be fixed soon when we address #1607.</span>
+                    <span class="s1">parent_nursery </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">().</span><span class="s1">parent_nursery</span>
+                    <span class="s0">if </span><span class="s1">parent_nursery </span><span class="s0">is None</span><span class="s2">:</span>
+                        <span class="s0">raise </span><span class="s1">AssertionError</span><span class="s2">(</span>
+                            <span class="s3">&quot;Internal error: `parent_nursery` should never be `None`&quot;</span><span class="s2">,</span>
+                        <span class="s2">) </span><span class="s0">from </span><span class="s1">exc  </span><span class="s4"># pragma: no cover</span>
+                    <span class="s1">parent_nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">kill_everything</span><span class="s2">, </span><span class="s1">exc</span><span class="s2">)</span>
+
+        <span class="s4"># This has to be carefully written to be safe in the face of new items</span>
+        <span class="s4"># being queued while we iterate, and to do a bounded amount of work on</span>
+        <span class="s4"># each pass:</span>
+        <span class="s0">def </span><span class="s1">run_all_bounded</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">queue</span><span class="s2">)):</span>
+                <span class="s1">run_cb</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">queue</span><span class="s2">.</span><span class="s1">popleft</span><span class="s2">())</span>
+            <span class="s0">for </span><span class="s1">job </span><span class="s0">in </span><span class="s1">list</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">idempotent_queue</span><span class="s2">):</span>
+                <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">idempotent_queue</span><span class="s2">[</span><span class="s1">job</span><span class="s2">]</span>
+                <span class="s1">run_cb</span><span class="s2">(</span><span class="s1">job</span><span class="s2">)</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">while True</span><span class="s2">:</span>
+                <span class="s1">run_all_bounded</span><span class="s2">()</span>
+                <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">queue </span><span class="s0">and not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">idempotent_queue</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup</span><span class="s2">.</span><span class="s1">wait_woken</span><span class="s2">()</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+            <span class="s4"># Keep the work done with this lock held as minimal as possible,</span>
+            <span class="s4"># because it doesn't protect us against concurrent signal delivery</span>
+            <span class="s4"># (see the comment above). Notice that this code would still be</span>
+            <span class="s4"># correct if written like:</span>
+            <span class="s4">#   self.done = True</span>
+            <span class="s4">#   with self.lock:</span>
+            <span class="s4">#       pass</span>
+            <span class="s4"># because all we want is to force run_sync_soon</span>
+            <span class="s4"># to either be completely before or completely after the write to</span>
+            <span class="s4"># done. That's why we don't need the lock to protect</span>
+            <span class="s4"># against signal handlers.</span>
+            <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">lock</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">done </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s4"># No more jobs will be submitted, so just clear out any residual</span>
+            <span class="s4"># ones:</span>
+            <span class="s1">run_all_bounded</span><span class="s2">()</span>
+            <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">queue</span>
+            <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">idempotent_queue</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">size</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">queue</span><span class="s2">) + </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">idempotent_queue</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">run_sync_soon</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sync_fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">PosArgsT</span><span class="s2">]], </span><span class="s1">object</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">PosArgsT</span><span class="s2">],</span>
+        <span class="s1">idempotent</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">lock</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">done</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">RunFinishedError</span><span class="s2">(</span><span class="s3">&quot;run() has exited&quot;</span><span class="s2">)</span>
+            <span class="s4"># We have to hold the lock all the way through here, because</span>
+            <span class="s4"># otherwise the main thread might exit *while* we're doing these</span>
+            <span class="s4"># calls, and then our queue item might not be processed, or the</span>
+            <span class="s4"># wakeup call might trigger an OSError b/c the IO manager has</span>
+            <span class="s4"># already been shut down.</span>
+            <span class="s0">if </span><span class="s1">idempotent</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">idempotent_queue</span><span class="s2">[</span><span class="s1">sync_fn</span><span class="s2">, </span><span class="s1">args</span><span class="s2">] = </span><span class="s0">None</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">queue</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">sync_fn</span><span class="s2">, </span><span class="s1">args</span><span class="s2">))</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup</span><span class="s2">.</span><span class="s1">wakeup_thread_and_signal_safe</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">TrioToken</span><span class="s2">(</span><span class="s1">metaclass</span><span class="s2">=</span><span class="s1">NoPublicConstructor</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot;An opaque object representing a single call to :func:`trio.run`. 
+ 
+    It has no public constructor; instead, see :func:`current_trio_token`. 
+ 
+    This object has two uses: 
+ 
+    1. It lets you re-enter the Trio run loop from external threads or signal 
+       handlers. This is the low-level primitive that :func:`trio.to_thread` 
+       and `trio.from_thread` use to communicate with worker threads, that 
+       `trio.open_signal_receiver` uses to receive notifications about 
+       signals, and so forth. 
+ 
+    2. Each call to :func:`trio.run` has exactly one associated 
+       :class:`TrioToken` object, so you can use it to identify a particular 
+       call. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_reentry_queue</span><span class="s2">: </span><span class="s1">EntryQueue</span>
+
+    <span class="s0">def </span><span class="s1">run_sync_soon</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sync_fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">PosArgsT</span><span class="s2">]], </span><span class="s1">object</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">PosArgsT</span><span class="s2">],</span>
+        <span class="s1">idempotent</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Schedule a call to ``sync_fn(*args)`` to occur in the context of a 
+        Trio task. 
+ 
+        This is safe to call from the main thread, from other threads, and 
+        from signal handlers. This is the fundamental primitive used to 
+        re-enter the Trio run loop from outside of it. 
+ 
+        The call will happen &quot;soon&quot;, but there's no guarantee about exactly 
+        when, and no mechanism provided for finding out when it's happened. 
+        If you need this, you'll have to build your own. 
+ 
+        The call is effectively run as part of a system task (see 
+        :func:`~trio.lowlevel.spawn_system_task`). In particular this means 
+        that: 
+ 
+        * :exc:`KeyboardInterrupt` protection is *enabled* by default; if 
+          you want ``sync_fn`` to be interruptible by control-C, then you 
+          need to use :func:`~trio.lowlevel.disable_ki_protection` 
+          explicitly. 
+ 
+        * If ``sync_fn`` raises an exception, then it's converted into a 
+          :exc:`~trio.TrioInternalError` and *all* tasks are cancelled. You 
+          should be careful that ``sync_fn`` doesn't crash. 
+ 
+        All calls with ``idempotent=False`` are processed in strict 
+        first-in first-out order. 
+ 
+        If ``idempotent=True``, then ``sync_fn`` and ``args`` must be 
+        hashable, and Trio will make a best-effort attempt to discard any 
+        call submission which is equal to an already-pending call. Trio 
+        will process these in first-in first-out order. 
+ 
+        Any ordering guarantees apply separately to ``idempotent=False`` 
+        and ``idempotent=True`` calls; there's no rule for how calls in the 
+        different categories are ordered with respect to each other. 
+ 
+        :raises trio.RunFinishedError: 
+              if the associated call to :func:`trio.run` 
+              has already exited. (Any call that *doesn't* raise this error 
+              is guaranteed to be fully processed before :func:`trio.run` 
+              exits.) 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_reentry_queue</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span><span class="s1">sync_fn</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, </span><span class="s1">idempotent</span><span class="s2">=</span><span class="s1">idempotent</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

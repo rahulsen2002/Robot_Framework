@@ -1,0 +1,317 @@
+<html>
+<head>
+<title>archive_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+archive_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.archive_util 
+ 
+Utility functions for creating archive files (tarballs, zip files, 
+that sort of thing).&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Literal</span><span class="s3">, </span><span class="s1">overload</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s2">import </span><span class="s1">zipfile</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s1">zipfile </span><span class="s3">= </span><span class="s2">None</span>
+
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_log </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">dir_util </span><span class="s2">import </span><span class="s1">mkpath</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">DistutilsExecError</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">spawn </span><span class="s2">import </span><span class="s1">spawn</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">pwd </span><span class="s2">import </span><span class="s1">getpwnam</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s1">getpwnam </span><span class="s3">= </span><span class="s2">None</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">grp </span><span class="s2">import </span><span class="s1">getgrnam</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s1">getgrnam </span><span class="s3">= </span><span class="s2">None</span>
+
+
+<span class="s2">def </span><span class="s1">_get_gid</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Returns a gid, given a group name.&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">getgrnam </span><span class="s2">is None or </span><span class="s1">name </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">return None</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">getgrnam</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">result </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">[</span><span class="s4">2</span><span class="s3">]</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">_get_uid</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Returns an uid, given a user name.&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">getpwnam </span><span class="s2">is None or </span><span class="s1">name </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">return None</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">getpwnam</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">result </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">[</span><span class="s4">2</span><span class="s3">]</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">make_tarball</span><span class="s3">(</span>
+    <span class="s1">base_name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">base_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">compress</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s5">&quot;gzip&quot;</span><span class="s3">, </span><span class="s5">&quot;bzip2&quot;</span><span class="s3">, </span><span class="s5">&quot;xz&quot;</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s5">&quot;gzip&quot;</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">owner</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">group</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create a (possibly compressed) tar file from all the files under 
+    'base_dir'. 
+ 
+    'compress' must be &quot;gzip&quot; (the default), &quot;bzip2&quot;, &quot;xz&quot;, or None. 
+ 
+    'owner' and 'group' can be used to define an owner and a group for the 
+    archive that is being built. If not provided, the current owner and group 
+    will be used. 
+ 
+    The output tar file will be named 'base_dir' +  &quot;.tar&quot;, possibly plus 
+    the appropriate compression extension (&quot;.gz&quot;, &quot;.bz2&quot;, &quot;.xz&quot; or &quot;.Z&quot;). 
+ 
+    Returns the output filename. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">tar_compression </span><span class="s3">= {</span>
+        <span class="s5">'gzip'</span><span class="s3">: </span><span class="s5">'gz'</span><span class="s3">,</span>
+        <span class="s5">'bzip2'</span><span class="s3">: </span><span class="s5">'bz2'</span><span class="s3">,</span>
+        <span class="s5">'xz'</span><span class="s3">: </span><span class="s5">'xz'</span><span class="s3">,</span>
+        <span class="s2">None</span><span class="s3">: </span><span class="s5">''</span><span class="s3">,</span>
+    <span class="s3">}</span>
+    <span class="s1">compress_ext </span><span class="s3">= {</span><span class="s5">'gzip'</span><span class="s3">: </span><span class="s5">'.gz'</span><span class="s3">, </span><span class="s5">'bzip2'</span><span class="s3">: </span><span class="s5">'.bz2'</span><span class="s3">, </span><span class="s5">'xz'</span><span class="s3">: </span><span class="s5">'.xz'</span><span class="s3">}</span>
+
+    <span class="s6"># flags for compression program, each element of list will be an argument</span>
+    <span class="s2">if </span><span class="s1">compress </span><span class="s2">is not None and </span><span class="s1">compress </span><span class="s2">not in </span><span class="s1">compress_ext</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">():</span>
+        <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span>
+            <span class="s5">&quot;bad value for 'compress': must be None, 'gzip', 'bzip2', 'xz'&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s1">archive_name </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s5">'.tar'</span>
+    <span class="s1">archive_name </span><span class="s3">+= </span><span class="s1">compress_ext</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">compress</span><span class="s3">, </span><span class="s5">''</span><span class="s3">)</span>
+
+    <span class="s1">mkpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">archive_name</span><span class="s3">), </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+    <span class="s6"># creating the tarball</span>
+    <span class="s2">import </span><span class="s1">tarfile  </span><span class="s6"># late import so Python build itself doesn't break</span>
+
+    <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">'Creating tar archive'</span><span class="s3">)</span>
+
+    <span class="s1">uid </span><span class="s3">= </span><span class="s1">_get_uid</span><span class="s3">(</span><span class="s1">owner</span><span class="s3">)</span>
+    <span class="s1">gid </span><span class="s3">= </span><span class="s1">_get_gid</span><span class="s3">(</span><span class="s1">group</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_set_uid_gid</span><span class="s3">(</span><span class="s1">tarinfo</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">gid </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">tarinfo</span><span class="s3">.</span><span class="s1">gid </span><span class="s3">= </span><span class="s1">gid</span>
+            <span class="s1">tarinfo</span><span class="s3">.</span><span class="s1">gname </span><span class="s3">= </span><span class="s1">group</span>
+        <span class="s2">if </span><span class="s1">uid </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">tarinfo</span><span class="s3">.</span><span class="s1">uid </span><span class="s3">= </span><span class="s1">uid</span>
+            <span class="s1">tarinfo</span><span class="s3">.</span><span class="s1">uname </span><span class="s3">= </span><span class="s1">owner</span>
+        <span class="s2">return </span><span class="s1">tarinfo</span>
+
+    <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+        <span class="s1">tar </span><span class="s3">= </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">archive_name</span><span class="s3">, </span><span class="s5">f'w|</span><span class="s2">{</span><span class="s1">tar_compression</span><span class="s3">[</span><span class="s1">compress</span><span class="s3">]</span><span class="s2">}</span><span class="s5">'</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">tar</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">filter</span><span class="s3">=</span><span class="s1">_set_uid_gid</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">tar</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">return </span><span class="s1">archive_name</span>
+
+
+<span class="s2">def </span><span class="s1">make_zipfile</span><span class="s3">(  </span><span class="s6"># noqa: C901</span>
+    <span class="s1">base_name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">base_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create a zip file from all the files under 'base_dir'. 
+ 
+    The output zip file will be named 'base_name' + &quot;.zip&quot;.  Uses either the 
+    &quot;zipfile&quot; Python module (if available) or the InfoZIP &quot;zip&quot; utility 
+    (if installed and found on the default search path).  If neither tool is 
+    available, raises DistutilsExecError.  Returns the name of the output zip 
+    file. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">zip_filename </span><span class="s3">= </span><span class="s1">base_name </span><span class="s3">+ </span><span class="s5">&quot;.zip&quot;</span>
+    <span class="s1">mkpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">zip_filename</span><span class="s3">), </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+    <span class="s6"># If zipfile module is not available, try spawning an external</span>
+    <span class="s6"># 'zip' command.</span>
+    <span class="s2">if </span><span class="s1">zipfile </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">verbose</span><span class="s3">:</span>
+            <span class="s1">zipoptions </span><span class="s3">= </span><span class="s5">&quot;-r&quot;</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">zipoptions </span><span class="s3">= </span><span class="s5">&quot;-rq&quot;</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">spawn</span><span class="s3">([</span><span class="s5">&quot;zip&quot;</span><span class="s3">, </span><span class="s1">zipoptions</span><span class="s3">, </span><span class="s1">zip_filename</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">], </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DistutilsExecError</span><span class="s3">:</span>
+            <span class="s6"># XXX really should distinguish between &quot;couldn't find</span>
+            <span class="s6"># external 'zip' command&quot; and &quot;zip failed&quot;.</span>
+            <span class="s2">raise </span><span class="s1">DistutilsExecError</span><span class="s3">(</span>
+                <span class="s5">f&quot;unable to create zip file '</span><span class="s2">{</span><span class="s1">zip_filename</span><span class="s2">}</span><span class="s5">': &quot;</span>
+                <span class="s5">&quot;could neither import the 'zipfile' module nor &quot;</span>
+                <span class="s5">&quot;find a standalone zip utility&quot;</span>
+            <span class="s3">)</span>
+
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;creating '%s' and adding '%s' to it&quot;</span><span class="s3">, </span><span class="s1">zip_filename</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">)</span>
+
+        <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">zip </span><span class="s3">= </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span>
+                    <span class="s1">zip_filename</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s1">compression</span><span class="s3">=</span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZIP_DEFLATED</span>
+                <span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">RuntimeError</span><span class="s3">:</span>
+                <span class="s1">zip </span><span class="s3">= </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">zip_filename</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s1">compression</span><span class="s3">=</span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZIP_STORED</span><span class="s3">)</span>
+
+            <span class="s2">with </span><span class="s1">zip</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">base_dir </span><span class="s3">!= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span><span class="s3">:</span>
+                    <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s5">''</span><span class="s3">))</span>
+                    <span class="s1">zip</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;adding '%s'&quot;</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+                <span class="s2">for </span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">dirnames</span><span class="s3">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">walk</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">):</span>
+                    <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">dirnames</span><span class="s3">:</span>
+                        <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s5">''</span><span class="s3">))</span>
+                        <span class="s1">zip</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+                        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;adding '%s'&quot;</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+                    <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">filenames</span><span class="s3">:</span>
+                        <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">name</span><span class="s3">))</span>
+                        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+                            <span class="s1">zip</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+                            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;adding '%s'&quot;</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">zip_filename</span>
+
+
+<span class="s1">ARCHIVE_FORMATS </span><span class="s3">= {</span>
+    <span class="s5">'gztar'</span><span class="s3">: (</span><span class="s1">make_tarball</span><span class="s3">, [(</span><span class="s5">'compress'</span><span class="s3">, </span><span class="s5">'gzip'</span><span class="s3">)], </span><span class="s5">&quot;gzip'ed tar-file&quot;</span><span class="s3">),</span>
+    <span class="s5">'bztar'</span><span class="s3">: (</span><span class="s1">make_tarball</span><span class="s3">, [(</span><span class="s5">'compress'</span><span class="s3">, </span><span class="s5">'bzip2'</span><span class="s3">)], </span><span class="s5">&quot;bzip2'ed tar-file&quot;</span><span class="s3">),</span>
+    <span class="s5">'xztar'</span><span class="s3">: (</span><span class="s1">make_tarball</span><span class="s3">, [(</span><span class="s5">'compress'</span><span class="s3">, </span><span class="s5">'xz'</span><span class="s3">)], </span><span class="s5">&quot;xz'ed tar-file&quot;</span><span class="s3">),</span>
+    <span class="s5">'ztar'</span><span class="s3">: (</span><span class="s1">make_tarball</span><span class="s3">, [(</span><span class="s5">'compress'</span><span class="s3">, </span><span class="s5">'compress'</span><span class="s3">)], </span><span class="s5">&quot;compressed tar file&quot;</span><span class="s3">),</span>
+    <span class="s5">'tar'</span><span class="s3">: (</span><span class="s1">make_tarball</span><span class="s3">, [(</span><span class="s5">'compress'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)], </span><span class="s5">&quot;uncompressed tar file&quot;</span><span class="s3">),</span>
+    <span class="s5">'zip'</span><span class="s3">: (</span><span class="s1">make_zipfile</span><span class="s3">, [], </span><span class="s5">&quot;ZIP file&quot;</span><span class="s3">),</span>
+<span class="s3">}</span>
+
+
+<span class="s2">def </span><span class="s1">check_archive_formats</span><span class="s3">(</span><span class="s1">formats</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Returns the first format from the 'format' list that is unknown. 
+ 
+    If all formats are known, returns None 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">format </span><span class="s2">in </span><span class="s1">formats</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">format </span><span class="s2">not in </span><span class="s1">ARCHIVE_FORMATS</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">format</span>
+    <span class="s2">return None</span>
+
+
+<span class="s3">@</span><span class="s1">overload</span>
+<span class="s2">def </span><span class="s1">make_archive</span><span class="s3">(</span>
+    <span class="s1">base_name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">format</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">root_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">base_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">owner</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">group</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">: ...</span>
+<span class="s3">@</span><span class="s1">overload</span>
+<span class="s2">def </span><span class="s1">make_archive</span><span class="s3">(</span>
+    <span class="s1">base_name</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">format</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">root_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">],</span>
+    <span class="s1">base_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">owner</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">group</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">: ...</span>
+<span class="s2">def </span><span class="s1">make_archive</span><span class="s3">(</span>
+    <span class="s1">base_name</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">format</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">root_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">base_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">owner</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">group</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create an archive file (eg. zip or tar). 
+ 
+    'base_name' is the name of the file to create, minus any format-specific 
+    extension; 'format' is the archive format: one of &quot;zip&quot;, &quot;tar&quot;, &quot;gztar&quot;, 
+    &quot;bztar&quot;, &quot;xztar&quot;, or &quot;ztar&quot;. 
+ 
+    'root_dir' is a directory that will be the root directory of the 
+    archive; ie. we typically chdir into 'root_dir' before creating the 
+    archive.  'base_dir' is the directory where we start archiving from; 
+    ie. 'base_dir' will be the common prefix of all files and 
+    directories in the archive.  'root_dir' and 'base_dir' both default 
+    to the current directory.  Returns the name of the archive file. 
+ 
+    'owner' and 'group' are used when creating a tar archive. By default, 
+    uses the current owner and group. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">save_cwd </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">root_dir </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;changing into '%s'&quot;</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">)</span>
+        <span class="s1">base_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">root_dir</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">base_dir </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">base_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span>
+
+    <span class="s1">kwargs </span><span class="s3">= {</span><span class="s5">'dry_run'</span><span class="s3">: </span><span class="s1">dry_run</span><span class="s3">}</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">format_info </span><span class="s3">= </span><span class="s1">ARCHIVE_FORMATS</span><span class="s3">[</span><span class="s1">format</span><span class="s3">]</span>
+    <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">f&quot;unknown archive format '</span><span class="s2">{</span><span class="s1">format</span><span class="s2">}</span><span class="s5">'&quot;</span><span class="s3">)</span>
+
+    <span class="s1">func </span><span class="s3">= </span><span class="s1">format_info</span><span class="s3">[</span><span class="s4">0</span><span class="s3">]</span>
+    <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">format_info</span><span class="s3">[</span><span class="s4">1</span><span class="s3">])</span>
+
+    <span class="s2">if </span><span class="s1">format </span><span class="s3">!= </span><span class="s5">'zip'</span><span class="s3">:</span>
+        <span class="s1">kwargs</span><span class="s3">[</span><span class="s5">'owner'</span><span class="s3">] = </span><span class="s1">owner</span>
+        <span class="s1">kwargs</span><span class="s3">[</span><span class="s5">'group'</span><span class="s3">] = </span><span class="s1">group</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">filename </span><span class="s3">= </span><span class="s1">func</span><span class="s3">(</span><span class="s1">base_name</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">root_dir </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;changing back to '%s'&quot;</span><span class="s3">, </span><span class="s1">save_cwd</span><span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">chdir</span><span class="s3">(</span><span class="s1">save_cwd</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">filename</span>
+</pre>
+</body>
+</html>

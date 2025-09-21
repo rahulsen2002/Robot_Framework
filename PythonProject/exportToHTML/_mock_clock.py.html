@@ -1,0 +1,188 @@
+<html>
+<head>
+<title>_mock_clock.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #2aacb8;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_mock_clock.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">time</span>
+<span class="s0">from </span><span class="s1">math </span><span class="s0">import </span><span class="s1">inf</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">Clock</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">final</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_run </span><span class="s0">import </span><span class="s1">GLOBAL_RUN_CONTEXT</span>
+
+<span class="s3">################################################################</span>
+<span class="s3"># The glorious MockClock</span>
+<span class="s3">################################################################</span>
+
+
+<span class="s3"># Prior art:</span>
+<span class="s3">#   https://twistedmatrix.com/documents/current/api/twisted.internet.task.Clock.html</span>
+<span class="s3">#   https://github.com/ztellman/manifold/issues/57</span>
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">MockClock</span><span class="s2">(</span><span class="s1">Clock</span><span class="s2">):</span>
+    <span class="s4">&quot;&quot;&quot;A user-controllable clock suitable for writing tests. 
+ 
+    Args: 
+      rate (float): the initial :attr:`rate`. 
+      autojump_threshold (float): the initial :attr:`autojump_threshold`. 
+ 
+    .. attribute:: rate 
+ 
+       How many seconds of clock time pass per second of real time. Default is 
+       0.0, i.e. the clock only advances through manuals calls to :meth:`jump` 
+       or when the :attr:`autojump_threshold` is triggered. You can assign to 
+       this attribute to change it. 
+ 
+    .. attribute:: autojump_threshold 
+ 
+       The clock keeps an eye on the run loop, and if at any point it detects 
+       that all tasks have been blocked for this many real seconds (i.e., 
+       according to the actual clock, not this clock), then the clock 
+       automatically jumps ahead to the run loop's next scheduled 
+       timeout. Default is :data:`math.inf`, i.e., to never autojump. You can 
+       assign to this attribute to change it. 
+ 
+       Basically the idea is that if you have code or tests that use sleeps 
+       and timeouts, you can use this to make it run much faster, totally 
+       automatically. (At least, as long as those sleeps/timeouts are 
+       happening inside Trio; if your test involves talking to external 
+       service and waiting for it to timeout then obviously we can't help you 
+       there.) 
+ 
+       You should set this to the smallest value that lets you reliably avoid 
+       &quot;false alarms&quot; where some I/O is in flight (e.g. between two halves of 
+       a socketpair) but the threshold gets triggered and time gets advanced 
+       anyway. This will depend on the details of your tests and test 
+       environment. If you aren't doing any I/O (like in our sleeping example 
+       above) then just set it to zero, and the clock will jump whenever all 
+       tasks are blocked. 
+ 
+       .. note:: If you use ``autojump_threshold`` and 
+          `wait_all_tasks_blocked` at the same time, then you might wonder how 
+          they interact, since they both cause things to happen after the run 
+          loop goes idle for some time. The answer is: 
+          `wait_all_tasks_blocked` takes priority. If there's a task blocked 
+          in `wait_all_tasks_blocked`, then the autojump feature treats that 
+          as active task and does *not* jump the clock. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">rate</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s5">0.0</span><span class="s2">, </span><span class="s1">autojump_threshold</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">inf</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># when the real clock said 'real_base', the virtual time was</span>
+        <span class="s3"># 'virtual_base', and since then it's advanced at 'rate' virtual</span>
+        <span class="s3"># seconds per real second.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_real_base </span><span class="s2">= </span><span class="s5">0.0</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_virtual_base </span><span class="s2">= </span><span class="s5">0.0</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_rate </span><span class="s2">= </span><span class="s5">0.0</span>
+
+        <span class="s3"># kept as an attribute so that our tests can monkeypatch it</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_real_clock </span><span class="s2">= </span><span class="s1">time</span><span class="s2">.</span><span class="s1">perf_counter</span>
+
+        <span class="s3"># use the property update logic to set initial values</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">rate </span><span class="s2">= </span><span class="s1">rate</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">autojump_threshold </span><span class="s2">= </span><span class="s1">autojump_threshold</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s6">f&quot;&lt;MockClock, time=</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">()</span><span class="s0">:</span><span class="s6">.7f</span><span class="s0">}</span><span class="s6">, rate=</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate</span><span class="s0">} </span><span class="s6">@ </span><span class="s0">{</span><span class="s1">id</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span><span class="s0">:</span><span class="s6">#x</span><span class="s0">}</span><span class="s6">&gt;&quot;</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">rate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate</span>
+
+    <span class="s2">@</span><span class="s1">rate</span><span class="s2">.</span><span class="s1">setter</span>
+    <span class="s0">def </span><span class="s1">rate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">new_rate</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">new_rate </span><span class="s2">&lt; </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s6">&quot;rate must be &gt;= 0&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">real </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_real_clock</span><span class="s2">()</span>
+            <span class="s1">virtual </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_real_to_virtual</span><span class="s2">(</span><span class="s1">real</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_virtual_base </span><span class="s2">= </span><span class="s1">virtual</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_real_base </span><span class="s2">= </span><span class="s1">real</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_rate </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s1">new_rate</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">autojump_threshold</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_autojump_threshold</span>
+
+    <span class="s2">@</span><span class="s1">autojump_threshold</span><span class="s2">.</span><span class="s1">setter</span>
+    <span class="s0">def </span><span class="s1">autojump_threshold</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">new_autojump_threshold</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_autojump_threshold </span><span class="s2">= </span><span class="s1">float</span><span class="s2">(</span><span class="s1">new_autojump_threshold</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_try_resync_autojump_threshold</span><span class="s2">()</span>
+
+    <span class="s3"># runner.clock_autojump_threshold is an internal API that isn't easily</span>
+    <span class="s3"># usable by custom third-party Clock objects. If you need access to this</span>
+    <span class="s3"># functionality, let us know, and we'll figure out how to make a public</span>
+    <span class="s3"># API. Discussion:</span>
+    <span class="s3">#</span>
+    <span class="s3">#     https://github.com/python-trio/trio/issues/1587</span>
+    <span class="s0">def </span><span class="s1">_try_resync_autojump_threshold</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">runner </span><span class="s2">= </span><span class="s1">GLOBAL_RUN_CONTEXT</span><span class="s2">.</span><span class="s1">runner</span>
+            <span class="s0">if </span><span class="s1">runner</span><span class="s2">.</span><span class="s1">is_guest</span><span class="s2">:</span>
+                <span class="s1">runner</span><span class="s2">.</span><span class="s1">force_guest_tick_asap</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">AttributeError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">runner</span><span class="s2">.</span><span class="s1">clock </span><span class="s0">is </span><span class="s1">self</span><span class="s2">:</span>
+                <span class="s1">runner</span><span class="s2">.</span><span class="s1">clock_autojump_threshold </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_autojump_threshold</span>
+
+    <span class="s3"># Invoked by the run loop when runner.clock_autojump_threshold is</span>
+    <span class="s3"># exceeded.</span>
+    <span class="s0">def </span><span class="s1">_autojump</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">statistics </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_statistics</span><span class="s2">()</span>
+        <span class="s1">jump </span><span class="s2">= </span><span class="s1">statistics</span><span class="s2">.</span><span class="s1">seconds_to_next_deadline</span>
+        <span class="s0">if </span><span class="s5">0 </span><span class="s2">&lt; </span><span class="s1">jump </span><span class="s2">&lt; </span><span class="s1">inf</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">jump</span><span class="s2">(</span><span class="s1">jump</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_real_to_virtual</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">real</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s1">real_offset </span><span class="s2">= </span><span class="s1">real </span><span class="s2">- </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_real_base</span>
+        <span class="s1">virtual_offset </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate </span><span class="s2">* </span><span class="s1">real_offset</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_virtual_base </span><span class="s2">+ </span><span class="s1">virtual_offset</span>
+
+    <span class="s0">def </span><span class="s1">start_clock</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_try_resync_autojump_threshold</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">current_time</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_real_to_virtual</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_real_clock</span><span class="s2">())</span>
+
+    <span class="s0">def </span><span class="s1">deadline_to_sleep_time</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">deadline</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s1">virtual_timeout </span><span class="s2">= </span><span class="s1">deadline </span><span class="s2">- </span><span class="s1">self</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">virtual_timeout </span><span class="s2">&lt;= </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s5">0</span>
+        <span class="s0">elif </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate </span><span class="s2">&gt; </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">virtual_timeout </span><span class="s2">/ </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_rate</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s5">999999999</span>
+
+    <span class="s0">def </span><span class="s1">jump</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">float</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot;Manually advance the clock by the given number of seconds. 
+ 
+        Args: 
+          seconds (float): the number of seconds to jump the clock forward. 
+ 
+        Raises: 
+          ValueError: if you try to pass a negative value for ``seconds``. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">seconds </span><span class="s2">&lt; </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s6">&quot;time can't go backwards&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_virtual_base </span><span class="s2">+= </span><span class="s1">seconds</span>
+</pre>
+</body>
+</html>

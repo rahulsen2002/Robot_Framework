@@ -1,0 +1,428 @@
+<html>
+<head>
+<title>_highlevel_open_tcp_stream.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #2aacb8;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_highlevel_open_tcp_stream.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span><span class="s2">, </span><span class="s1">suppress</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">Any</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket </span><span class="s0">import </span><span class="s1">SOCK_STREAM</span><span class="s2">, </span><span class="s1">SocketType</span><span class="s2">, </span><span class="s1">getaddrinfo</span><span class="s2">, </span><span class="s1">socket</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Generator</span><span class="s2">, </span><span class="s1">MutableSequence</span>
+    <span class="s0">from </span><span class="s1">socket </span><span class="s0">import </span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">SocketKind</span>
+
+    <span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_socket </span><span class="s0">import </span><span class="s1">AddressFormat</span>
+
+<span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&lt; (</span><span class="s3">3</span><span class="s2">, </span><span class="s3">11</span><span class="s2">):</span>
+    <span class="s0">from </span><span class="s1">exceptiongroup </span><span class="s0">import </span><span class="s1">BaseExceptionGroup</span><span class="s2">, </span><span class="s1">ExceptionGroup</span>
+
+
+<span class="s4"># Implementation of RFC 6555 &quot;Happy eyeballs&quot;</span>
+<span class="s4"># https://tools.ietf.org/html/rfc6555</span>
+<span class="s4">#</span>
+<span class="s4"># Basically, the problem here is that if we want to connect to some host, and</span>
+<span class="s4"># DNS returns multiple IP addresses, then we don't know which of them will</span>
+<span class="s4"># actually work -- it can happen that some of them are reachable, and some of</span>
+<span class="s4"># them are not. One particularly common situation where this happens is on a</span>
+<span class="s4"># host that thinks it has ipv6 connectivity, but really doesn't. But in</span>
+<span class="s4"># principle this could happen for any kind of multi-home situation (e.g. the</span>
+<span class="s4"># route to one mirror is down but another is up).</span>
+<span class="s4">#</span>
+<span class="s4"># The naive algorithm (e.g. the stdlib's socket.create_connection) would be to</span>
+<span class="s4"># pick one of the IP addresses and try to connect; if that fails, try the</span>
+<span class="s4"># next; etc. The problem with this is that TCP is stubborn, and if the first</span>
+<span class="s4"># address is a blackhole then it might take a very long time (tens of seconds)</span>
+<span class="s4"># before that connection attempt fails.</span>
+<span class="s4">#</span>
+<span class="s4"># That's where RFC 6555 comes in. It tells us that what we do is:</span>
+<span class="s4"># - get the list of IPs from getaddrinfo, trusting the order it gives us (with</span>
+<span class="s4">#   one exception noted in section 5.4)</span>
+<span class="s4"># - start a connection attempt to the first IP</span>
+<span class="s4"># - when this fails OR if it's still going after DELAY seconds, then start a</span>
+<span class="s4">#   connection attempt to the second IP</span>
+<span class="s4"># - when this fails OR if it's still going after another DELAY seconds, then</span>
+<span class="s4">#   start a connection attempt to the third IP</span>
+<span class="s4"># - ... repeat until we run out of IPs.</span>
+<span class="s4">#</span>
+<span class="s4"># Our implementation is similarly straightforward: we spawn a chain of tasks,</span>
+<span class="s4"># where each one (a) waits until the previous connection has failed or DELAY</span>
+<span class="s4"># seconds have passed, (b) spawns the next task, (c) attempts to connect. As</span>
+<span class="s4"># soon as any task crashes or succeeds, we cancel all the tasks and return.</span>
+<span class="s4">#</span>
+<span class="s4"># Note: this currently doesn't attempt to cache any results, so if you make</span>
+<span class="s4"># multiple connections to the same host it'll re-run the happy-eyeballs</span>
+<span class="s4"># algorithm each time. RFC 6555 is pretty confusing about whether this is</span>
+<span class="s4"># allowed. Section 4 describes an algorithm that attempts ipv4 and ipv6</span>
+<span class="s4"># simultaneously, and then says &quot;The client MUST cache information regarding</span>
+<span class="s4"># the outcome of each connection attempt, and it uses that information to</span>
+<span class="s4"># avoid thrashing the network with subsequent attempts.&quot; Then section 4.2 says</span>
+<span class="s4"># &quot;implementations MUST prefer the first IP address family returned by the</span>
+<span class="s4"># host's address preference policy, unless implementing a stateful</span>
+<span class="s4"># algorithm&quot;. Here &quot;stateful&quot; means &quot;one that caches information about</span>
+<span class="s4"># previous attempts&quot;. So my reading of this is that IF you're starting ipv4</span>
+<span class="s4"># and ipv6 at the same time then you MUST cache the result for ~ten minutes,</span>
+<span class="s4"># but IF you're &quot;preferring&quot; one protocol by trying it first (like we are),</span>
+<span class="s4"># then you don't need to cache.</span>
+<span class="s4">#</span>
+<span class="s4"># Caching is quite tricky: to get it right you need to do things like detect</span>
+<span class="s4"># when the network interfaces are reconfigured, and if you get it wrong then</span>
+<span class="s4"># connection attempts basically just don't work. So we don't even try.</span>
+
+<span class="s4"># &quot;Firefox and Chrome use 300 ms&quot;</span>
+<span class="s4"># https://tools.ietf.org/html/rfc6555#section-6</span>
+<span class="s4"># Though</span>
+<span class="s4">#   https://www.researchgate.net/profile/Vaibhav_Bajpai3/publication/304568993_Measuring_the_Effects_of_Happy_Eyeballs/links/5773848e08ae6f328f6c284c/Measuring-the-Effects-of-Happy-Eyeballs.pdf</span>
+<span class="s4"># claims that Firefox actually uses 0 ms, unless an about:config option is</span>
+<span class="s4"># toggled and then it uses 250 ms.</span>
+<span class="s1">DEFAULT_DELAY </span><span class="s2">= </span><span class="s3">0.250</span>
+
+<span class="s4"># How should we call getaddrinfo? In particular, should we use AI_ADDRCONFIG?</span>
+<span class="s4">#</span>
+<span class="s4"># The idea of AI_ADDRCONFIG is that it only returns addresses that might</span>
+<span class="s4"># work. E.g., if getaddrinfo knows that you don't have any IPv6 connectivity,</span>
+<span class="s4"># then it doesn't return any IPv6 addresses. And this is kinda nice, because</span>
+<span class="s4"># it means maybe you can skip sending AAAA requests entirely. But in practice,</span>
+<span class="s4"># it doesn't really work right.</span>
+<span class="s4">#</span>
+<span class="s4"># - on Linux/glibc, empirically, the default is to return all addresses, and</span>
+<span class="s4"># with AI_ADDRCONFIG then it only returns IPv6 addresses if there is at least</span>
+<span class="s4"># one non-loopback IPv6 address configured... but this can be a link-local</span>
+<span class="s4"># address, so in practice I guess this is basically always configured if IPv6</span>
+<span class="s4"># is enabled at all. OTOH if you pass in &quot;::1&quot; as the target address with</span>
+<span class="s4"># AI_ADDRCONFIG and there's no *external* IPv6 address configured, you get an</span>
+<span class="s4"># error. So AI_ADDRCONFIG mostly doesn't do anything, even when you would want</span>
+<span class="s4"># it to, and when it does do something it might break things that would have</span>
+<span class="s4"># worked.</span>
+<span class="s4">#</span>
+<span class="s4"># - on Windows 10, empirically, if no IPv6 address is configured then by</span>
+<span class="s4"># default they are also suppressed from getaddrinfo (flags=0 and</span>
+<span class="s4"># flags=AI_ADDRCONFIG seem to do the same thing). If you pass AI_ALL, then you</span>
+<span class="s4"># get the full list.</span>
+<span class="s4"># ...except for localhost! getaddrinfo(&quot;localhost&quot;, &quot;80&quot;) gives me ::1, even</span>
+<span class="s4"># though there's no ipv6 and other queries only return ipv4.</span>
+<span class="s4"># If you pass in and IPv6 IP address as the target address, then that's always</span>
+<span class="s4"># returned OK, even with AI_ADDRCONFIG set and no IPv6 configured.</span>
+<span class="s4">#</span>
+<span class="s4"># But I guess other versions of windows messed this up, judging from these bug</span>
+<span class="s4"># reports:</span>
+<span class="s4"># https://bugs.chromium.org/p/chromium/issues/detail?id=5234</span>
+<span class="s4"># https://bugs.chromium.org/p/chromium/issues/detail?id=32522#c50</span>
+<span class="s4">#</span>
+<span class="s4"># So basically the options are either to use AI_ADDRCONFIG and then add some</span>
+<span class="s4"># complicated special cases to work around its brokenness, or else don't use</span>
+<span class="s4"># AI_ADDRCONFIG and accept that sometimes on legacy/misconfigured networks</span>
+<span class="s4"># we'll waste 300 ms trying to connect to a blackholed destination.</span>
+<span class="s4">#</span>
+<span class="s4"># Twisted and Tornado always uses default flags. I think we'll do the same.</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">close_all</span><span class="s2">() </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">set</span><span class="s2">[</span><span class="s1">SocketType</span><span class="s2">], </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s1">sockets_to_close</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">SocketType</span><span class="s2">] = </span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">yield </span><span class="s1">sockets_to_close</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">errs </span><span class="s2">= []</span>
+        <span class="s0">for </span><span class="s1">sock </span><span class="s0">in </span><span class="s1">sockets_to_close</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s0">except </span><span class="s1">BaseException </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+                <span class="s1">errs</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">errs</span><span class="s2">) == </span><span class="s3">1</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">errs</span><span class="s2">[</span><span class="s3">0</span><span class="s2">]</span>
+        <span class="s0">elif </span><span class="s1">errs</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">BaseExceptionGroup</span><span class="s2">(</span><span class="s5">&quot;&quot;</span><span class="s2">, </span><span class="s1">errs</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">(  </span><span class="s4"># type: ignore[explicit-any]</span>
+    <span class="s1">targets</span><span class="s2">: </span><span class="s1">MutableSequence</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">SocketKind</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">]],</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># RFC 6555 section 5.4 says that if getaddrinfo returns multiple address</span>
+    <span class="s4"># families (e.g. IPv4 and IPv6), then you should make sure that your first</span>
+    <span class="s4"># and second attempts use different families:</span>
+    <span class="s4">#</span>
+    <span class="s4">#    https://tools.ietf.org/html/rfc6555#section-5.4</span>
+    <span class="s4">#</span>
+    <span class="s4"># This function post-processes the results from getaddrinfo, in-place, to</span>
+    <span class="s4"># satisfy this requirement.</span>
+    <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">len</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)):</span>
+        <span class="s0">if </span><span class="s1">targets</span><span class="s2">[</span><span class="s1">i</span><span class="s2">][</span><span class="s3">0</span><span class="s2">] != </span><span class="s1">targets</span><span class="s2">[</span><span class="s3">0</span><span class="s2">][</span><span class="s3">0</span><span class="s2">]:</span>
+            <span class="s4"># Found the first entry with a different address family; move it</span>
+            <span class="s4"># so that it becomes the second item on the list.</span>
+            <span class="s0">if </span><span class="s1">i </span><span class="s2">!= </span><span class="s3">1</span><span class="s2">:</span>
+                <span class="s1">targets</span><span class="s2">.</span><span class="s1">insert</span><span class="s2">(</span><span class="s3">1</span><span class="s2">, </span><span class="s1">targets</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">(</span><span class="s1">i</span><span class="s2">))</span>
+            <span class="s0">break</span>
+
+
+<span class="s0">def </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">port</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s1">host </span><span class="s2">= </span><span class="s1">host</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s5">&quot;ascii&quot;</span><span class="s2">) </span><span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">host</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">) </span><span class="s0">else </span><span class="s1">host</span>
+    <span class="s0">if </span><span class="s5">&quot;:&quot; </span><span class="s0">in </span><span class="s1">host</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s5">f&quot;[</span><span class="s0">{</span><span class="s1">host</span><span class="s0">}</span><span class="s5">]:</span><span class="s0">{</span><span class="s1">port</span><span class="s0">}</span><span class="s5">&quot;</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s5">f&quot;</span><span class="s0">{</span><span class="s1">host</span><span class="s0">}</span><span class="s5">:</span><span class="s0">{</span><span class="s1">port</span><span class="s0">}</span><span class="s5">&quot;</span>
+
+
+<span class="s4"># Twisted's HostnameEndpoint has a good set of configurables:</span>
+<span class="s4">#   https://twistedmatrix.com/documents/current/api/twisted.internet.endpoints.HostnameEndpoint.html</span>
+<span class="s4">#</span>
+<span class="s4"># - per-connection timeout</span>
+<span class="s4">#   this doesn't seem useful -- we let you set a timeout on the whole thing</span>
+<span class="s4">#   using Trio's normal mechanisms, and that seems like enough</span>
+<span class="s4"># - delay between attempts</span>
+<span class="s4"># - bind address (but not port!)</span>
+<span class="s4">#   they *don't* support multiple address bindings, like giving the ipv4 and</span>
+<span class="s4">#   ipv6 addresses of the host.</span>
+<span class="s4">#   I think maybe our semantics should be: we accept a list of bind addresses,</span>
+<span class="s4">#   and we bind to the first one that is compatible with the</span>
+<span class="s4">#   connection attempt we want to make, and if none are compatible then we</span>
+<span class="s4">#   don't try to connect to that target.</span>
+<span class="s4">#</span>
+<span class="s4"># XX TODO: implement bind address support</span>
+<span class="s4">#</span>
+<span class="s4"># Actually, the best option is probably to be explicit: {AF_INET: &quot;...&quot;,</span>
+<span class="s4">#   AF_INET6: &quot;...&quot;}</span>
+<span class="s4"># this might be simpler after</span>
+<span class="s0">async def </span><span class="s1">open_tcp_stream</span><span class="s2">(</span>
+    <span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes</span><span class="s2">,</span>
+    <span class="s1">port</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">*,</span>
+    <span class="s1">happy_eyeballs_delay</span><span class="s2">: </span><span class="s1">float </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">DEFAULT_DELAY</span><span class="s2">,</span>
+    <span class="s1">local_address</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; trio</span><span class="s2">.</span><span class="s1">SocketStream</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Connect to the given host and port over TCP. 
+ 
+    If the given ``host`` has multiple IP addresses associated with it, then 
+    we have a problem: which one do we use? 
+ 
+    One approach would be to attempt to connect to the first one, and then if 
+    that fails, attempt to connect to the second one ... until we've tried all 
+    of them. But the problem with this is that if the first IP address is 
+    unreachable (for example, because it's an IPv6 address and our network 
+    discards IPv6 packets), then we might end up waiting tens of seconds for 
+    the first connection attempt to timeout before we try the second address. 
+ 
+    Another approach would be to attempt to connect to all of the addresses at 
+    the same time, in parallel, and then use whichever connection succeeds 
+    first, abandoning the others. This would be fast, but create a lot of 
+    unnecessary load on the network and the remote server. 
+ 
+    This function strikes a balance between these two extremes: it works its 
+    way through the available addresses one at a time, like the first 
+    approach; but, if ``happy_eyeballs_delay`` seconds have passed and it's 
+    still waiting for an attempt to succeed or fail, then it gets impatient 
+    and starts the next connection attempt in parallel. As soon as any one 
+    connection attempt succeeds, all the other attempts are cancelled. This 
+    avoids unnecessary load because most connections will succeed after just 
+    one or two attempts, but if one of the addresses is unreachable then it 
+    doesn't slow us down too much. 
+ 
+    This is known as a &quot;happy eyeballs&quot; algorithm, and our particular variant 
+    is modelled after how Chrome connects to webservers; see `RFC 6555 
+    &lt;https://tools.ietf.org/html/rfc6555&gt;`__ for more details. 
+ 
+    Args: 
+      host (str or bytes): The host to connect to. Can be an IPv4 address, 
+          IPv6 address, or a hostname. 
+ 
+      port (int): The port to connect to. 
+ 
+      happy_eyeballs_delay (float or None): How many seconds to wait for each 
+          connection attempt to succeed or fail before getting impatient and 
+          starting another one in parallel. Set to `None` if you want 
+          to limit to only one connection attempt at a time (like 
+          :func:`socket.create_connection`). Default: 0.25 (250 ms). 
+ 
+      local_address (None or str): The local IP address or hostname to use as 
+          the source for outgoing connections. If ``None``, we let the OS pick 
+          the source IP. 
+ 
+          This is useful in some exotic networking configurations where your 
+          host has multiple IP addresses, and you want to force the use of a 
+          specific one. 
+ 
+          Note that if you pass an IPv4 ``local_address``, then you won't be 
+          able to connect to IPv6 hosts, and vice-versa. If you want to take 
+          advantage of this to force the use of IPv4 or IPv6 without 
+          specifying an exact source address, you can use the IPv4 wildcard 
+          address ``local_address=&quot;0.0.0.0&quot;``, or the IPv6 wildcard address 
+          ``local_address=&quot;::&quot;``. 
+ 
+    Returns: 
+      SocketStream: a :class:`~trio.abc.Stream` connected to the given server. 
+ 
+    Raises: 
+      OSError: if the connection fails. 
+ 
+    See also: 
+      open_ssl_over_tcp_stream 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4"># To keep our public API surface smaller, rule out some cases that</span>
+    <span class="s4"># getaddrinfo will accept in some circumstances, but that act weird or</span>
+    <span class="s4"># have non-portable behavior or are just plain not useful.</span>
+    <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">host</span><span class="s2">, (</span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">)):</span>
+        <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s5">f&quot;host must be str or bytes, not </span><span class="s0">{</span><span class="s1">host</span><span class="s0">!r}</span><span class="s5">&quot;</span><span class="s2">)</span>
+    <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">port</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s5">f&quot;port must be int, not </span><span class="s0">{</span><span class="s1">port</span><span class="s0">!r}</span><span class="s5">&quot;</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">happy_eyeballs_delay </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">happy_eyeballs_delay </span><span class="s2">= </span><span class="s1">DEFAULT_DELAY</span>
+
+    <span class="s1">targets </span><span class="s2">= </span><span class="s0">await </span><span class="s1">getaddrinfo</span><span class="s2">(</span><span class="s1">host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">type</span><span class="s2">=</span><span class="s1">SOCK_STREAM</span><span class="s2">)</span>
+
+    <span class="s4"># I don't think this can actually happen -- if there are no results,</span>
+    <span class="s4"># getaddrinfo should have raised OSError instead of returning an empty</span>
+    <span class="s4"># list. But let's be paranoid and handle it anyway:</span>
+    <span class="s0">if not </span><span class="s1">targets</span><span class="s2">:</span>
+        <span class="s1">msg </span><span class="s2">= </span><span class="s5">f&quot;no results found for hostname lookup: </span><span class="s0">{</span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s1">host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">)</span><span class="s0">}</span><span class="s5">&quot;</span>
+        <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s1">msg</span><span class="s2">)</span>
+
+    <span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)</span>
+
+    <span class="s4"># This list records all the connection failures that we ignored.</span>
+    <span class="s1">oserrors</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">OSError</span><span class="s2">] = []</span>
+
+    <span class="s4"># Keeps track of the socket that we're going to complete with,</span>
+    <span class="s4"># need to make sure this isn't automatically closed</span>
+    <span class="s1">winning_socket</span><span class="s2">: </span><span class="s1">SocketType </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s4"># Try connecting to the specified address. Possible outcomes:</span>
+    <span class="s4"># - success: record connected socket in winning_socket and cancel</span>
+    <span class="s4">#   concurrent attempts</span>
+    <span class="s4"># - failure: record exception in oserrors, set attempt_failed allowing</span>
+    <span class="s4">#   the next connection attempt to start early</span>
+    <span class="s4"># code needs to ensure sockets can be closed appropriately in the</span>
+    <span class="s4"># face of crash or cancellation</span>
+    <span class="s0">async def </span><span class="s1">attempt_connect</span><span class="s2">(</span>
+        <span class="s1">socket_args</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">SocketKind</span><span class="s2">, </span><span class="s1">int</span><span class="s2">],</span>
+        <span class="s1">sockaddr</span><span class="s2">: </span><span class="s1">AddressFormat</span><span class="s2">,</span>
+        <span class="s1">attempt_failed</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">nonlocal </span><span class="s1">winning_socket</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">sock </span><span class="s2">= </span><span class="s1">socket</span><span class="s2">(*</span><span class="s1">socket_args</span><span class="s2">)</span>
+            <span class="s1">open_sockets</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">local_address </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s4"># TCP connections are identified by a 4-tuple:</span>
+                <span class="s4">#</span>
+                <span class="s4">#   (local IP, local port, remote IP, remote port)</span>
+                <span class="s4">#</span>
+                <span class="s4"># So if a single local IP wants to make multiple connections</span>
+                <span class="s4"># to the same (remote IP, remote port) pair, then those</span>
+                <span class="s4"># connections have to use different local ports, or else TCP</span>
+                <span class="s4"># won't be able to tell them apart. OTOH, if you have multiple</span>
+                <span class="s4"># connections to different remote IP/ports, then those</span>
+                <span class="s4"># connections can share a local port.</span>
+                <span class="s4">#</span>
+                <span class="s4"># Normally, when you call bind(), the kernel will immediately</span>
+                <span class="s4"># assign a specific local port to your socket. At this point</span>
+                <span class="s4"># the kernel doesn't know which (remote IP, remote port)</span>
+                <span class="s4"># you're going to use, so it has to pick a local port that</span>
+                <span class="s4"># *no* other connection is using. That's the only way to</span>
+                <span class="s4"># guarantee that this local port will be usable later when we</span>
+                <span class="s4"># call connect(). (Alternatively, you can set SO_REUSEADDR to</span>
+                <span class="s4"># allow multiple nascent connections to share the same port,</span>
+                <span class="s4"># but then connect() might fail with EADDRNOTAVAIL if we get</span>
+                <span class="s4"># unlucky and our TCP 4-tuple ends up colliding with another</span>
+                <span class="s4"># unrelated connection.)</span>
+                <span class="s4">#</span>
+                <span class="s4"># So calling bind() before connect() works, but it disables</span>
+                <span class="s4"># sharing of local ports. This is inefficient: it makes you</span>
+                <span class="s4"># more likely to run out of local ports.</span>
+                <span class="s4">#</span>
+                <span class="s4"># But on some versions of Linux, we can re-enable sharing of</span>
+                <span class="s4"># local ports by setting a special flag. This flag tells</span>
+                <span class="s4"># bind() to only bind the IP, and not the port. That way,</span>
+                <span class="s4"># connect() is allowed to pick the the port, and it can do a</span>
+                <span class="s4"># better job of it because it knows the remote IP/port.</span>
+                <span class="s0">with </span><span class="s1">suppress</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">AttributeError</span><span class="s2">):</span>
+                    <span class="s1">sock</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span>
+                        <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">IPPROTO_IP</span><span class="s2">,</span>
+                        <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">IP_BIND_ADDRESS_NO_PORT</span><span class="s2">,</span>
+                        <span class="s3">1</span><span class="s2">,</span>
+                    <span class="s2">)</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">bind</span><span class="s2">((</span><span class="s1">local_address</span><span class="s2">, </span><span class="s3">0</span><span class="s2">))</span>
+                <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span>
+                        <span class="s5">f&quot;local_address=</span><span class="s0">{</span><span class="s1">local_address</span><span class="s0">!r} </span><span class="s5">is incompatible &quot;</span>
+                        <span class="s5">f&quot;with remote address </span><span class="s0">{</span><span class="s1">sockaddr</span><span class="s0">!r}</span><span class="s5">&quot;</span><span class="s2">,</span>
+                    <span class="s2">) </span><span class="s0">from None</span>
+
+            <span class="s0">await </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">connect</span><span class="s2">(</span><span class="s1">sockaddr</span><span class="s2">)</span>
+
+            <span class="s4"># Success! Save the winning socket and cancel all outstanding</span>
+            <span class="s4"># connection attempts.</span>
+            <span class="s1">winning_socket </span><span class="s2">= </span><span class="s1">sock</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+            <span class="s4"># This connection attempt failed, but the next one might</span>
+            <span class="s4"># succeed. Save the error for later so we can report it if</span>
+            <span class="s4"># everything fails, and tell the next attempt that it should go</span>
+            <span class="s4"># ahead (if it hasn't already).</span>
+            <span class="s1">oserrors</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+            <span class="s1">attempt_failed</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">close_all</span><span class="s2">() </span><span class="s0">as </span><span class="s1">open_sockets</span><span class="s2">:</span>
+        <span class="s4"># nursery spawns a task for each connection attempt, will be</span>
+        <span class="s4"># cancelled by the task that gets a successful connection</span>
+        <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">address_family</span><span class="s2">, </span><span class="s1">socket_type</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">addr </span><span class="s0">in </span><span class="s1">targets</span><span class="s2">:</span>
+                <span class="s4"># create an event to indicate connection failure,</span>
+                <span class="s4"># allowing the next target to be tried early</span>
+                <span class="s1">attempt_failed </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+
+                <span class="s4"># workaround to check types until typing of nursery.start_soon improved</span>
+                <span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">attempt_connect</span><span class="s2">(</span>
+                        <span class="s2">(</span><span class="s1">address_family</span><span class="s2">, </span><span class="s1">socket_type</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">),</span>
+                        <span class="s1">addr</span><span class="s2">,</span>
+                        <span class="s1">attempt_failed</span><span class="s2">,</span>
+                    <span class="s2">)</span>
+
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span>
+                    <span class="s1">attempt_connect</span><span class="s2">,</span>
+                    <span class="s2">(</span><span class="s1">address_family</span><span class="s2">, </span><span class="s1">socket_type</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">),</span>
+                    <span class="s1">addr</span><span class="s2">,</span>
+                    <span class="s1">attempt_failed</span><span class="s2">,</span>
+                <span class="s2">)</span>
+
+                <span class="s4"># give this attempt at most this time before moving on</span>
+                <span class="s0">with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">move_on_after</span><span class="s2">(</span><span class="s1">happy_eyeballs_delay</span><span class="s2">):</span>
+                    <span class="s0">await </span><span class="s1">attempt_failed</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+
+        <span class="s4"># nothing succeeded</span>
+        <span class="s0">if </span><span class="s1">winning_socket </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">oserrors</span><span class="s2">) == </span><span class="s1">len</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)</span>
+            <span class="s1">msg </span><span class="s2">= </span><span class="s5">f&quot;all attempts to connect to </span><span class="s0">{</span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s1">host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">)</span><span class="s0">} </span><span class="s5">failed&quot;</span>
+            <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s1">msg</span><span class="s2">) </span><span class="s0">from </span><span class="s1">ExceptionGroup</span><span class="s2">(</span><span class="s1">msg</span><span class="s2">, </span><span class="s1">oserrors</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">stream </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SocketStream</span><span class="s2">(</span><span class="s1">winning_socket</span><span class="s2">)</span>
+            <span class="s1">open_sockets</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">winning_socket</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">stream</span>
+</pre>
+</body>
+</html>

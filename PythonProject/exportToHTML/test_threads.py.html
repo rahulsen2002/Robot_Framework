@@ -1,0 +1,1166 @@
+<html>
+<head>
+<title>test_threads.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_threads.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">contextvars</span>
+<span class="s0">import </span><span class="s1">queue </span><span class="s0">as </span><span class="s1">stdlib_queue</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">import </span><span class="s1">weakref</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">NoReturn</span><span class="s2">,</span>
+    <span class="s1">TypeVar</span><span class="s2">,</span>
+    <span class="s1">Union</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+<span class="s0">import </span><span class="s1">sniffio</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">CancelScope</span><span class="s2">,</span>
+    <span class="s1">CapacityLimiter</span><span class="s2">,</span>
+    <span class="s1">Event</span><span class="s2">,</span>
+    <span class="s1">_core</span><span class="s2">,</span>
+    <span class="s1">fail_after</span><span class="s2">,</span>
+    <span class="s1">move_on_after</span><span class="s2">,</span>
+    <span class="s1">sleep</span><span class="s2">,</span>
+    <span class="s1">sleep_forever</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_tests</span><span class="s2">.</span><span class="s1">test_ki </span><span class="s0">import </span><span class="s1">ki_self</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_tests</span><span class="s2">.</span><span class="s1">tutil </span><span class="s0">import </span><span class="s1">slow</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_threads </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">active_thread_count</span><span class="s2">,</span>
+    <span class="s1">current_default_thread_limiter</span><span class="s2">,</span>
+    <span class="s1">from_thread_check_cancelled</span><span class="s2">,</span>
+    <span class="s1">from_thread_run</span><span class="s2">,</span>
+    <span class="s1">from_thread_run_sync</span><span class="s2">,</span>
+    <span class="s1">to_thread_run_sync</span><span class="s2">,</span>
+    <span class="s1">wait_all_threads_completed</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">wait_all_tasks_blocked</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncGenerator</span><span class="s2">, </span><span class="s1">Awaitable</span><span class="s2">, </span><span class="s1">Callable</span>
+
+    <span class="s0">from </span><span class="s1">outcome </span><span class="s0">import </span><span class="s1">Outcome</span>
+
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">lowlevel </span><span class="s0">import </span><span class="s1">Task</span>
+
+<span class="s1">RecordType </span><span class="s2">= </span><span class="s1">list</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">, </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">]]]]</span>
+<span class="s1">T </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;T&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_do_in_trio_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">trio_thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">check_case</span><span class="s2">(  </span><span class="s4"># type: ignore[explicit-any]</span>
+        <span class="s1">do_in_trio_thread</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">],</span>
+        <span class="s1">fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">T </span><span class="s2">| </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]],</span>
+        <span class="s1">expected</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">T</span><span class="s2">],</span>
+        <span class="s1">trio_token</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioToken </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">record</span><span class="s2">: </span><span class="s1">RecordType </span><span class="s2">= []</span>
+
+        <span class="s0">def </span><span class="s1">threadfn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;start&quot;</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()))</span>
+                <span class="s1">x </span><span class="s2">= </span><span class="s1">do_in_trio_thread</span><span class="s2">(</span><span class="s1">fn</span><span class="s2">, </span><span class="s1">record</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">trio_token</span><span class="s2">)</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;got&quot;</span><span class="s2">, </span><span class="s1">x</span><span class="s2">))</span>
+            <span class="s0">except </span><span class="s1">BaseException </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+                <span class="s1">print</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;error&quot;</span><span class="s2">, </span><span class="s1">type</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)))</span>
+
+        <span class="s1">child_thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">(</span><span class="s1">target</span><span class="s2">=</span><span class="s1">threadfn</span><span class="s2">, </span><span class="s1">daemon</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s1">child_thread</span><span class="s2">.</span><span class="s1">start</span><span class="s2">()</span>
+        <span class="s0">while </span><span class="s1">child_thread</span><span class="s2">.</span><span class="s1">is_alive</span><span class="s2">():</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;yawn&quot;</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.01</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [(</span><span class="s3">&quot;start&quot;</span><span class="s2">, </span><span class="s1">child_thread</span><span class="s2">), (</span><span class="s3">&quot;f&quot;</span><span class="s2">, </span><span class="s1">trio_thread</span><span class="s2">), </span><span class="s1">expected</span><span class="s2">]</span>
+
+    <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">f1</span><span class="s2">(</span><span class="s1">record</span><span class="s2">: </span><span class="s1">RecordType</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;f&quot;</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()))</span>
+        <span class="s0">return </span><span class="s5">2</span>
+
+    <span class="s0">await </span><span class="s1">check_case</span><span class="s2">(</span><span class="s1">from_thread_run_sync</span><span class="s2">, </span><span class="s1">f1</span><span class="s2">, (</span><span class="s3">&quot;got&quot;</span><span class="s2">, </span><span class="s5">2</span><span class="s2">), </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">f2</span><span class="s2">(</span><span class="s1">record</span><span class="s2">: </span><span class="s1">RecordType</span><span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;f&quot;</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()))</span>
+        <span class="s0">raise </span><span class="s1">ValueError</span>
+
+    <span class="s0">await </span><span class="s1">check_case</span><span class="s2">(</span><span class="s1">from_thread_run_sync</span><span class="s2">, </span><span class="s1">f2</span><span class="s2">, (</span><span class="s3">&quot;error&quot;</span><span class="s2">, </span><span class="s1">ValueError</span><span class="s2">), </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">f3</span><span class="s2">(</span><span class="s1">record</span><span class="s2">: </span><span class="s1">RecordType</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;f&quot;</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()))</span>
+        <span class="s0">return </span><span class="s5">3</span>
+
+    <span class="s0">await </span><span class="s1">check_case</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">f3</span><span class="s2">, (</span><span class="s3">&quot;got&quot;</span><span class="s2">, </span><span class="s5">3</span><span class="s2">), </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">f4</span><span class="s2">(</span><span class="s1">record</span><span class="s2">: </span><span class="s1">RecordType</span><span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s3">&quot;f&quot;</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()))</span>
+        <span class="s0">raise </span><span class="s1">KeyError</span>
+
+    <span class="s0">await </span><span class="s1">check_case</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">f4</span><span class="s2">, (</span><span class="s3">&quot;error&quot;</span><span class="s2">, </span><span class="s1">KeyError</span><span class="s2">), </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_do_in_trio_thread_from_trio_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">)  </span><span class="s4"># pragma: no branch</span>
+
+    <span class="s0">async def </span><span class="s1">foo</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">foo</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_run_in_trio_thread_ki</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># if we get a control-C during a run_in_trio_thread, then it propagates</span>
+    <span class="s4"># back to the caller (slick!)</span>
+    <span class="s1">record </span><span class="s2">= </span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">check_run_in_trio_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">trio_thread_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;in Trio thread&quot;</span><span class="s2">)</span>
+            <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;ki_self&quot;</span><span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">ki_self</span><span class="s2">()</span>
+            <span class="s0">finally</span><span class="s2">:</span>
+                <span class="s0">import </span><span class="s1">sys</span>
+
+                <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;finally&quot;</span><span class="s2">, </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">exc_info</span><span class="s2">())</span>
+
+        <span class="s0">async def </span><span class="s1">trio_thread_afn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">trio_thread_fn</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">external_thread_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;running&quot;</span><span class="s2">)</span>
+                <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">trio_thread_fn</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">KeyboardInterrupt</span><span class="s2">:</span>
+                <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;ok1&quot;</span><span class="s2">)</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s3">&quot;ok1&quot;</span><span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">trio_thread_afn</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">KeyboardInterrupt</span><span class="s2">:</span>
+                <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;ok2&quot;</span><span class="s2">)</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s3">&quot;ok2&quot;</span><span class="s2">)</span>
+
+        <span class="s1">thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">(</span><span class="s1">target</span><span class="s2">=</span><span class="s1">external_thread_fn</span><span class="s2">)</span>
+        <span class="s1">thread</span><span class="s2">.</span><span class="s1">start</span><span class="s2">()</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;waiting&quot;</span><span class="s2">)</span>
+        <span class="s0">while </span><span class="s1">thread</span><span class="s2">.</span><span class="s1">is_alive</span><span class="s2">():  </span><span class="s4"># noqa: ASYNC110</span>
+            <span class="s0">await </span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.01</span><span class="s2">)  </span><span class="s4"># Fine to poll in tests.</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;waited, joining&quot;</span><span class="s2">)</span>
+        <span class="s1">thread</span><span class="s2">.</span><span class="s1">join</span><span class="s2">()</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;done&quot;</span><span class="s2">)</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">check_run_in_trio_thread</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== {</span><span class="s3">&quot;ok1&quot;</span><span class="s2">, </span><span class="s3">&quot;ok2&quot;</span><span class="s2">}</span>
+
+
+<span class="s0">def </span><span class="s1">test_await_in_trio_thread_while_main_exits</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+    <span class="s1">ev </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">trio_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;sleeping&quot;</span><span class="s2">)</span>
+        <span class="s1">ev</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">SUCCEEDED</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">(</span><span class="s1">token</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioToken</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">trio_fn</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;cancelled&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">main</span><span class="s2">() </span><span class="s1">-&gt; threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">:</span>
+        <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+        <span class="s1">thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">(</span><span class="s1">target</span><span class="s2">=</span><span class="s1">thread_fn</span><span class="s2">, </span><span class="s1">args</span><span class="s2">=(</span><span class="s1">token</span><span class="s2">,))</span>
+        <span class="s1">thread</span><span class="s2">.</span><span class="s1">start</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">ev</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;sleeping&quot;</span><span class="s2">]</span>
+        <span class="s0">return </span><span class="s1">thread</span>
+
+    <span class="s1">thread </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main</span><span class="s2">)</span>
+    <span class="s1">thread</span><span class="s2">.</span><span class="s1">join</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;sleeping&quot;</span><span class="s2">, </span><span class="s3">&quot;cancelled&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_named_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">ending </span><span class="s2">= </span><span class="s3">&quot; from trio._tests.test_threads.test_named_thread&quot;</span>
+
+    <span class="s0">def </span><span class="s1">inner</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s3">&quot;inner&quot; </span><span class="s2">+ </span><span class="s1">ending</span><span class="s2">) </span><span class="s1">-&gt; threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">().</span><span class="s1">name </span><span class="s2">== </span><span class="s1">name</span>
+        <span class="s0">return </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Callable</span><span class="s2">[[], </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">partial</span><span class="s2">(</span><span class="s1">inner</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+
+    <span class="s4"># test defaults</span>
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">inner</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">inner</span><span class="s2">, </span><span class="s1">thread_name</span><span class="s2">=</span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s4"># functools.partial doesn't have __name__, so defaults to None</span>
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">(</span><span class="s3">&quot;None&quot; </span><span class="s2">+ </span><span class="s1">ending</span><span class="s2">))</span>
+
+    <span class="s4"># test that you can set a custom name, and that it's reset afterwards</span>
+    <span class="s0">async def </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">thread </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">(</span><span class="s1">name</span><span class="s2">), </span><span class="s1">thread_name</span><span class="s2">=</span><span class="s1">name</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">re</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s3">r&quot;Trio thread [0-9]*&quot;</span><span class="s2">, </span><span class="s1">thread</span><span class="s2">.</span><span class="s1">name</span><span class="s2">)</span>
+
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;&quot;</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;fobiedoo&quot;</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;name_longer_than_15_characters&quot;</span><span class="s2">)</span>
+
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;💙&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_get_thread_name</span><span class="s2">(</span><span class="s1">ident</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">import </span><span class="s1">ctypes</span>
+    <span class="s0">import </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">util</span>
+
+    <span class="s1">libpthread_path </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">util</span><span class="s2">.</span><span class="s1">find_library</span><span class="s2">(</span><span class="s3">&quot;pthread&quot;</span><span class="s2">)</span>
+    <span class="s0">if not </span><span class="s1">libpthread_path</span><span class="s2">:</span>
+        <span class="s4"># musl includes pthread functions directly in libc.so</span>
+        <span class="s4"># (but note that find_library(&quot;c&quot;) does not work on musl,</span>
+        <span class="s4">#  see: https://github.com/python/cpython/issues/65821)</span>
+        <span class="s4"># so try that library instead</span>
+        <span class="s4"># if it doesn't exist, CDLL() will fail below</span>
+        <span class="s1">libpthread_path </span><span class="s2">= </span><span class="s3">&quot;libc.so&quot;</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">libpthread </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">CDLL</span><span class="s2">(</span><span class="s1">libpthread_path</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">Exception</span><span class="s2">:</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s3">f&quot;no pthread on </span><span class="s0">{</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+        <span class="s0">return None</span>
+
+    <span class="s1">pthread_getname_np </span><span class="s2">= </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">libpthread</span><span class="s2">, </span><span class="s3">&quot;pthread_getname_np&quot;</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s4"># this should never fail on any platforms afaik</span>
+    <span class="s0">assert </span><span class="s1">pthread_getname_np</span>
+
+    <span class="s4"># thankfully getname signature doesn't differ between platforms</span>
+    <span class="s1">pthread_getname_np</span><span class="s2">.</span><span class="s1">argtypes </span><span class="s2">= [</span>
+        <span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_void_p</span><span class="s2">,</span>
+        <span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_char_p</span><span class="s2">,</span>
+        <span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_size_t</span><span class="s2">,</span>
+    <span class="s2">]</span>
+    <span class="s1">pthread_getname_np</span><span class="s2">.</span><span class="s1">restype </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_int</span>
+
+    <span class="s1">name_buffer </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">create_string_buffer</span><span class="s2">(</span><span class="s6">b&quot;&quot;</span><span class="s2">, </span><span class="s1">size</span><span class="s2">=</span><span class="s5">16</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">ident </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">ident </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">get_ident</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">pthread_getname_np</span><span class="s2">(</span><span class="s1">ident</span><span class="s2">, </span><span class="s1">name_buffer</span><span class="s2">, </span><span class="s5">16</span><span class="s2">) == </span><span class="s5">0</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">name_buffer</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">()</span>
+    <span class="s0">except </span><span class="s1">UnicodeDecodeError </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s4"># used for debugging when testing via CI</span>
+        <span class="s1">pytest</span><span class="s2">.</span><span class="s1">fail</span><span class="s2">(</span><span class="s3">f&quot;value: </span><span class="s0">{</span><span class="s1">name_buffer</span><span class="s2">.</span><span class="s1">value</span><span class="s0">!r}</span><span class="s3">, exception: </span><span class="s0">{</span><span class="s1">e</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+
+
+<span class="s4"># test os thread naming</span>
+<span class="s4"># this depends on pthread being available, which is the case on 99.9% of linux machines</span>
+<span class="s4"># and most mac machines. So unless the platform is linux it will just skip</span>
+<span class="s4"># in case it fails to fetch the os thread name.</span>
+<span class="s0">async def </span><span class="s1">test_named_thread_os</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">inner</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">:</span>
+        <span class="s1">os_thread_name </span><span class="s2">= </span><span class="s1">_get_thread_name</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">os_thread_name </span><span class="s0">is None and </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;linux&quot;</span><span class="s2">:</span>
+            <span class="s1">pytest</span><span class="s2">.</span><span class="s1">skip</span><span class="s2">(</span><span class="s3">f&quot;no pthread OS support on </span><span class="s0">{</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">os_thread_name </span><span class="s2">== </span><span class="s1">name</span><span class="s2">[:</span><span class="s5">15</span><span class="s2">]</span>
+
+        <span class="s0">return </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Callable</span><span class="s2">[[], </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">partial</span><span class="s2">(</span><span class="s1">inner</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+
+    <span class="s4"># test defaults</span>
+    <span class="s1">default </span><span class="s2">= </span><span class="s3">&quot;None from trio._tests.test_threads.test_named_thread&quot;</span>
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">(</span><span class="s1">default</span><span class="s2">))</span>
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">(</span><span class="s1">default</span><span class="s2">), </span><span class="s1">thread_name</span><span class="s2">=</span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s4"># test that you can set a custom name, and that it's reset afterwards</span>
+    <span class="s0">async def </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">expected </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">expected </span><span class="s2">= </span><span class="s1">name</span>
+        <span class="s1">thread </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">), </span><span class="s1">thread_name</span><span class="s2">=</span><span class="s1">name</span><span class="s2">)</span>
+
+        <span class="s1">os_thread_name </span><span class="s2">= </span><span class="s1">_get_thread_name</span><span class="s2">(</span><span class="s1">thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">os_thread_name </span><span class="s0">is not None</span><span class="s2">, </span><span class="s3">&quot;should skip earlier if this is the case&quot;</span>
+        <span class="s0">assert </span><span class="s1">re</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s3">r&quot;Trio thread [0-9]*&quot;</span><span class="s2">, </span><span class="s1">os_thread_name</span><span class="s2">)</span>
+
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;&quot;</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;fobiedoo&quot;</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;name_longer_than_15_characters&quot;</span><span class="s2">)</span>
+
+    <span class="s0">await </span><span class="s1">test_thread_name</span><span class="s2">(</span><span class="s3">&quot;💙&quot;</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">=</span><span class="s3">&quot;?&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_has_pthread_setname_np</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_thread_cache </span><span class="s0">import </span><span class="s1">get_os_thread_name_func</span>
+
+    <span class="s1">k </span><span class="s2">= </span><span class="s1">get_os_thread_name_func</span><span class="s2">()</span>
+    <span class="s0">if </span><span class="s1">k </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;linux&quot;</span>
+        <span class="s1">pytest</span><span class="s2">.</span><span class="s1">skip</span><span class="s2">(</span><span class="s3">f&quot;no pthread_setname_np on </span><span class="s0">{</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_in_worker_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">trio_thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">(</span><span class="s1">x</span><span class="s2">: </span><span class="s1">T</span><span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">T</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">x</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">())</span>
+
+    <span class="s1">x</span><span class="s2">, </span><span class="s1">child_thread </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s5">1</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">x </span><span class="s2">== </span><span class="s5">1</span>
+    <span class="s0">assert </span><span class="s1">child_thread </span><span class="s2">!= </span><span class="s1">trio_thread</span>
+
+    <span class="s0">def </span><span class="s1">g</span><span class="s2">() </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">())</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span>
+        <span class="s1">ValueError</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;^&lt;Thread\(Trio thread \d+, started daemon \d+\)&gt;$&quot;</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">g</span><span class="s2">)</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">args</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">args</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] != </span><span class="s1">trio_thread</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_in_worker_thread_cancellation</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">register</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] = [</span><span class="s0">None</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">(</span><span class="s1">q</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># Make the thread block for a controlled amount of time</span>
+        <span class="s1">register</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] = </span><span class="s3">&quot;blocking&quot;</span>
+        <span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s1">register</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] = </span><span class="s3">&quot;finished&quot;</span>
+
+    <span class="s0">async def </span><span class="s1">child</span><span class="s2">(</span><span class="s1">q</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s0">None</span><span class="s2">], </span><span class="s1">abandon_on_cancel</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;start&quot;</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">return await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">q</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s1">abandon_on_cancel</span><span class="s2">)</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;exit&quot;</span><span class="s2">)</span>
+
+    <span class="s1">record</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s0">None</span><span class="s2">] = </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">, </span><span class="s1">q</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s4"># Give it a chance to get started. (This is important because</span>
+        <span class="s4"># to_thread_run_sync does a checkpoint_if_cancelled before</span>
+        <span class="s4"># blocking on the thread, and we don't want to trigger this.)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;start&quot;</span><span class="s2">]</span>
+        <span class="s4"># Then cancel it.</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+    <span class="s4"># The task exited, but the thread didn't:</span>
+    <span class="s0">assert </span><span class="s1">register</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] != </span><span class="s3">&quot;finished&quot;</span>
+    <span class="s4"># Put the thread out of its misery:</span>
+    <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+    <span class="s0">while </span><span class="s1">register</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] != </span><span class="s3">&quot;finished&quot;</span><span class="s2">:</span>
+        <span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.01</span><span class="s2">)  </span><span class="s4"># noqa: ASYNC251  # Need to wait for OS thread</span>
+
+    <span class="s4"># This one can't be cancelled</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+    <span class="s1">register</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] = </span><span class="s0">None</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">, </span><span class="s1">q</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">(</span><span class="s1">shield</span><span class="s2">=</span><span class="s0">True</span><span class="s2">):</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">10</span><span class="s2">):</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+        <span class="s4"># It's still running</span>
+        <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;start&quot;</span><span class="s2">]</span>
+        <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+        <span class="s4"># Now it exits</span>
+
+    <span class="s4"># But if we cancel *before* it enters, the entry is itself a cancellation</span>
+    <span class="s4"># point</span>
+    <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">scope</span><span class="s2">:</span>
+        <span class="s1">scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">child</span><span class="s2">(</span><span class="s1">q</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+
+
+<span class="s4"># Make sure that if trio.run exits, and then the thread finishes, then that's</span>
+<span class="s4"># handled gracefully. (Requires that the thread result machinery be prepared</span>
+<span class="s4"># for call_soon to raise RunFinishedError.)</span>
+<span class="s0">def </span><span class="s1">test_run_in_worker_thread_abandoned</span><span class="s2">(</span>
+    <span class="s1">capfd</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_thread_cache</span><span class="s2">, </span><span class="s3">&quot;IDLE_TIMEOUT&quot;</span><span class="s2">, </span><span class="s5">0.01</span><span class="s2">)</span>
+
+    <span class="s1">q1</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s0">None</span><span class="s2">] = </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">()</span>
+    <span class="s1">q2</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">] = </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">q1</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s1">q2</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">())</span>
+
+    <span class="s0">async def </span><span class="s1">main</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">async def </span><span class="s1">child</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main</span><span class="s2">)</span>
+
+    <span class="s1">q1</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+    <span class="s4"># This makes sure:</span>
+    <span class="s4"># - the thread actually ran</span>
+    <span class="s4"># - that thread has finished before we check for its output</span>
+    <span class="s1">thread </span><span class="s2">= </span><span class="s1">q2</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s0">while </span><span class="s1">thread</span><span class="s2">.</span><span class="s1">is_alive</span><span class="s2">():</span>
+        <span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.01</span><span class="s2">)  </span><span class="s4"># pragma: no cover</span>
+
+    <span class="s4"># Make sure we don't have a &quot;Exception in thread ...&quot; dump to the console:</span>
+    <span class="s1">out</span><span class="s2">, </span><span class="s1">err </span><span class="s2">= </span><span class="s1">capfd</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s3">&quot;Exception in thread&quot; </span><span class="s0">not in </span><span class="s1">out</span>
+    <span class="s0">assert </span><span class="s3">&quot;Exception in thread&quot; </span><span class="s0">not in </span><span class="s1">err</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span><span class="s3">&quot;MAX&quot;</span><span class="s2">, [</span><span class="s5">3</span><span class="s2">, </span><span class="s5">5</span><span class="s2">, </span><span class="s5">10</span><span class="s2">])</span>
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span><span class="s3">&quot;cancel&quot;</span><span class="s2">, [</span><span class="s0">False</span><span class="s2">, </span><span class="s0">True</span><span class="s2">])</span>
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span><span class="s3">&quot;use_default_limiter&quot;</span><span class="s2">, [</span><span class="s0">False</span><span class="s2">, </span><span class="s0">True</span><span class="s2">])</span>
+<span class="s0">async def </span><span class="s1">test_run_in_worker_thread_limiter</span><span class="s2">(</span>
+    <span class="s1">MAX</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s1">cancel</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">,</span>
+    <span class="s1">use_default_limiter</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># This test is a bit tricky. The goal is to make sure that if we set</span>
+    <span class="s4"># limiter=CapacityLimiter(MAX), then in fact only MAX threads are ever</span>
+    <span class="s4"># running at a time, even if there are more concurrent calls to</span>
+    <span class="s4"># to_thread_run_sync, and even if some of those are cancelled. And</span>
+    <span class="s4"># also to make sure that the default limiter actually limits.</span>
+    <span class="s1">COUNT </span><span class="s2">= </span><span class="s5">2 </span><span class="s2">* </span><span class="s1">MAX</span>
+    <span class="s1">gate </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">lock </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Lock</span><span class="s2">()</span>
+    <span class="s0">if </span><span class="s1">use_default_limiter</span><span class="s2">:</span>
+        <span class="s1">c </span><span class="s2">= </span><span class="s1">current_default_thread_limiter</span><span class="s2">()</span>
+        <span class="s1">orig_total_tokens </span><span class="s2">= </span><span class="s1">c</span><span class="s2">.</span><span class="s1">total_tokens</span>
+        <span class="s1">c</span><span class="s2">.</span><span class="s1">total_tokens </span><span class="s2">= </span><span class="s1">MAX</span>
+        <span class="s1">limiter_arg </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">c </span><span class="s2">= </span><span class="s1">CapacityLimiter</span><span class="s2">(</span><span class="s1">MAX</span><span class="s2">)</span>
+        <span class="s1">orig_total_tokens </span><span class="s2">= </span><span class="s1">MAX</span>
+        <span class="s1">limiter_arg </span><span class="s2">= </span><span class="s1">c</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s4"># We used to use regular variables and 'nonlocal' here, but it turns</span>
+        <span class="s4"># out that it's not safe to assign to closed-over variables that are</span>
+        <span class="s4"># visible in multiple threads, at least as of CPython 3.10 and PyPy</span>
+        <span class="s4"># 7.3:</span>
+        <span class="s4">#</span>
+        <span class="s4">#   https://bugs.python.org/issue30744</span>
+        <span class="s4">#   https://bitbucket.org/pypy/pypy/issues/2591/</span>
+        <span class="s4">#</span>
+        <span class="s4"># Mutating them in-place is OK though (as long as you use proper</span>
+        <span class="s4"># locking etc.).</span>
+        <span class="s0">class </span><span class="s1">state</span><span class="s2">:</span>
+            <span class="s1">ran</span><span class="s2">: </span><span class="s1">int</span>
+            <span class="s1">high_water</span><span class="s2">: </span><span class="s1">int</span>
+            <span class="s1">running</span><span class="s2">: </span><span class="s1">int</span>
+            <span class="s1">parked</span><span class="s2">: </span><span class="s1">int</span>
+
+        <span class="s1">state</span><span class="s2">.</span><span class="s1">ran </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s1">state</span><span class="s2">.</span><span class="s1">high_water </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s1">state</span><span class="s2">.</span><span class="s1">running </span><span class="s2">= </span><span class="s5">0</span>
+        <span class="s1">state</span><span class="s2">.</span><span class="s1">parked </span><span class="s2">= </span><span class="s5">0</span>
+
+        <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">(</span><span class="s1">cancel_scope</span><span class="s2">: </span><span class="s1">CancelScope</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;thread_fn start&quot;</span><span class="s2">)</span>
+            <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+            <span class="s0">with </span><span class="s1">lock</span><span class="s2">:</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">ran </span><span class="s2">+= </span><span class="s5">1</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">running </span><span class="s2">+= </span><span class="s5">1</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">high_water </span><span class="s2">= </span><span class="s1">max</span><span class="s2">(</span><span class="s1">state</span><span class="s2">.</span><span class="s1">high_water</span><span class="s2">, </span><span class="s1">state</span><span class="s2">.</span><span class="s1">running</span><span class="s2">)</span>
+                <span class="s4"># The Trio thread below watches this value and uses it as a</span>
+                <span class="s4"># signal that all the stats calculations have finished.</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">parked </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s1">gate</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+            <span class="s0">with </span><span class="s1">lock</span><span class="s2">:</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">parked </span><span class="s2">-= </span><span class="s5">1</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">running </span><span class="s2">-= </span><span class="s5">1</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;thread_fn exiting&quot;</span><span class="s2">)</span>
+
+        <span class="s0">async def </span><span class="s1">run_thread</span><span class="s2">(</span><span class="s1">event</span><span class="s2">: </span><span class="s1">Event</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span>
+                    <span class="s1">thread_fn</span><span class="s2">,</span>
+                    <span class="s1">cancel_scope</span><span class="s2">,</span>
+                    <span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s1">cancel</span><span class="s2">,</span>
+                    <span class="s1">limiter</span><span class="s2">=</span><span class="s1">limiter_arg</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;run_thread finished, cancelled:&quot;</span><span class="s2">, </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span><span class="s2">)</span>
+            <span class="s1">event</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;spawning&quot;</span><span class="s2">)</span>
+            <span class="s1">events </span><span class="s2">= []</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">COUNT</span><span class="s2">):</span>
+                <span class="s1">events</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">Event</span><span class="s2">())</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">run_thread</span><span class="s2">, </span><span class="s1">events</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">])</span>
+                <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s4"># In the cancel case, we in particular want to make sure that the</span>
+            <span class="s4"># cancelled tasks don't release the semaphore. So let's wait until</span>
+            <span class="s4"># at least one of them has exited, and that everything has had a</span>
+            <span class="s4"># chance to settle down from this, before we check that everyone</span>
+            <span class="s4"># who's supposed to be waiting is waiting:</span>
+            <span class="s0">if </span><span class="s1">cancel</span><span class="s2">:</span>
+                <span class="s1">print</span><span class="s2">(</span><span class="s3">&quot;waiting for first cancellation to clear&quot;</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">events</span><span class="s2">[</span><span class="s5">0</span><span class="s2">].</span><span class="s1">wait</span><span class="s2">()</span>
+                <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s4"># Then wait until the first MAX threads are parked in gate.wait(),</span>
+            <span class="s4"># and the next MAX threads are parked on the semaphore, to make</span>
+            <span class="s4"># sure no-one is sneaking past, and to make sure the high_water</span>
+            <span class="s4"># check below won't fail due to scheduling issues. (It could still</span>
+            <span class="s4"># fail if too many threads are let through here.)</span>
+            <span class="s0">while </span><span class="s2">(  </span><span class="s4"># noqa: ASYNC110</span>
+                <span class="s1">state</span><span class="s2">.</span><span class="s1">parked </span><span class="s2">!= </span><span class="s1">MAX </span><span class="s0">or </span><span class="s1">c</span><span class="s2">.</span><span class="s1">statistics</span><span class="s2">().</span><span class="s1">tasks_waiting </span><span class="s2">!= </span><span class="s1">MAX</span>
+            <span class="s2">):</span>
+                <span class="s0">await </span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.01</span><span class="s2">)  </span><span class="s4"># pragma: no cover</span>
+            <span class="s4"># Then release the threads</span>
+            <span class="s1">gate</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+        <span class="s0">assert </span><span class="s1">state</span><span class="s2">.</span><span class="s1">high_water </span><span class="s2">== </span><span class="s1">MAX</span>
+
+        <span class="s0">if </span><span class="s1">cancel</span><span class="s2">:</span>
+            <span class="s4"># Some threads might still be running; need to wait to them to</span>
+            <span class="s4"># finish before checking that all threads ran. We can do this</span>
+            <span class="s4"># using the CapacityLimiter.</span>
+            <span class="s0">while </span><span class="s1">c</span><span class="s2">.</span><span class="s1">borrowed_tokens </span><span class="s2">&gt; </span><span class="s5">0</span><span class="s2">:  </span><span class="s4"># noqa: ASYNC110</span>
+                <span class="s0">await </span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.01</span><span class="s2">)  </span><span class="s4"># pragma: no cover</span>
+
+        <span class="s0">assert </span><span class="s1">state</span><span class="s2">.</span><span class="s1">ran </span><span class="s2">== </span><span class="s1">COUNT</span>
+        <span class="s0">assert </span><span class="s1">state</span><span class="s2">.</span><span class="s1">running </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">c</span><span class="s2">.</span><span class="s1">total_tokens </span><span class="s2">= </span><span class="s1">orig_total_tokens</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_in_worker_thread_custom_limiter</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Basically just checking that we only call acquire_on_behalf_of and</span>
+    <span class="s4"># release_on_behalf_of, since that's part of our documented API.</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">class </span><span class="s1">CustomLimiter</span><span class="s2">:</span>
+        <span class="s0">async def </span><span class="s1">acquire_on_behalf_of</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">borrower</span><span class="s2">: </span><span class="s1">Task</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;acquire&quot;</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_borrower </span><span class="s2">= </span><span class="s1">borrower</span>
+
+        <span class="s0">def </span><span class="s1">release_on_behalf_of</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">borrower</span><span class="s2">: </span><span class="s1">Task</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;release&quot;</span><span class="s2">)</span>
+            <span class="s0">assert </span><span class="s1">borrower </span><span class="s2">== </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_borrower</span>
+
+    <span class="s4"># TODO: should CapacityLimiter have an abc or protocol so users can modify it?</span>
+    <span class="s4"># because currently it's `final` so writing code like this is not allowed.</span>
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s1">limiter</span><span class="s2">=</span><span class="s1">CustomLimiter</span><span class="s2">())  </span><span class="s4"># type: ignore[arg-type]</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;acquire&quot;</span><span class="s2">, </span><span class="s3">&quot;release&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_in_worker_thread_limiter_error</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">class </span><span class="s1">BadCapacityLimiter</span><span class="s2">:</span>
+        <span class="s0">async def </span><span class="s1">acquire_on_behalf_of</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">borrower</span><span class="s2">: </span><span class="s1">Task</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;acquire&quot;</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">release_on_behalf_of</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">borrower</span><span class="s2">: </span><span class="s1">Task</span><span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;release&quot;</span><span class="s2">)</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s3">&quot;release on behalf&quot;</span><span class="s2">)</span>
+
+    <span class="s1">bs </span><span class="s2">= </span><span class="s1">BadCapacityLimiter</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;^release on behalf$&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s1">limiter</span><span class="s2">=</span><span class="s1">bs</span><span class="s2">)  </span><span class="s4"># type: ignore[arg-type]</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">__context__ </span><span class="s0">is None</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;acquire&quot;</span><span class="s2">, </span><span class="s3">&quot;release&quot;</span><span class="s2">]</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s4"># If the original function raised an error, then the semaphore error</span>
+    <span class="s4"># chains with it</span>
+    <span class="s1">d</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">object</span><span class="s2">] = {}</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;^release on behalf$&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s1">d</span><span class="s2">[</span><span class="s3">&quot;x&quot;</span><span class="s2">], </span><span class="s1">limiter</span><span class="s2">=</span><span class="s1">bs</span><span class="s2">)  </span><span class="s4"># type: ignore[arg-type]</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">__context__</span><span class="s2">, </span><span class="s1">KeyError</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;acquire&quot;</span><span class="s2">, </span><span class="s3">&quot;release&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_in_worker_thread_fail_to_spawn</span><span class="s2">(</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test the unlikely but possible case where trying to spawn a thread fails</span>
+    <span class="s0">def </span><span class="s1">bad_start</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">object</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s3">&quot;the engines canna take it captain&quot;</span><span class="s2">)</span>
+
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_thread_cache</span><span class="s2">.</span><span class="s1">ThreadCache</span><span class="s2">, </span><span class="s3">&quot;start_thread_soon&quot;</span><span class="s2">, </span><span class="s1">bad_start</span><span class="s2">)</span>
+
+    <span class="s1">limiter </span><span class="s2">= </span><span class="s1">current_default_thread_limiter</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">limiter</span><span class="s2">.</span><span class="s1">borrowed_tokens </span><span class="s2">== </span><span class="s5">0</span>
+
+    <span class="s4"># We get an appropriate error, and the limiter is cleanly released</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">)  </span><span class="s4"># pragma: no cover</span>
+    <span class="s0">assert </span><span class="s3">&quot;engines&quot; </span><span class="s0">in </span><span class="s1">str</span><span class="s2">(</span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">limiter</span><span class="s2">.</span><span class="s1">borrowed_tokens </span><span class="s2">== </span><span class="s5">0</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_to_thread_run_sync_token</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test that to_thread_run_sync automatically injects the current trio token</span>
+    <span class="s4"># into a spawned thread</span>
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">() </span><span class="s1">-&gt; _core</span><span class="s2">.</span><span class="s1">TrioToken</span><span class="s2">:</span>
+        <span class="s1">callee_token </span><span class="s2">= </span><span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">callee_token</span>
+
+    <span class="s1">caller_token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s1">callee_token </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">callee_token </span><span class="s2">== </span><span class="s1">caller_token</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_to_thread_run_sync_expected_error</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test correct error when passed async function</span>
+    <span class="s0">async def </span><span class="s1">async_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">&quot;expected a sync function&quot;</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">async_fn</span><span class="s2">)  </span><span class="s4"># type: ignore[unused-coroutine]</span>
+
+
+<span class="s1">trio_test_contextvar</span><span class="s2">: </span><span class="s1">contextvars</span><span class="s2">.</span><span class="s1">ContextVar</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">contextvars</span><span class="s2">.</span><span class="s1">ContextVar</span><span class="s2">(</span>
+    <span class="s3">&quot;trio_test_contextvar&quot;</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_to_thread_run_sync_contextvars</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">trio_thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()</span>
+    <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;main&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">]:</span>
+        <span class="s1">value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">AsyncLibraryNotFoundError</span><span class="s2">):</span>
+            <span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">value</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">())</span>
+
+    <span class="s1">value</span><span class="s2">, </span><span class="s1">child_thread </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">value </span><span class="s2">== </span><span class="s3">&quot;main&quot;</span>
+    <span class="s0">assert </span><span class="s1">child_thread </span><span class="s2">!= </span><span class="s1">trio_thread</span>
+
+    <span class="s0">def </span><span class="s1">g</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">]:</span>
+        <span class="s1">parent_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;worker&quot;</span><span class="s2">)</span>
+        <span class="s1">inner_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">AsyncLibraryNotFoundError</span><span class="s2">):</span>
+            <span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s2">(</span>
+            <span class="s1">parent_value</span><span class="s2">,</span>
+            <span class="s1">inner_value</span><span class="s2">,</span>
+            <span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">(),</span>
+        <span class="s2">)</span>
+
+    <span class="s1">parent_value</span><span class="s2">, </span><span class="s1">inner_value</span><span class="s2">, </span><span class="s1">child_thread </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">g</span><span class="s2">)</span>
+    <span class="s1">current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">parent_value </span><span class="s2">== </span><span class="s3">&quot;main&quot;</span>
+    <span class="s0">assert </span><span class="s1">inner_value </span><span class="s2">== </span><span class="s3">&quot;worker&quot;</span>
+    <span class="s0">assert </span><span class="s1">current_value </span><span class="s2">== </span><span class="s3">&quot;main&quot;</span><span class="s2">, (</span>
+        <span class="s3">&quot;The contextvar value set on the worker would not propagate back to the main&quot;</span>
+        <span class="s3">&quot; thread&quot;</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">() == </span><span class="s3">&quot;trio&quot;</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_from_thread_run_sync</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test that to_thread_run_sync correctly &quot;hands off&quot; the trio token to</span>
+    <span class="s4"># trio.from_thread.run_sync()</span>
+    <span class="s0">def </span><span class="s1">thread_fn_1</span><span class="s2">() </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s1">trio_time </span><span class="s2">= </span><span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">trio_time</span>
+
+    <span class="s1">trio_time </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn_1</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">trio_time</span><span class="s2">, </span><span class="s1">float</span><span class="s2">)</span>
+
+    <span class="s4"># Test correct error when passed async function</span>
+    <span class="s0">async def </span><span class="s1">async_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">thread_fn_2</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">async_fn</span><span class="s2">)  </span><span class="s4"># type: ignore[unused-coroutine]</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">&quot;expected a synchronous function&quot;</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn_2</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_from_thread_run</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test that to_thread_run_sync correctly &quot;hands off&quot; the trio token to</span>
+    <span class="s4"># trio.from_thread.run()</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">async def </span><span class="s1">back_in_trio_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">()  </span><span class="s4"># implicitly checks that we're in trio</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;back in trio&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;in thread&quot;</span><span class="s2">)</span>
+        <span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">back_in_trio_fn</span><span class="s2">)</span>
+
+    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;in thread&quot;</span><span class="s2">, </span><span class="s3">&quot;back in trio&quot;</span><span class="s2">]</span>
+
+    <span class="s4"># Test correct error when passed sync function</span>
+    <span class="s0">def </span><span class="s1">sync_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">&quot;appears to be synchronous&quot;</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">sync_fn</span><span class="s2">)  </span><span class="s4"># type: ignore[arg-type]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_from_thread_token</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test that to_thread_run_sync and spawned trio.from_thread.run_sync()</span>
+    <span class="s4"># share the same Trio token</span>
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">() </span><span class="s1">-&gt; _core</span><span class="s2">.</span><span class="s1">TrioToken</span><span class="s2">:</span>
+        <span class="s1">callee_token </span><span class="s2">= </span><span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">callee_token</span>
+
+    <span class="s1">caller_token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s1">callee_token </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">callee_token </span><span class="s2">== </span><span class="s1">caller_token</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_from_thread_token_kwarg</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test that to_thread_run_sync and spawned trio.from_thread.run_sync() can</span>
+    <span class="s4"># use an explicitly defined token</span>
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">(</span><span class="s1">token</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioToken</span><span class="s2">) </span><span class="s1">-&gt; _core</span><span class="s2">.</span><span class="s1">TrioToken</span><span class="s2">:</span>
+        <span class="s1">callee_token </span><span class="s2">= </span><span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">callee_token</span>
+
+    <span class="s1">caller_token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s1">callee_token </span><span class="s2">= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">, </span><span class="s1">caller_token</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">callee_token </span><span class="s2">== </span><span class="s1">caller_token</span>
+
+
+<span class="s0">async def </span><span class="s1">test_from_thread_no_token</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test that a &quot;raw call&quot; to trio.from_thread.run() fails because no token</span>
+    <span class="s4"># has been provided</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_from_thread_run_sync_contextvars</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;main&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s1">thread_parent_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;worker&quot;</span><span class="s2">)</span>
+        <span class="s1">thread_current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">AsyncLibraryNotFoundError</span><span class="s2">):</span>
+            <span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">back_in_main</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+            <span class="s1">back_parent_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+            <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;back_in_main&quot;</span><span class="s2">)</span>
+            <span class="s1">back_current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+            <span class="s0">assert </span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">() == </span><span class="s3">&quot;trio&quot;</span>
+            <span class="s0">return </span><span class="s1">back_parent_value</span><span class="s2">, </span><span class="s1">back_current_value</span>
+
+        <span class="s1">back_parent_value</span><span class="s2">, </span><span class="s1">back_current_value </span><span class="s2">= </span><span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">back_in_main</span><span class="s2">)</span>
+        <span class="s1">thread_after_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">AsyncLibraryNotFoundError</span><span class="s2">):</span>
+            <span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s2">(</span>
+            <span class="s1">thread_parent_value</span><span class="s2">,</span>
+            <span class="s1">thread_current_value</span><span class="s2">,</span>
+            <span class="s1">thread_after_value</span><span class="s2">,</span>
+            <span class="s1">back_parent_value</span><span class="s2">,</span>
+            <span class="s1">back_current_value</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s2">(</span>
+        <span class="s1">thread_parent_value</span><span class="s2">,</span>
+        <span class="s1">thread_current_value</span><span class="s2">,</span>
+        <span class="s1">thread_after_value</span><span class="s2">,</span>
+        <span class="s1">back_parent_value</span><span class="s2">,</span>
+        <span class="s1">back_current_value</span><span class="s2">,</span>
+    <span class="s2">) = </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">)</span>
+    <span class="s1">current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">current_value </span><span class="s2">== </span><span class="s1">thread_parent_value </span><span class="s2">== </span><span class="s3">&quot;main&quot;</span>
+    <span class="s0">assert </span><span class="s1">thread_current_value </span><span class="s2">== </span><span class="s1">back_parent_value </span><span class="s2">== </span><span class="s1">thread_after_value </span><span class="s2">== </span><span class="s3">&quot;worker&quot;</span>
+    <span class="s0">assert </span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">() == </span><span class="s3">&quot;trio&quot;</span>
+    <span class="s0">assert </span><span class="s1">back_current_value </span><span class="s2">== </span><span class="s3">&quot;back_in_main&quot;</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_from_thread_run_contextvars</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;main&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">thread_fn</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s1">thread_parent_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;worker&quot;</span><span class="s2">)</span>
+        <span class="s1">thread_current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">AsyncLibraryNotFoundError</span><span class="s2">):</span>
+            <span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">()</span>
+
+        <span class="s0">async def </span><span class="s1">async_back_in_main</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+            <span class="s1">back_parent_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+            <span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">set</span><span class="s2">(</span><span class="s3">&quot;back_in_main&quot;</span><span class="s2">)</span>
+            <span class="s1">back_current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+            <span class="s0">assert </span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">() == </span><span class="s3">&quot;trio&quot;</span>
+            <span class="s0">return </span><span class="s1">back_parent_value</span><span class="s2">, </span><span class="s1">back_current_value</span>
+
+        <span class="s1">back_parent_value</span><span class="s2">, </span><span class="s1">back_current_value </span><span class="s2">= </span><span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">async_back_in_main</span><span class="s2">)</span>
+        <span class="s1">thread_after_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">AsyncLibraryNotFoundError</span><span class="s2">):</span>
+            <span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s2">(</span>
+            <span class="s1">thread_parent_value</span><span class="s2">,</span>
+            <span class="s1">thread_current_value</span><span class="s2">,</span>
+            <span class="s1">thread_after_value</span><span class="s2">,</span>
+            <span class="s1">back_parent_value</span><span class="s2">,</span>
+            <span class="s1">back_current_value</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s2">(</span>
+        <span class="s1">thread_parent_value</span><span class="s2">,</span>
+        <span class="s1">thread_current_value</span><span class="s2">,</span>
+        <span class="s1">thread_after_value</span><span class="s2">,</span>
+        <span class="s1">back_parent_value</span><span class="s2">,</span>
+        <span class="s1">back_current_value</span><span class="s2">,</span>
+    <span class="s2">) = </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread_fn</span><span class="s2">)</span>
+    <span class="s1">current_value </span><span class="s2">= </span><span class="s1">trio_test_contextvar</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">current_value </span><span class="s2">== </span><span class="s1">thread_parent_value </span><span class="s2">== </span><span class="s3">&quot;main&quot;</span>
+    <span class="s0">assert </span><span class="s1">thread_current_value </span><span class="s2">== </span><span class="s1">back_parent_value </span><span class="s2">== </span><span class="s1">thread_after_value </span><span class="s2">== </span><span class="s3">&quot;worker&quot;</span>
+    <span class="s0">assert </span><span class="s1">back_current_value </span><span class="s2">== </span><span class="s3">&quot;back_in_main&quot;</span>
+    <span class="s0">assert </span><span class="s1">sniffio</span><span class="s2">.</span><span class="s1">current_async_library</span><span class="s2">() == </span><span class="s3">&quot;trio&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">test_run_fn_as_system_task_caught_badly_typed_token</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span>
+            <span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">,</span>
+            <span class="s1">trio_token</span><span class="s2">=</span><span class="s3">&quot;Not TrioTokentype&quot;</span><span class="s2">,  </span><span class="s4"># type: ignore[arg-type]</span>
+        <span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_from_thread_inside_trio_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">not_called</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s0">raise </span><span class="s1">AssertionError</span><span class="s2">()</span>
+
+    <span class="s1">trio_token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">not_called</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">trio_token</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_from_thread_run_during_shutdown</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">save </span><span class="s2">= []</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">async def </span><span class="s1">agen</span><span class="s2">(</span><span class="s1">token</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioToken </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; AsyncGenerator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">(</span><span class="s1">shield</span><span class="s2">=</span><span class="s0">True</span><span class="s2">):</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span>
+                        <span class="s1">partial</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">sleep</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s1">trio_token</span><span class="s2">=</span><span class="s1">token</span><span class="s2">),</span>
+                    <span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">RunFinishedError</span><span class="s2">:</span>
+                    <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;finished&quot;</span><span class="s2">)</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;clean&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">main</span><span class="s2">(</span><span class="s1">use_system_task</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">save</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">() </span><span class="s0">if </span><span class="s1">use_system_task </span><span class="s0">else None</span><span class="s2">))</span>
+        <span class="s0">await </span><span class="s1">save</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">].</span><span class="s1">asend</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)  </span><span class="s4"># System nursery will be closed and raise RunFinishedError</span>
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)  </span><span class="s4"># host task will be rescheduled as normal</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s3">&quot;finished&quot;</span><span class="s2">, </span><span class="s3">&quot;clean&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_trio_token_weak_referenceable</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">token</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">TrioToken</span><span class="s2">)</span>
+    <span class="s1">weak_reference </span><span class="s2">= </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">(</span><span class="s1">token</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">token </span><span class="s0">is </span><span class="s1">weak_reference</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">test_unsafe_abandon_on_cancel_kwarg</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># This is a stand in for a numpy ndarray or other objects</span>
+    <span class="s4"># that (maybe surprisingly) lack a notion of truthiness</span>
+    <span class="s0">class </span><span class="s1">BadBool</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">__bool__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">NotImplementedError</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">int</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s1">BadBool</span><span class="s2">())  </span><span class="s4"># type: ignore[arg-type]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_from_thread_reuses_task</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">task </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">async_current_task</span><span class="s2">() </span><span class="s1">-&gt; _core</span><span class="s2">.</span><span class="s1">Task</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+
+    <span class="s0">assert </span><span class="s1">task </span><span class="s0">is await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">from_thread_run_sync</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">task </span><span class="s0">is await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">async_current_task</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_recursive_to_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">tid </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">get_tid_then_reenter</span><span class="s2">() </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">nonlocal </span><span class="s1">tid</span>
+        <span class="s1">tid </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">get_ident</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">to_thread_run_sync</span><span class="s2">, </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">get_ident</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">tid </span><span class="s2">!= </span><span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">get_tid_then_reenter</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_from_thread_host_cancelled</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">queue</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">bool</span><span class="s2">] = </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">sync_check</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">bool</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s1">queue</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">True</span><span class="s2">)  </span><span class="s4"># sync functions don't raise Cancelled</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">queue</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">sync_check</span><span class="s2">)</span>
+
+    <span class="s0">assert not </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+    <span class="s0">assert not </span><span class="s1">queue</span><span class="s2">.</span><span class="s1">get_nowait</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">sync_check</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+    <span class="s0">assert not await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">partial</span><span class="s2">(</span><span class="s1">queue</span><span class="s2">.</span><span class="s1">get</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">))</span>
+
+    <span class="s0">async def </span><span class="s1">no_checkpoint</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">def </span><span class="s1">async_check</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">from_thread_run_sync</span><span class="s2">(</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">no_checkpoint</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s1">queue</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">True</span><span class="s2">)  </span><span class="s4"># async functions raise Cancelled at checkpoints</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">queue</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">async_check</span><span class="s2">)</span>
+
+    <span class="s0">assert not </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+    <span class="s0">assert not </span><span class="s1">queue</span><span class="s2">.</span><span class="s1">get_nowait</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">async_check</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+    <span class="s0">assert not await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">partial</span><span class="s2">(</span><span class="s1">queue</span><span class="s2">.</span><span class="s1">get</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">))</span>
+
+    <span class="s0">async def </span><span class="s1">async_time_bomb</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">fail_after</span><span class="s2">(</span><span class="s5">10</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">sleep_forever</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">async_time_bomb</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+
+
+<span class="s0">async def </span><span class="s1">test_from_thread_check_cancelled</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">child</span><span class="s2">(</span><span class="s1">abandon_on_cancel</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">, </span><span class="s1">scope</span><span class="s2">: </span><span class="s1">CancelScope</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">scope</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;start&quot;</span><span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s0">return await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">f</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s1">abandon_on_cancel</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;cancel&quot;</span><span class="s2">)</span>
+                <span class="s0">raise</span>
+            <span class="s0">finally</span><span class="s2">:</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s3">&quot;exit&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">from_thread_check_cancelled</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:  </span><span class="s4"># pragma: no cover, test failure path</span>
+            <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s3">&quot;Cancelled&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s3">&quot;Not Cancelled&quot;</span><span class="s2">)</span>
+        <span class="s1">ev</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s1">from_thread_check_cancelled</span><span class="s2">()</span>
+
+    <span class="s4"># Base case: nothing cancelled so we shouldn't see cancels anywhere</span>
+    <span class="s1">record</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+    <span class="s1">ev </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">, </span><span class="s0">False</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">())</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] == </span><span class="s3">&quot;start&quot;</span>
+        <span class="s0">assert </span><span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">) == </span><span class="s3">&quot;Not Cancelled&quot;</span>
+        <span class="s1">ev</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s4"># implicit assertion, Cancelled not raised via nursery</span>
+    <span class="s0">assert </span><span class="s1">record</span><span class="s2">[</span><span class="s5">1</span><span class="s2">] == </span><span class="s3">&quot;exit&quot;</span>
+
+    <span class="s4"># abandon_on_cancel=False case: a cancel will pop out but be handled by</span>
+    <span class="s4"># the appropriate cancel scope</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+    <span class="s1">ev </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">scope </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">()  </span><span class="s4"># Nursery cancel scope gives false positives</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">, </span><span class="s0">False</span><span class="s2">, </span><span class="s1">scope</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] == </span><span class="s3">&quot;start&quot;</span>
+        <span class="s0">assert </span><span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">) == </span><span class="s3">&quot;Not Cancelled&quot;</span>
+        <span class="s1">scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s1">ev</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+    <span class="s0">assert </span><span class="s3">&quot;cancel&quot; </span><span class="s0">in </span><span class="s1">record</span>
+    <span class="s0">assert </span><span class="s1">record</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">] == </span><span class="s3">&quot;exit&quot;</span>
+
+    <span class="s4"># abandon_on_cancel=True case: slightly different thread behavior needed</span>
+    <span class="s4"># check thread is cancelled &quot;soon&quot; after abandonment</span>
+    <span class="s0">def </span><span class="s1">f</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s4"># type: ignore[no-redef] # noqa: F811</span>
+        <span class="s1">ev</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">from_thread_check_cancelled</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+            <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s3">&quot;Cancelled&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:  </span><span class="s4"># pragma: no cover, test failure path</span>
+            <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s3">&quot;Not Cancelled&quot;</span><span class="s2">)</span>
+
+    <span class="s1">record </span><span class="s2">= []</span>
+    <span class="s1">ev </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">scope </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">, </span><span class="s0">True</span><span class="s2">, </span><span class="s1">scope</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">record</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] == </span><span class="s3">&quot;start&quot;</span>
+        <span class="s1">scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+        <span class="s1">ev</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+    <span class="s0">assert </span><span class="s3">&quot;cancel&quot; </span><span class="s0">in </span><span class="s1">record</span>
+    <span class="s0">assert </span><span class="s1">record</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">] == </span><span class="s3">&quot;exit&quot;</span>
+    <span class="s0">assert </span><span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">) == </span><span class="s3">&quot;Cancelled&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">test_from_thread_check_cancelled_raises_in_foreign_threads</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">from_thread_check_cancelled</span><span class="s2">()</span>
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]] = </span><span class="s1">stdlib_queue</span><span class="s2">.</span><span class="s1">Queue</span><span class="s2">()</span>
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">from_thread_check_cancelled</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s1">_</span><span class="s2">))</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">).</span><span class="s1">unwrap</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">slow</span>
+<span class="s0">async def </span><span class="s1">test_reentry_doesnt_deadlock</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Regression test for issue noticed in GH-2827</span>
+    <span class="s4"># The failure mode is to hang the whole test suite, unfortunately.</span>
+    <span class="s4"># XXX consider running this in a subprocess with a timeout, if it comes up again!</span>
+
+    <span class="s0">async def </span><span class="s1">child</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">from_thread_run</span><span class="s2">, </span><span class="s1">sleep</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">move_on_after</span><span class="s2">(</span><span class="s5">2</span><span class="s2">):</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">4</span><span class="s2">):</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">child</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_wait_all_threads_completed</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">no_threads_left </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">e1 </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">e2 </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+
+    <span class="s1">e1_exited </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">e2_exited </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">wait_event</span><span class="s2">(</span><span class="s1">e</span><span class="s2">: </span><span class="s1">Event</span><span class="s2">, </span><span class="s1">e_exit</span><span class="s2">: </span><span class="s1">Event</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">from_thread_run</span><span class="s2">(</span><span class="s1">e</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span><span class="s1">thread</span><span class="s2">)</span>
+        <span class="s1">e_exit</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">wait_no_threads_left</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">nonlocal </span><span class="s1">no_threads_left</span>
+        <span class="s0">await </span><span class="s1">wait_all_threads_completed</span><span class="s2">()</span>
+        <span class="s1">no_threads_left </span><span class="s2">= </span><span class="s0">True</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_event</span><span class="s2">, </span><span class="s1">e1</span><span class="s2">, </span><span class="s1">e1_exited</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_event</span><span class="s2">, </span><span class="s1">e2</span><span class="s2">, </span><span class="s1">e2_exited</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_no_threads_left</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert not </span><span class="s1">no_threads_left</span>
+        <span class="s0">assert </span><span class="s1">active_thread_count</span><span class="s2">() == </span><span class="s5">2</span>
+
+        <span class="s1">e1</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">e1_exited</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert not </span><span class="s1">no_threads_left</span>
+        <span class="s0">assert </span><span class="s1">active_thread_count</span><span class="s2">() == </span><span class="s5">1</span>
+
+        <span class="s1">e2</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">e2_exited</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">no_threads_left</span>
+        <span class="s0">assert </span><span class="s1">active_thread_count</span><span class="s2">() == </span><span class="s5">0</span>
+
+
+<span class="s0">async def </span><span class="s1">test_wait_all_threads_completed_no_threads</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">await </span><span class="s1">wait_all_threads_completed</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">active_thread_count</span><span class="s2">() == </span><span class="s5">0</span>
+</pre>
+</body>
+</html>

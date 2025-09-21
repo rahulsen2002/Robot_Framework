@@ -1,0 +1,454 @@
+<html>
+<head>
+<title>filelist.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+filelist.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.filelist 
+ 
+Provides the FileList class, used for poking about the filesystem 
+and building lists of files. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">fnmatch</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Iterable</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Literal</span><span class="s3">, </span><span class="s1">overload</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_log </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">DistutilsInternalError</span><span class="s3">, </span><span class="s1">DistutilsTemplateError</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">util </span><span class="s2">import </span><span class="s1">convert_path</span>
+
+
+<span class="s2">class </span><span class="s1">FileList</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;A list of files built by on exploring the filesystem and filtered by 
+    applying various patterns to what we find there. 
+ 
+    Instance attributes: 
+      dir 
+        directory from which files will be taken -- only used if 
+        'allfiles' not supplied to constructor 
+      files 
+        list of filenames currently being built/filtered/manipulated 
+      allfiles 
+        complete list of files under consideration (ie. without any 
+        filtering applied) 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">: </span><span class="s1">object </span><span class="s3">= </span><span class="s2">None</span><span class="s3">, </span><span class="s1">debug_print</span><span class="s3">: </span><span class="s1">object </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># ignore argument to FileList, but keep them for backwards</span>
+        <span class="s4"># compatibility</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">allfiles</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+
+    <span class="s2">def </span><span class="s1">set_allfiles</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">allfiles</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">allfiles </span><span class="s3">= </span><span class="s1">allfiles</span>
+
+    <span class="s2">def </span><span class="s1">findall</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">allfiles </span><span class="s3">= </span><span class="s1">findall</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">debug_print</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">: </span><span class="s1">object</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Print 'msg' to stdout if the global DEBUG (taken from the 
+        DISTUTILS_DEBUG environment variable) flag is true. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">debug </span><span class="s2">import </span><span class="s1">DEBUG</span>
+
+        <span class="s2">if </span><span class="s1">DEBUG</span><span class="s3">:</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s4"># Collection methods</span>
+
+    <span class="s2">def </span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">extend</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">items</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">items</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">sort</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># Not a strict lexical sort!</span>
+        <span class="s1">sortable_files </span><span class="s3">= </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">))</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">files </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">sort_tuple </span><span class="s2">in </span><span class="s1">sortable_files</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(*</span><span class="s1">sort_tuple</span><span class="s3">))</span>
+
+    <span class="s4"># Other miscellaneous utility methods</span>
+
+    <span class="s2">def </span><span class="s1">remove_duplicates</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># Assumes list has been sorted!</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">) - </span><span class="s5">1</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[</span><span class="s1">i</span><span class="s3">] == </span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[</span><span class="s1">i </span><span class="s3">- </span><span class="s5">1</span><span class="s3">]:</span>
+                <span class="s2">del </span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+
+    <span class="s4"># &quot;File template&quot; methods</span>
+
+    <span class="s2">def </span><span class="s1">_parse_template_line</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">line</span><span class="s3">):</span>
+        <span class="s1">words </span><span class="s3">= </span><span class="s1">line</span><span class="s3">.</span><span class="s1">split</span><span class="s3">()</span>
+        <span class="s1">action </span><span class="s3">= </span><span class="s1">words</span><span class="s3">[</span><span class="s5">0</span><span class="s3">]</span>
+
+        <span class="s1">patterns </span><span class="s3">= </span><span class="s1">dir </span><span class="s3">= </span><span class="s1">dir_pattern </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">action </span><span class="s2">in </span><span class="s3">(</span><span class="s6">'include'</span><span class="s3">, </span><span class="s6">'exclude'</span><span class="s3">, </span><span class="s6">'global-include'</span><span class="s3">, </span><span class="s6">'global-exclude'</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">words</span><span class="s3">) &lt; </span><span class="s5">2</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsTemplateError</span><span class="s3">(</span>
+                    <span class="s6">f&quot;'</span><span class="s2">{</span><span class="s1">action</span><span class="s2">}</span><span class="s6">' expects &lt;pattern1&gt; &lt;pattern2&gt; ...&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">patterns </span><span class="s3">= [</span><span class="s1">convert_path</span><span class="s3">(</span><span class="s1">w</span><span class="s3">) </span><span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">words</span><span class="s3">[</span><span class="s5">1</span><span class="s3">:]]</span>
+        <span class="s2">elif </span><span class="s1">action </span><span class="s2">in </span><span class="s3">(</span><span class="s6">'recursive-include'</span><span class="s3">, </span><span class="s6">'recursive-exclude'</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">words</span><span class="s3">) &lt; </span><span class="s5">3</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsTemplateError</span><span class="s3">(</span>
+                    <span class="s6">f&quot;'</span><span class="s2">{</span><span class="s1">action</span><span class="s2">}</span><span class="s6">' expects &lt;dir&gt; &lt;pattern1&gt; &lt;pattern2&gt; ...&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">dir </span><span class="s3">= </span><span class="s1">convert_path</span><span class="s3">(</span><span class="s1">words</span><span class="s3">[</span><span class="s5">1</span><span class="s3">])</span>
+            <span class="s1">patterns </span><span class="s3">= [</span><span class="s1">convert_path</span><span class="s3">(</span><span class="s1">w</span><span class="s3">) </span><span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">words</span><span class="s3">[</span><span class="s5">2</span><span class="s3">:]]</span>
+        <span class="s2">elif </span><span class="s1">action </span><span class="s2">in </span><span class="s3">(</span><span class="s6">'graft'</span><span class="s3">, </span><span class="s6">'prune'</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">words</span><span class="s3">) != </span><span class="s5">2</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsTemplateError</span><span class="s3">(</span>
+                    <span class="s6">f&quot;'</span><span class="s2">{</span><span class="s1">action</span><span class="s2">}</span><span class="s6">' expects a single &lt;dir_pattern&gt;&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">dir_pattern </span><span class="s3">= </span><span class="s1">convert_path</span><span class="s3">(</span><span class="s1">words</span><span class="s3">[</span><span class="s5">1</span><span class="s3">])</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsTemplateError</span><span class="s3">(</span><span class="s6">f&quot;unknown action '</span><span class="s2">{</span><span class="s1">action</span><span class="s2">}</span><span class="s6">'&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s3">(</span><span class="s1">action</span><span class="s3">, </span><span class="s1">patterns</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">, </span><span class="s1">dir_pattern</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">process_template_line</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">line</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:  </span><span class="s4"># noqa: C901</span>
+        <span class="s4"># Parse the line: split it up, make sure the right number of words</span>
+        <span class="s4"># is there, and return the relevant words.  'action' is always</span>
+        <span class="s4"># defined: it's the first word of the line.  Which of the other</span>
+        <span class="s4"># three are defined depends on the action; it'll be either</span>
+        <span class="s4"># patterns, (dir and patterns), or (dir_pattern).</span>
+        <span class="s3">(</span><span class="s1">action</span><span class="s3">, </span><span class="s1">patterns</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">, </span><span class="s1">dir_pattern</span><span class="s3">) = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_parse_template_line</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+
+        <span class="s4"># OK, now we know that the action is valid and we have the</span>
+        <span class="s4"># right number of words on the line for that action -- so we</span>
+        <span class="s4"># can proceed with minimal error-checking.</span>
+        <span class="s2">if </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'include'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;include &quot; </span><span class="s3">+ </span><span class="s6">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">))</span>
+            <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">include_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s6">&quot;warning: no files found matching '%s'&quot;</span><span class="s3">, </span><span class="s1">pattern</span><span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'exclude'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;exclude &quot; </span><span class="s3">+ </span><span class="s6">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">))</span>
+            <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                        <span class="s6">&quot;warning: no previously-included files found matching '%s'&quot;</span><span class="s3">,</span>
+                        <span class="s1">pattern</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'global-include'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;global-include &quot; </span><span class="s3">+ </span><span class="s6">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">))</span>
+            <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">include_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                        <span class="s3">(</span>
+                            <span class="s6">&quot;warning: no files found matching '%s' &quot;</span>
+                            <span class="s6">&quot;anywhere in distribution&quot;</span>
+                        <span class="s3">),</span>
+                        <span class="s1">pattern</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'global-exclude'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;global-exclude &quot; </span><span class="s3">+ </span><span class="s6">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">))</span>
+            <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                        <span class="s3">(</span>
+                            <span class="s6">&quot;warning: no previously-included files matching &quot;</span>
+                            <span class="s6">&quot;'%s' found anywhere in distribution&quot;</span>
+                        <span class="s3">),</span>
+                        <span class="s1">pattern</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'recursive-include'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;recursive-include {} {}&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">, </span><span class="s6">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">)))</span>
+            <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">include_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s1">dir</span><span class="s3">):</span>
+                    <span class="s1">msg </span><span class="s3">= </span><span class="s6">&quot;warning: no files found matching '%s' under directory '%s'&quot;</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">, </span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'recursive-exclude'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;recursive-exclude {} {}&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">, </span><span class="s6">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">)))</span>
+            <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s1">dir</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                        <span class="s3">(</span>
+                            <span class="s6">&quot;warning: no previously-included files matching &quot;</span>
+                            <span class="s6">&quot;'%s' found under directory '%s'&quot;</span>
+                        <span class="s3">),</span>
+                        <span class="s1">pattern</span><span class="s3">,</span>
+                        <span class="s1">dir</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'graft'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;graft &quot; </span><span class="s3">+ </span><span class="s1">dir_pattern</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">include_pattern</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s1">dir_pattern</span><span class="s3">):</span>
+                <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s6">&quot;warning: no directories found matching '%s'&quot;</span><span class="s3">, </span><span class="s1">dir_pattern</span><span class="s3">)</span>
+
+        <span class="s2">elif </span><span class="s1">action </span><span class="s3">== </span><span class="s6">'prune'</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot;prune &quot; </span><span class="s3">+ </span><span class="s1">dir_pattern</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">exclude_pattern</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s1">dir_pattern</span><span class="s3">):</span>
+                <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                    <span class="s3">(</span><span class="s6">&quot;no previously-included directories found matching '%s'&quot;</span><span class="s3">),</span>
+                    <span class="s1">dir_pattern</span><span class="s3">,</span>
+                <span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsInternalError</span><span class="s3">(</span>
+                <span class="s6">f&quot;this cannot happen: invalid action '</span><span class="s2">{</span><span class="s1">action</span><span class="s2">}</span><span class="s6">'&quot;</span>
+            <span class="s3">)</span>
+
+    <span class="s4"># Filtering/selection methods</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">include_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">False</span><span class="s3">] = </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">include_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Pattern</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s3">*,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">True</span><span class="s3">],</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">include_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Pattern</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">True</span><span class="s3">],</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">include_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Pattern</span><span class="s3">,</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Select strings (presumably filenames) from 'self.files' that 
+        match 'pattern', a Unix-style wildcard (glob) pattern.  Patterns 
+        are not quite the same as implemented by the 'fnmatch' module: '*' 
+        and '?'  match non-special characters, where &quot;special&quot; is platform- 
+        dependent: slash on Unix; colon, slash, and backslash on 
+        DOS/Windows; and colon on Mac OS. 
+ 
+        If 'anchor' is true (the default), then the pattern match is more 
+        stringent: &quot;*.py&quot; will match &quot;foo.py&quot; but not &quot;foo/bar.py&quot;.  If 
+        'anchor' is false, both of these will match. 
+ 
+        If 'prefix' is supplied, then only filenames starting with 'prefix' 
+        (itself a pattern) and ending with 'pattern', with anything in between 
+        them, will match.  'anchor' is ignored in this case. 
+ 
+        If 'is_regex' is true, 'anchor' and 'prefix' are ignored, and 
+        'pattern' is assumed to be either a string containing a regex or a 
+        regex object -- no translation is done, the regex is just compiled 
+        and used as-is. 
+ 
+        Selected strings will be added to self.files. 
+ 
+        Return True if files are found, False otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># XXX docstring lying about what the special chars are?</span>
+        <span class="s1">files_found </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">pattern_re </span><span class="s3">= </span><span class="s1">translate_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">is_regex</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">f&quot;include_pattern: applying regex r'</span><span class="s2">{</span><span class="s1">pattern_re</span><span class="s3">.</span><span class="s1">pattern</span><span class="s2">}</span><span class="s6">'&quot;</span><span class="s3">)</span>
+
+        <span class="s4"># delayed loading of allfiles list</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">allfiles </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">findall</span><span class="s3">()</span>
+
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">allfiles</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">pattern_re</span><span class="s3">.</span><span class="s1">search</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot; adding &quot; </span><span class="s3">+ </span><span class="s1">name</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+                <span class="s1">files_found </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">return </span><span class="s1">files_found</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">exclude_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">False</span><span class="s3">] = </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">exclude_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Pattern</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s3">*,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">True</span><span class="s3">],</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">exclude_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Pattern</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">True</span><span class="s3">],</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">exclude_pattern</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">pattern</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Pattern</span><span class="s3">,</span>
+        <span class="s1">anchor</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">prefix</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">is_regex</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Remove strings (presumably filenames) from 'files' that match 
+        'pattern'.  Other parameters are the same as for 
+        'include_pattern()', above. 
+        The list 'self.files' is modified in place. 
+        Return True if files are found, False otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">files_found </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">pattern_re </span><span class="s3">= </span><span class="s1">translate_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">is_regex</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">f&quot;exclude_pattern: applying regex r'</span><span class="s2">{</span><span class="s1">pattern_re</span><span class="s3">.</span><span class="s1">pattern</span><span class="s2">}</span><span class="s6">'&quot;</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">) - </span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">pattern_re</span><span class="s3">.</span><span class="s1">search</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">debug_print</span><span class="s3">(</span><span class="s6">&quot; removing &quot; </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[</span><span class="s1">i</span><span class="s3">])</span>
+                <span class="s2">del </span><span class="s1">self</span><span class="s3">.</span><span class="s1">files</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+                <span class="s1">files_found </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">return </span><span class="s1">files_found</span>
+
+
+<span class="s4"># Utility functions</span>
+
+
+<span class="s2">def </span><span class="s1">_find_all_simple</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Find all files under 'path' 
+    &quot;&quot;&quot;</span>
+    <span class="s1">all_unique </span><span class="s3">= </span><span class="s1">_UniqueDirs</span><span class="s3">.</span><span class="s1">filter</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">walk</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">followlinks</span><span class="s3">=</span><span class="s2">True</span><span class="s3">))</span>
+    <span class="s1">results </span><span class="s3">= (</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base</span><span class="s3">, </span><span class="s1">file</span><span class="s3">) </span><span class="s2">for </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">all_unique </span><span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">files</span>
+    <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">filter</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">, </span><span class="s1">results</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_UniqueDirs</span><span class="s3">(</span><span class="s1">set</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Exclude previously-seen dirs from walk results, 
+    avoiding infinite recursion. 
+    Ref https://bugs.python.org/issue44497. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">walk_item</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Given an item from an os.walk result, determine 
+        if the item represents a unique dir for this instance 
+        and if not, prevent further traversal. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s3">= </span><span class="s1">walk_item</span>
+        <span class="s1">stat </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">stat</span><span class="s3">(</span><span class="s1">base</span><span class="s3">)</span>
+        <span class="s1">candidate </span><span class="s3">= </span><span class="s1">stat</span><span class="s3">.</span><span class="s1">st_dev</span><span class="s3">, </span><span class="s1">stat</span><span class="s3">.</span><span class="s1">st_ino</span>
+        <span class="s1">found </span><span class="s3">= </span><span class="s1">candidate </span><span class="s2">in </span><span class="s1">self</span>
+        <span class="s2">if </span><span class="s1">found</span><span class="s3">:</span>
+            <span class="s2">del </span><span class="s1">dirs</span><span class="s3">[:]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">candidate</span><span class="s3">)</span>
+        <span class="s2">return not </span><span class="s1">found</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">filter</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">items</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">filter</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">(), </span><span class="s1">items</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">findall</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Find all files under 'dir' and return the list of full filenames. 
+    Unless dir is '.', return full filenames with dir prepended. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">files </span><span class="s3">= </span><span class="s1">_find_all_simple</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">dir </span><span class="s3">== </span><span class="s1">os</span><span class="s3">.</span><span class="s1">curdir</span><span class="s3">:</span>
+        <span class="s1">make_rel </span><span class="s3">= </span><span class="s1">functools</span><span class="s3">.</span><span class="s1">partial</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">relpath</span><span class="s3">, </span><span class="s1">start</span><span class="s3">=</span><span class="s1">dir</span><span class="s3">)</span>
+        <span class="s1">files </span><span class="s3">= </span><span class="s1">map</span><span class="s3">(</span><span class="s1">make_rel</span><span class="s3">, </span><span class="s1">files</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">list</span><span class="s3">(</span><span class="s1">files</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">glob_to_re</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Translate a shell-like glob pattern to a regular expression; return 
+    a string containing the regex.  Differs from 'fnmatch.translate()' in 
+    that '*' does not match &quot;special characters&quot; (which are 
+    platform-specific). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pattern_re </span><span class="s3">= </span><span class="s1">fnmatch</span><span class="s3">.</span><span class="s1">translate</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">)</span>
+
+    <span class="s4"># '?' and '*' in the glob pattern become '.' and '.*' in the RE, which</span>
+    <span class="s4"># IMHO is wrong -- '?' and '*' aren't supposed to match slash in Unix,</span>
+    <span class="s4"># and by extension they shouldn't match such &quot;special characters&quot; under</span>
+    <span class="s4"># any OS.  So change all non-escaped dots in the RE to match any</span>
+    <span class="s4"># character except the special characters (currently: just os.sep).</span>
+    <span class="s1">sep </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span>
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep </span><span class="s3">== </span><span class="s6">'</span><span class="s2">\\</span><span class="s6">'</span><span class="s3">:</span>
+        <span class="s4"># we're using a regex to manipulate a regex, so we need</span>
+        <span class="s4"># to escape the backslash twice</span>
+        <span class="s1">sep </span><span class="s3">= </span><span class="s6">r'\\\\'</span>
+    <span class="s1">escaped </span><span class="s3">= </span><span class="s6">rf'\1[^</span><span class="s2">{</span><span class="s1">sep</span><span class="s2">}</span><span class="s6">]'</span>
+    <span class="s1">pattern_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">sub</span><span class="s3">(</span><span class="s6">r'((?&lt;!\\)(\\\\)*)\.'</span><span class="s3">, </span><span class="s1">escaped</span><span class="s3">, </span><span class="s1">pattern_re</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">pattern_re</span>
+
+
+<span class="s2">def </span><span class="s1">translate_pattern</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">is_regex</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Translate a shell-like wildcard pattern to a compiled regular 
+    expression.  Return the compiled regex.  If 'is_regex' true, 
+    then 'pattern' is directly compiled to a regex (if it's a string) 
+    or just returned as-is (assumes it's a regex object). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">is_regex</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">pattern</span>
+
+    <span class="s4"># ditch start and end characters</span>
+    <span class="s1">start</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">end </span><span class="s3">= </span><span class="s1">glob_to_re</span><span class="s3">(</span><span class="s6">'_'</span><span class="s3">).</span><span class="s1">partition</span><span class="s3">(</span><span class="s6">'_'</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">pattern</span><span class="s3">:</span>
+        <span class="s1">pattern_re </span><span class="s3">= </span><span class="s1">glob_to_re</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">pattern_re</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">start</span><span class="s3">) </span><span class="s2">and </span><span class="s1">pattern_re</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">end</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">pattern_re </span><span class="s3">= </span><span class="s6">''</span>
+
+    <span class="s2">if </span><span class="s1">prefix </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s1">prefix_re </span><span class="s3">= </span><span class="s1">glob_to_re</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">prefix_re</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">start</span><span class="s3">) </span><span class="s2">and </span><span class="s1">prefix_re</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">end</span><span class="s3">)</span>
+        <span class="s1">prefix_re </span><span class="s3">= </span><span class="s1">prefix_re</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">start</span><span class="s3">) : </span><span class="s1">len</span><span class="s3">(</span><span class="s1">prefix_re</span><span class="s3">) - </span><span class="s1">len</span><span class="s3">(</span><span class="s1">end</span><span class="s3">)]</span>
+        <span class="s1">sep </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep </span><span class="s3">== </span><span class="s6">'</span><span class="s2">\\</span><span class="s6">'</span><span class="s3">:</span>
+            <span class="s1">sep </span><span class="s3">= </span><span class="s6">r'\\'</span>
+        <span class="s1">pattern_re </span><span class="s3">= </span><span class="s1">pattern_re</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">start</span><span class="s3">) : </span><span class="s1">len</span><span class="s3">(</span><span class="s1">pattern_re</span><span class="s3">) - </span><span class="s1">len</span><span class="s3">(</span><span class="s1">end</span><span class="s3">)]</span>
+        <span class="s1">pattern_re </span><span class="s3">= </span><span class="s6">rf'</span><span class="s2">{</span><span class="s1">start</span><span class="s2">}</span><span class="s6">\A</span><span class="s2">{</span><span class="s1">prefix_re</span><span class="s2">}{</span><span class="s1">sep</span><span class="s2">}</span><span class="s6">.*</span><span class="s2">{</span><span class="s1">pattern_re</span><span class="s2">}{</span><span class="s1">end</span><span class="s2">}</span><span class="s6">'</span>
+    <span class="s2">else</span><span class="s3">:  </span><span class="s4"># no prefix -- respect anchor flag</span>
+        <span class="s2">if </span><span class="s1">anchor</span><span class="s3">:</span>
+            <span class="s1">pattern_re </span><span class="s3">= </span><span class="s6">rf'</span><span class="s2">{</span><span class="s1">start</span><span class="s2">}</span><span class="s6">\A</span><span class="s2">{</span><span class="s1">pattern_re</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">start</span><span class="s3">) :]</span><span class="s2">}</span><span class="s6">'</span>
+
+    <span class="s2">return </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">pattern_re</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

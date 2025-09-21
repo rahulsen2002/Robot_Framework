@@ -1,0 +1,515 @@
+<html>
+<head>
+<title>handshake.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #a5c261;}
+.s6 { color: #6aab73;}
+.s7 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+handshake.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+wsproto/handshake 
+~~~~~~~~~~~~~~~~~~ 
+ 
+An implementation of WebSocket handshakes. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">deque</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">cast</span><span class="s3">,</span>
+    <span class="s1">Deque</span><span class="s3">,</span>
+    <span class="s1">Dict</span><span class="s3">,</span>
+    <span class="s1">Generator</span><span class="s3">,</span>
+    <span class="s1">Iterable</span><span class="s3">,</span>
+    <span class="s1">List</span><span class="s3">,</span>
+    <span class="s1">Optional</span><span class="s3">,</span>
+    <span class="s1">Sequence</span><span class="s3">,</span>
+    <span class="s1">Union</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">import </span><span class="s1">h11</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">connection </span><span class="s2">import </span><span class="s1">Connection</span><span class="s3">, </span><span class="s1">ConnectionState</span><span class="s3">, </span><span class="s1">ConnectionType</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">events </span><span class="s2">import </span><span class="s1">AcceptConnection</span><span class="s3">, </span><span class="s1">Event</span><span class="s3">, </span><span class="s1">RejectConnection</span><span class="s3">, </span><span class="s1">RejectData</span><span class="s3">, </span><span class="s1">Request</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">extensions </span><span class="s2">import </span><span class="s1">Extension</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Headers</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">utilities </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">generate_accept_token</span><span class="s3">,</span>
+    <span class="s1">generate_nonce</span><span class="s3">,</span>
+    <span class="s1">LocalProtocolError</span><span class="s3">,</span>
+    <span class="s1">normed_header_dict</span><span class="s3">,</span>
+    <span class="s1">RemoteProtocolError</span><span class="s3">,</span>
+    <span class="s1">split_comma_header</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s4"># RFC6455, Section 4.2.1/6 - Reading the Client's Opening Handshake</span>
+<span class="s1">WEBSOCKET_VERSION </span><span class="s3">= </span><span class="s5">b&quot;13&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">H11Handshake</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;A Handshake implementation for HTTP/1.1 connections.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">connection_type</span><span class="s3">: </span><span class="s1">ConnectionType</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">client </span><span class="s3">= </span><span class="s1">connection_type </span><span class="s2">is </span><span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">CLIENT</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CONNECTING</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Connection</span><span class="s3">(</span><span class="s1">h11</span><span class="s3">.</span><span class="s1">CLIENT</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Connection</span><span class="s3">(</span><span class="s1">h11</span><span class="s3">.</span><span class="s1">SERVER</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_connection</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Connection</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">: </span><span class="s1">Deque</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">] = </span><span class="s1">deque</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_nonce</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = </span><span class="s2">None</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">state</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; ConnectionState</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_state</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">Connection</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Return the established connection. 
+ 
+        This will either return the connection or raise a 
+        LocalProtocolError if the connection has not yet been 
+        established. 
+ 
+        :rtype: h11.Connection 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_connection</span>
+
+    <span class="s2">def </span><span class="s1">initiate_upgrade_connection</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">: </span><span class="s1">Headers</span><span class="s3">, </span><span class="s1">path</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Initiate an upgrade connection. 
+ 
+        This should be used if the request has already be received and 
+        parsed. 
+ 
+        :param list headers: HTTP headers represented as a list of 2-tuples. 
+        :param str path: A URL path. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Cannot initiate an upgrade connection when acting as the client&quot;</span>
+            <span class="s3">)</span>
+        <span class="s1">upgrade_request </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Request</span><span class="s3">(</span><span class="s1">method</span><span class="s3">=</span><span class="s5">b&quot;GET&quot;</span><span class="s3">, </span><span class="s1">target</span><span class="s3">=</span><span class="s1">path</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">)</span>
+        <span class="s1">h11_client </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Connection</span><span class="s3">(</span><span class="s1">h11</span><span class="s3">.</span><span class="s1">CLIENT</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">receive_data</span><span class="s3">(</span><span class="s1">h11_client</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">upgrade_request</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Send an event to the remote. 
+ 
+        This will return the bytes to send based on the event or raise 
+        a LocalProtocolError if the event is not valid given the 
+        state. 
+ 
+        :returns: Data to send to the WebSocket peer. 
+        :rtype: bytes 
+        &quot;&quot;&quot;</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s5">b&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">Request</span><span class="s3">):</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiate_connection</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">AcceptConnection</span><span class="s3">):</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_accept</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">RejectConnection</span><span class="s3">):</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_reject</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">RejectData</span><span class="s3">):</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_send_reject_data</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s6">f&quot;Event </span><span class="s2">{</span><span class="s1">event</span><span class="s2">} </span><span class="s6">cannot be sent during the handshake&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">receive_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Receive data from the remote. 
+ 
+        A list of events that the remote peer triggered by sending 
+        this data can be retrieved with :meth:`events`. 
+ 
+        :param bytes data: Data received from the WebSocket peer. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">receive_data</span><span class="s3">(</span><span class="s1">data </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span><span class="s3">)</span>
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">next_event</span><span class="s3">()</span>
+            <span class="s2">except </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">RemoteProtocolError</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                    <span class="s6">&quot;Bad HTTP message&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+                <span class="s3">)</span>
+            <span class="s2">if </span><span class="s3">(</span>
+                <span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">ConnectionClosed</span><span class="s3">)</span>
+                <span class="s2">or </span><span class="s1">event </span><span class="s2">is </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">NEED_DATA</span>
+                <span class="s2">or </span><span class="s1">event </span><span class="s2">is </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">PAUSED</span>
+            <span class="s3">):</span>
+                <span class="s2">break</span>
+
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">InformationalResponse</span><span class="s3">):</span>
+                    <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">== </span><span class="s7">101</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_establish_client_connection</span><span class="s3">(</span><span class="s1">event</span><span class="s3">))</span>
+                    <span class="s2">else</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                            <span class="s1">RejectConnection</span><span class="s3">(</span>
+                                <span class="s1">headers</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">),</span>
+                                <span class="s1">status_code</span><span class="s3">=</span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code</span><span class="s3">,</span>
+                                <span class="s1">has_body</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+                            <span class="s3">)</span>
+                        <span class="s3">)</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+                <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Response</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">REJECTING</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                        <span class="s1">RejectConnection</span><span class="s3">(</span>
+                            <span class="s1">headers</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">),</span>
+                            <span class="s1">status_code</span><span class="s3">=</span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code</span><span class="s3">,</span>
+                            <span class="s1">has_body</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+                        <span class="s3">)</span>
+                    <span class="s3">)</span>
+                <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Data</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                        <span class="s1">RejectData</span><span class="s3">(</span><span class="s1">data</span><span class="s3">=</span><span class="s1">event</span><span class="s3">.</span><span class="s1">data</span><span class="s3">, </span><span class="s1">body_finished</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+                    <span class="s3">)</span>
+                <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">EndOfMessage</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">RejectData</span><span class="s3">(</span><span class="s1">data</span><span class="s3">=</span><span class="s5">b&quot;&quot;</span><span class="s3">, </span><span class="s1">body_finished</span><span class="s3">=</span><span class="s2">True</span><span class="s3">))</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Request</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_process_connection_request</span><span class="s3">(</span><span class="s1">event</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">events</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Return a generator that provides any events that have been generated 
+        by protocol activity. 
+ 
+        :returns: a generator that yields H11 events. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">while </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">popleft</span><span class="s3">()</span>
+
+    <span class="s4"># Server mode methods</span>
+
+    <span class="s2">def </span><span class="s1">_process_connection_request</span><span class="s3">(  </span><span class="s4"># noqa: MC0001</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Request</span>
+    <span class="s3">) </span><span class="s1">-&gt; Request</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">method </span><span class="s3">!= </span><span class="s5">b&quot;GET&quot;</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Request method must be GET&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+        <span class="s1">connection_tokens </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">extensions</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+        <span class="s1">host </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">key </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">subprotocols</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+        <span class="s1">upgrade </span><span class="s3">= </span><span class="s5">b&quot;&quot;</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">headers</span><span class="s3">: </span><span class="s1">Headers </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">:</span>
+            <span class="s1">name </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;connection&quot;</span><span class="s3">:</span>
+                <span class="s1">connection_tokens </span><span class="s3">= </span><span class="s1">split_comma_header</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;host&quot;</span><span class="s3">:</span>
+                <span class="s1">host </span><span class="s3">= </span><span class="s1">value</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s6">&quot;idna&quot;</span><span class="s3">)</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-extensions&quot;</span><span class="s3">:</span>
+                <span class="s1">extensions</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">split_comma_header</span><span class="s3">(</span><span class="s1">value</span><span class="s3">))</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-key&quot;</span><span class="s3">:</span>
+                <span class="s1">key </span><span class="s3">= </span><span class="s1">value</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-protocol&quot;</span><span class="s3">:</span>
+                <span class="s1">subprotocols</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">split_comma_header</span><span class="s3">(</span><span class="s1">value</span><span class="s3">))</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-version&quot;</span><span class="s3">:</span>
+                <span class="s1">version </span><span class="s3">= </span><span class="s1">value</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;upgrade&quot;</span><span class="s3">:</span>
+                <span class="s1">upgrade </span><span class="s3">= </span><span class="s1">value</span>
+            <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">connection_tokens </span><span class="s2">is None or not </span><span class="s1">any</span><span class="s3">(</span>
+            <span class="s1">token</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">() == </span><span class="s6">&quot;upgrade&quot; </span><span class="s2">for </span><span class="s1">token </span><span class="s2">in </span><span class="s1">connection_tokens</span>
+        <span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Connection: Upgrade'&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s3">!= </span><span class="s1">WEBSOCKET_VERSION</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Sec-WebSocket-Version'&quot;</span><span class="s3">,</span>
+                <span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">(</span>
+                    <span class="s1">headers</span><span class="s3">=[(</span><span class="s5">b&quot;Sec-WebSocket-Version&quot;</span><span class="s3">, </span><span class="s1">WEBSOCKET_VERSION</span><span class="s3">)],</span>
+                    <span class="s1">status_code</span><span class="s3">=</span><span class="s7">426 </span><span class="s2">if </span><span class="s1">version </span><span class="s2">else </span><span class="s7">400</span><span class="s3">,</span>
+                <span class="s3">),</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Sec-WebSocket-Key'&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">upgrade</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">() != </span><span class="s5">b&quot;websocket&quot;</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Upgrade: WebSocket'&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">host </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Host'&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request </span><span class="s3">= </span><span class="s1">Request</span><span class="s3">(</span>
+            <span class="s1">extensions</span><span class="s3">=</span><span class="s1">extensions</span><span class="s3">,</span>
+            <span class="s1">extra_headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">,</span>
+            <span class="s1">host</span><span class="s3">=</span><span class="s1">host</span><span class="s3">,</span>
+            <span class="s1">subprotocols</span><span class="s3">=</span><span class="s1">subprotocols</span><span class="s3">,</span>
+            <span class="s1">target</span><span class="s3">=</span><span class="s1">event</span><span class="s3">.</span><span class="s1">target</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">),</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span>
+
+    <span class="s2">def </span><span class="s1">_accept</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">AcceptConnection</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s4"># _accept is always called after _process_connection_request.</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request </span><span class="s2">is not None</span>
+        <span class="s1">request_headers </span><span class="s3">= </span><span class="s1">normed_header_dict</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span><span class="s3">.</span><span class="s1">extra_headers</span><span class="s3">)</span>
+
+        <span class="s1">nonce </span><span class="s3">= </span><span class="s1">request_headers</span><span class="s3">[</span><span class="s5">b&quot;sec-websocket-key&quot;</span><span class="s3">]</span>
+        <span class="s1">accept_token </span><span class="s3">= </span><span class="s1">generate_accept_token</span><span class="s3">(</span><span class="s1">nonce</span><span class="s3">)</span>
+
+        <span class="s1">headers </span><span class="s3">= [</span>
+            <span class="s3">(</span><span class="s5">b&quot;Upgrade&quot;</span><span class="s3">, </span><span class="s5">b&quot;WebSocket&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">b&quot;Connection&quot;</span><span class="s3">, </span><span class="s5">b&quot;Upgrade&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">b&quot;Sec-WebSocket-Accept&quot;</span><span class="s3">, </span><span class="s1">accept_token</span><span class="s3">),</span>
+        <span class="s3">]</span>
+
+        <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">subprotocol </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">subprotocol </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span><span class="s3">.</span><span class="s1">subprotocols</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s6">f&quot;unexpected subprotocol </span><span class="s2">{</span><span class="s1">event</span><span class="s3">.</span><span class="s1">subprotocol</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s3">)</span>
+            <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                <span class="s3">(</span><span class="s5">b&quot;Sec-WebSocket-Protocol&quot;</span><span class="s3">, </span><span class="s1">event</span><span class="s3">.</span><span class="s1">subprotocol</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">))</span>
+            <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+            <span class="s1">accepts </span><span class="s3">= </span><span class="s1">server_extensions_handshake</span><span class="s3">(</span>
+                <span class="s1">cast</span><span class="s3">(</span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">),</span>
+                <span class="s1">event</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">accepts</span><span class="s3">:</span>
+                <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s5">b&quot;Sec-WebSocket-Extensions&quot;</span><span class="s3">, </span><span class="s1">accepts</span><span class="s3">))</span>
+
+        <span class="s1">response </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">InformationalResponse</span><span class="s3">(</span>
+            <span class="s1">status_code</span><span class="s3">=</span><span class="s7">101</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">=</span><span class="s1">headers </span><span class="s3">+ </span><span class="s1">event</span><span class="s3">.</span><span class="s1">extra_headers</span>
+        <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_connection </span><span class="s3">= </span><span class="s1">Connection</span><span class="s3">(</span>
+            <span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">CLIENT </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client </span><span class="s2">else </span><span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">SERVER</span><span class="s3">,</span>
+            <span class="s1">event</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">response</span><span class="s3">) </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_reject</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">RejectConnection</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s3">!= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CONNECTING</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Connection cannot be rejected in state %s&quot; </span><span class="s3">% </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state</span>
+            <span class="s3">)</span>
+
+        <span class="s1">headers </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">event</span><span class="s3">.</span><span class="s1">has_body</span><span class="s3">:</span>
+            <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s5">b&quot;content-length&quot;</span><span class="s3">, </span><span class="s5">b&quot;0&quot;</span><span class="s3">))</span>
+        <span class="s1">response </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Response</span><span class="s3">(</span><span class="s1">status_code</span><span class="s3">=</span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">)</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">response</span><span class="s3">) </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">REJECTING</span>
+        <span class="s2">if not </span><span class="s1">event</span><span class="s3">.</span><span class="s1">has_body</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">h11</span><span class="s3">.</span><span class="s1">EndOfMessage</span><span class="s3">()) </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">_send_reject_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">RejectData</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s3">!= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">REJECTING</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s6">f&quot;Cannot send rejection data in state </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">state</span><span class="s2">}</span><span class="s6">&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Data</span><span class="s3">(</span><span class="s1">data</span><span class="s3">=</span><span class="s1">event</span><span class="s3">.</span><span class="s1">data</span><span class="s3">)) </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">body_finished</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">h11</span><span class="s3">.</span><span class="s1">EndOfMessage</span><span class="s3">()) </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s4"># Client mode methods</span>
+
+    <span class="s2">def </span><span class="s1">_initiate_connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">request</span><span class="s3">: </span><span class="s1">Request</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request </span><span class="s3">= </span><span class="s1">request</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_nonce </span><span class="s3">= </span><span class="s1">generate_nonce</span><span class="s3">()</span>
+
+        <span class="s1">headers </span><span class="s3">= [</span>
+            <span class="s3">(</span><span class="s5">b&quot;Host&quot;</span><span class="s3">, </span><span class="s1">request</span><span class="s3">.</span><span class="s1">host</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;idna&quot;</span><span class="s3">)),</span>
+            <span class="s3">(</span><span class="s5">b&quot;Upgrade&quot;</span><span class="s3">, </span><span class="s5">b&quot;WebSocket&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">b&quot;Connection&quot;</span><span class="s3">, </span><span class="s5">b&quot;Upgrade&quot;</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">b&quot;Sec-WebSocket-Key&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_nonce</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">b&quot;Sec-WebSocket-Version&quot;</span><span class="s3">, </span><span class="s1">WEBSOCKET_VERSION</span><span class="s3">),</span>
+        <span class="s3">]</span>
+
+        <span class="s2">if </span><span class="s1">request</span><span class="s3">.</span><span class="s1">subprotocols</span><span class="s3">:</span>
+            <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                <span class="s3">(</span>
+                    <span class="s5">b&quot;Sec-WebSocket-Protocol&quot;</span><span class="s3">,</span>
+                    <span class="s3">(</span><span class="s6">&quot;, &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">request</span><span class="s3">.</span><span class="s1">subprotocols</span><span class="s3">)).</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">),</span>
+                <span class="s3">)</span>
+            <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">request</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+            <span class="s1">offers</span><span class="s3">: </span><span class="s1">Dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">bool</span><span class="s3">]] = {}</span>
+            <span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">request</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+                <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">e</span><span class="s3">, </span><span class="s1">Extension</span><span class="s3">)</span>
+                <span class="s1">offers</span><span class="s3">[</span><span class="s1">e</span><span class="s3">.</span><span class="s1">name</span><span class="s3">] = </span><span class="s1">e</span><span class="s3">.</span><span class="s1">offer</span><span class="s3">()</span>
+            <span class="s1">extensions </span><span class="s3">= []</span>
+            <span class="s2">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">params </span><span class="s2">in </span><span class="s1">offers</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+                <span class="s1">bname </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">params</span><span class="s3">, </span><span class="s1">bool</span><span class="s3">):</span>
+                    <span class="s2">if </span><span class="s1">params</span><span class="s3">:</span>
+                        <span class="s1">extensions</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">bname</span><span class="s3">)</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">extensions</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s5">b&quot;%s; %s&quot; </span><span class="s3">% (</span><span class="s1">bname</span><span class="s3">, </span><span class="s1">params</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">)))</span>
+            <span class="s2">if </span><span class="s1">extensions</span><span class="s3">:</span>
+                <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s5">b&quot;Sec-WebSocket-Extensions&quot;</span><span class="s3">, </span><span class="s5">b&quot;, &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">extensions</span><span class="s3">)))</span>
+
+        <span class="s1">upgrade </span><span class="s3">= </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">Request</span><span class="s3">(</span>
+            <span class="s1">method</span><span class="s3">=</span><span class="s5">b&quot;GET&quot;</span><span class="s3">,</span>
+            <span class="s1">target</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">target</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">),</span>
+            <span class="s1">headers</span><span class="s3">=</span><span class="s1">headers </span><span class="s3">+ </span><span class="s1">request</span><span class="s3">.</span><span class="s1">extra_headers</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">upgrade</span><span class="s3">) </span><span class="s2">or </span><span class="s5">b&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_establish_client_connection</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">h11</span><span class="s3">.</span><span class="s1">InformationalResponse</span>
+    <span class="s3">) </span><span class="s1">-&gt; AcceptConnection</span><span class="s3">:  </span><span class="s4"># noqa: MC0001</span>
+        <span class="s4"># _establish_client_connection is always called after _initiate_connection.</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request </span><span class="s2">is not None</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_nonce </span><span class="s2">is not None</span>
+
+        <span class="s1">accept </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">connection_tokens </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">accepts</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+        <span class="s1">subprotocol </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">upgrade </span><span class="s3">= </span><span class="s5">b&quot;&quot;</span>
+        <span class="s1">headers</span><span class="s3">: </span><span class="s1">Headers </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">:</span>
+            <span class="s1">name </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;connection&quot;</span><span class="s3">:</span>
+                <span class="s1">connection_tokens </span><span class="s3">= </span><span class="s1">split_comma_header</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-extensions&quot;</span><span class="s3">:</span>
+                <span class="s1">accepts </span><span class="s3">= </span><span class="s1">split_comma_header</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-accept&quot;</span><span class="s3">:</span>
+                <span class="s1">accept </span><span class="s3">= </span><span class="s1">value</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;sec-websocket-protocol&quot;</span><span class="s3">:</span>
+                <span class="s1">subprotocol </span><span class="s3">= </span><span class="s1">value</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">)</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s2">elif </span><span class="s1">name </span><span class="s3">== </span><span class="s5">b&quot;upgrade&quot;</span><span class="s3">:</span>
+                <span class="s1">upgrade </span><span class="s3">= </span><span class="s1">value</span>
+                <span class="s2">continue  </span><span class="s4"># Skip appending to headers</span>
+            <span class="s1">headers</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">))</span>
+
+        <span class="s2">if </span><span class="s1">connection_tokens </span><span class="s2">is None or not </span><span class="s1">any</span><span class="s3">(</span>
+            <span class="s1">token</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">() == </span><span class="s6">&quot;upgrade&quot; </span><span class="s2">for </span><span class="s1">token </span><span class="s2">in </span><span class="s1">connection_tokens</span>
+        <span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Connection: Upgrade'&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">upgrade</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">() != </span><span class="s5">b&quot;websocket&quot;</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">&quot;Missing header, 'Upgrade: WebSocket'&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+        <span class="s1">accept_token </span><span class="s3">= </span><span class="s1">generate_accept_token</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_nonce</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">accept </span><span class="s3">!= </span><span class="s1">accept_token</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span><span class="s6">&quot;Bad accept token&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">())</span>
+        <span class="s2">if </span><span class="s1">subprotocol </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">subprotocol </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span><span class="s3">.</span><span class="s1">subprotocols</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                    <span class="s6">f&quot;unrecognized subprotocol </span><span class="s2">{</span><span class="s1">subprotocol</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s3">,</span>
+                    <span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">(),</span>
+                <span class="s3">)</span>
+        <span class="s1">extensions </span><span class="s3">= </span><span class="s1">client_extensions_handshake</span><span class="s3">(</span>
+            <span class="s1">accepts</span><span class="s3">, </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">Extension</span><span class="s3">], </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initiating_request</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">)</span>
+        <span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_connection </span><span class="s3">= </span><span class="s1">Connection</span><span class="s3">(</span>
+            <span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">CLIENT </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client </span><span class="s2">else </span><span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">SERVER</span><span class="s3">,</span>
+            <span class="s1">extensions</span><span class="s3">,</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_h11_connection</span><span class="s3">.</span><span class="s1">trailing_data</span><span class="s3">[</span><span class="s7">0</span><span class="s3">],</span>
+        <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span>
+        <span class="s2">return </span><span class="s1">AcceptConnection</span><span class="s3">(</span>
+            <span class="s1">extensions</span><span class="s3">=</span><span class="s1">extensions</span><span class="s3">, </span><span class="s1">extra_headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">subprotocol</span><span class="s3">=</span><span class="s1">subprotocol</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s6">&quot;{}(client={}, state={})&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">__name__</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">server_extensions_handshake</span><span class="s3">(</span>
+    <span class="s1">requested</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">supported</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Extension</span><span class="s3">]</span>
+<span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]:</span>
+    <span class="s0">&quot;&quot;&quot;Agree on the extensions to use returning an appropriate header value. 
+ 
+    This returns None if there are no agreed extensions 
+    &quot;&quot;&quot;</span>
+    <span class="s1">accepts</span><span class="s3">: </span><span class="s1">Dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bool</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">]] = {}</span>
+    <span class="s2">for </span><span class="s1">offer </span><span class="s2">in </span><span class="s1">requested</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">offer</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s6">&quot;;&quot;</span><span class="s3">, </span><span class="s7">1</span><span class="s3">)[</span><span class="s7">0</span><span class="s3">].</span><span class="s1">strip</span><span class="s3">()</span>
+        <span class="s2">for </span><span class="s1">extension </span><span class="s2">in </span><span class="s1">supported</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">name </span><span class="s3">== </span><span class="s1">name</span><span class="s3">:</span>
+                <span class="s1">accept </span><span class="s3">= </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">accept</span><span class="s3">(</span><span class="s1">offer</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">accept</span><span class="s3">, </span><span class="s1">bool</span><span class="s3">):</span>
+                    <span class="s2">if </span><span class="s1">accept</span><span class="s3">:</span>
+                        <span class="s1">accepts</span><span class="s3">[</span><span class="s1">extension</span><span class="s3">.</span><span class="s1">name</span><span class="s3">] = </span><span class="s2">True</span>
+                <span class="s2">elif </span><span class="s1">accept </span><span class="s2">is not None</span><span class="s3">:</span>
+                    <span class="s1">accepts</span><span class="s3">[</span><span class="s1">extension</span><span class="s3">.</span><span class="s1">name</span><span class="s3">] = </span><span class="s1">accept</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">accepts</span><span class="s3">:</span>
+        <span class="s1">extensions</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = []</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">params </span><span class="s2">in </span><span class="s1">accepts</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+            <span class="s1">name_bytes </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;ascii&quot;</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">params</span><span class="s3">, </span><span class="s1">bool</span><span class="s3">):</span>
+                <span class="s2">assert </span><span class="s1">params</span>
+                <span class="s1">extensions</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">name_bytes</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">params </span><span class="s3">== </span><span class="s5">b&quot;&quot;</span><span class="s3">:</span>
+                    <span class="s1">extensions</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s5">b&quot;%s&quot; </span><span class="s3">% (</span><span class="s1">name_bytes</span><span class="s3">))</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">extensions</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s5">b&quot;%s; %s&quot; </span><span class="s3">% (</span><span class="s1">name_bytes</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s5">b&quot;, &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">extensions</span><span class="s3">)</span>
+
+    <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">client_extensions_handshake</span><span class="s3">(</span>
+    <span class="s1">accepted</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">supported</span><span class="s3">: </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">Extension</span><span class="s3">]</span>
+<span class="s3">) </span><span class="s1">-&gt; List</span><span class="s3">[</span><span class="s1">Extension</span><span class="s3">]:</span>
+    <span class="s4"># This raises RemoteProtocolError is the accepted extension is not</span>
+    <span class="s4"># supported.</span>
+    <span class="s1">extensions </span><span class="s3">= []</span>
+    <span class="s2">for </span><span class="s1">accept </span><span class="s2">in </span><span class="s1">accepted</span><span class="s3">:</span>
+        <span class="s1">name </span><span class="s3">= </span><span class="s1">accept</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s6">&quot;;&quot;</span><span class="s3">, </span><span class="s7">1</span><span class="s3">)[</span><span class="s7">0</span><span class="s3">].</span><span class="s1">strip</span><span class="s3">()</span>
+        <span class="s2">for </span><span class="s1">extension </span><span class="s2">in </span><span class="s1">supported</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">name </span><span class="s3">== </span><span class="s1">name</span><span class="s3">:</span>
+                <span class="s1">extension</span><span class="s3">.</span><span class="s1">finalize</span><span class="s3">(</span><span class="s1">accept</span><span class="s3">)</span>
+                <span class="s1">extensions</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">extension</span><span class="s3">)</span>
+                <span class="s2">break</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                <span class="s6">f&quot;unrecognized extension </span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s3">, </span><span class="s1">event_hint</span><span class="s3">=</span><span class="s1">RejectConnection</span><span class="s3">()</span>
+            <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">extensions</span>
+</pre>
+</body>
+</html>

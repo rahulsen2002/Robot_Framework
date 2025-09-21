@@ -1,0 +1,728 @@
+<html>
+<head>
+<title>test_ki.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_ki.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">import </span><span class="s1">weakref</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncIterator</span><span class="s2">, </span><span class="s1">Iterator</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">TypeVar</span>
+
+<span class="s0">import </span><span class="s1">outcome</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">RaisesGroup</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">tutil </span><span class="s0">import </span><span class="s1">gc_collect_harder</span>
+
+<span class="s0">try</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">async_generator </span><span class="s0">import </span><span class="s1">async_generator</span><span class="s2">, </span><span class="s1">yield_</span>
+<span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+    <span class="s1">async_generator </span><span class="s2">= </span><span class="s1">yield_ </span><span class="s2">= </span><span class="s0">None</span>
+
+<span class="s0">from </span><span class="s2">... </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">...</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">Instrument</span>
+<span class="s0">from </span><span class="s2">...</span><span class="s1">_core </span><span class="s0">import </span><span class="s1">_ki</span>
+<span class="s0">from </span><span class="s2">...</span><span class="s1">_timeouts </span><span class="s0">import </span><span class="s1">sleep</span>
+<span class="s0">from </span><span class="s2">...</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">wait_all_tasks_blocked</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s2">(</span>
+        <span class="s1">AsyncGenerator</span><span class="s2">,</span>
+        <span class="s1">AsyncIterator</span><span class="s2">,</span>
+        <span class="s1">Callable</span><span class="s2">,</span>
+        <span class="s1">Generator</span><span class="s2">,</span>
+        <span class="s1">Iterator</span><span class="s2">,</span>
+    <span class="s2">)</span>
+
+    <span class="s0">from </span><span class="s2">...</span><span class="s1">_core </span><span class="s0">import </span><span class="s1">Abort</span><span class="s2">, </span><span class="s1">RaiseCancelT</span>
+
+
+<span class="s0">def </span><span class="s1">ki_self</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">signal</span><span class="s2">.</span><span class="s1">raise_signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_ki_self</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">test_ki_enabled</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># Regular tasks aren't KI-protected</span>
+    <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s3"># Low-level call-soon callbacks are KI-protected</span>
+    <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s1">record </span><span class="s2">= []</span>
+
+    <span class="s0">def </span><span class="s1">check</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">record</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">())</span>
+
+    <span class="s1">token</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span><span class="s1">check</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">record </span><span class="s2">== [</span><span class="s0">True</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">protected</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">unprotected</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">unprotected</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s1">protected</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">aprotected</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">aunprotected</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">aunprotected</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">await </span><span class="s1">aprotected</span><span class="s2">()</span>
+
+    <span class="s3"># make sure that the decorator here overrides the automatic manipulation</span>
+    <span class="s3"># that start_soon() does:</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">aprotected</span><span class="s2">)</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">aunprotected</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">gen_protected</span><span class="s2">() </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">yield</span>
+
+    <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">gen_protected</span><span class="s2">():</span>
+        <span class="s0">pass</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">gen_unprotected</span><span class="s2">() </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">yield</span>
+
+    <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">gen_unprotected</span><span class="s2">():</span>
+        <span class="s0">pass</span>
+
+
+<span class="s3"># This used to be broken due to</span>
+<span class="s3">#</span>
+<span class="s3">#   https://bugs.python.org/issue29590</span>
+<span class="s3">#</span>
+<span class="s3"># Specifically, after a coroutine is resumed with .throw(), then the stack</span>
+<span class="s3"># makes it look like the immediate caller is the function that called</span>
+<span class="s3"># .throw(), not the actual caller. So child() here would have a caller deep in</span>
+<span class="s3"># the guts of the run loop, and always be protected, even when it shouldn't</span>
+<span class="s3"># have been. (Solution: we don't use .throw() anymore.)</span>
+<span class="s0">async def </span><span class="s1">test_ki_enabled_after_yield_briefly</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">protected</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">child</span><span class="s2">(</span><span class="s0">True</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">unprotected</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">child</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">child</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">import </span><span class="s1">traceback</span>
+
+        <span class="s1">traceback</span><span class="s2">.</span><span class="s1">print_stack</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">() == </span><span class="s1">expected</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+        <span class="s1">traceback</span><span class="s2">.</span><span class="s1">print_stack</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">() == </span><span class="s1">expected</span>
+
+    <span class="s0">await </span><span class="s1">protected</span><span class="s2">()</span>
+    <span class="s0">await </span><span class="s1">unprotected</span><span class="s2">()</span>
+
+
+<span class="s3"># This also used to be broken due to</span>
+<span class="s3">#   https://bugs.python.org/issue29590</span>
+<span class="s0">async def </span><span class="s1">test_generator_based_context_manager_throw</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">protected_manager</span><span class="s2">() </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">protected_manager</span><span class="s2">():</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyError</span><span class="s2">):</span>
+        <span class="s3"># This is the one that used to fail</span>
+        <span class="s0">with </span><span class="s1">protected_manager</span><span class="s2">():</span>
+            <span class="s0">raise </span><span class="s1">KeyError</span>
+
+
+<span class="s3"># the async_generator package isn't typed, hence all the type: ignores</span>
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s1">async_generator </span><span class="s0">is None</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">=</span><span class="s4">&quot;async_generator not installed&quot;</span><span class="s2">)</span>
+<span class="s0">async def </span><span class="s1">test_async_generator_agen_protection</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s2">@</span><span class="s1">async_generator  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+    <span class="s0">async def </span><span class="s1">agen_protected1</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">yield_</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s2">@</span><span class="s1">async_generator  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+    <span class="s0">async def </span><span class="s1">agen_unprotected1</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">yield_</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s3"># Swap the order of the decorators:</span>
+    <span class="s2">@</span><span class="s1">async_generator  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">agen_protected2</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">yield_</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">async_generator  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">agen_unprotected2</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># type: ignore[misc] # untyped generator</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">yield_</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">await </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_protected1</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_protected2</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_unprotected1</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_unprotected2</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_native_agen_protection</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># Native async generators</span>
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">agen_protected</span><span class="s2">() </span><span class="s1">-&gt; AsyncIterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">agen_unprotected</span><span class="s2">() </span><span class="s1">-&gt; AsyncIterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">await </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_protected</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_unprotected</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">_check_agen</span><span class="s2">(</span><span class="s1">agen_fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">AsyncIterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">agen_fn</span><span class="s2">():</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s3"># asynccontextmanager insists that the function passed must itself be an</span>
+    <span class="s3"># async gen function, not a wrapper around one</span>
+    <span class="s0">if </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isasyncgenfunction</span><span class="s2">(</span><span class="s1">agen_fn</span><span class="s2">):</span>
+        <span class="s0">async with </span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">asynccontextmanager</span><span class="s2">(</span><span class="s1">agen_fn</span><span class="s2">)():</span>
+            <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+        <span class="s3"># Another case that's tricky due to:</span>
+        <span class="s3">#   https://bugs.python.org/issue29590</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyError</span><span class="s2">):</span>
+            <span class="s0">async with </span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">asynccontextmanager</span><span class="s2">(</span><span class="s1">agen_fn</span><span class="s2">)():</span>
+                <span class="s0">raise </span><span class="s1">KeyError</span>
+
+
+<span class="s3"># Test the case where there's no magic local anywhere in the call stack</span>
+<span class="s0">def </span><span class="s1">test_ki_disabled_out_of_context</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">test_ki_disabled_in_del</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">nestedfunction</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__del__</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">nestedfunction</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+    <span class="s0">def </span><span class="s1">outerfunction</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">assert not </span><span class="s1">nestedfunction</span><span class="s2">()</span>
+        <span class="s1">__del__</span><span class="s2">()</span>
+
+    <span class="s1">__del__</span><span class="s2">()</span>
+    <span class="s1">outerfunction</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">nestedfunction</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">test_ki_protection_works</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async def </span><span class="s1">sleeper</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">record</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">while True</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">name </span><span class="s2">+ </span><span class="s4">&quot; ok&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">raiser</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">record</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s3"># os.kill runs signal handlers before returning, so we don't need</span>
+            <span class="s3"># to worry that the handler will be delayed</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;killing, protection =&quot;</span><span class="s2">, </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">())</span>
+            <span class="s1">ki_self</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">KeyboardInterrupt</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;raised!&quot;</span><span class="s2">)</span>
+            <span class="s3"># Make sure we aren't getting cancelled as well as siginted</span>
+            <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+            <span class="s1">record</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">name </span><span class="s2">+ </span><span class="s4">&quot; raise ok&quot;</span><span class="s2">)</span>
+            <span class="s0">raise</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;didn't raise!&quot;</span><span class="s2">)</span>
+            <span class="s3"># If we didn't raise (b/c protected), then we *should* get</span>
+            <span class="s3"># cancelled at the next opportunity</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">SUCCEEDED</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">:</span>
+                <span class="s1">record</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">name </span><span class="s2">+ </span><span class="s4">&quot; cancel ok&quot;</span><span class="s2">)</span>
+
+    <span class="s3"># simulated control-C during raiser, which is *unprotected*</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 1&quot;</span><span class="s2">)</span>
+    <span class="s1">record_set</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">check_unprotected_kill</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sleeper</span><span class="s2">, </span><span class="s4">&quot;s1&quot;</span><span class="s2">, </span><span class="s1">record_set</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sleeper</span><span class="s2">, </span><span class="s4">&quot;s2&quot;</span><span class="s2">, </span><span class="s1">record_set</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">raiser</span><span class="s2">, </span><span class="s4">&quot;r1&quot;</span><span class="s2">, </span><span class="s1">record_set</span><span class="s2">)</span>
+
+    <span class="s3"># raises inside a nursery, so the KeyboardInterrupt is wrapped in an ExceptionGroup</span>
+    <span class="s0">with </span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">check_unprotected_kill</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record_set </span><span class="s2">== {</span><span class="s4">&quot;s1 ok&quot;</span><span class="s2">, </span><span class="s4">&quot;s2 ok&quot;</span><span class="s2">, </span><span class="s4">&quot;r1 raise ok&quot;</span><span class="s2">}</span>
+
+    <span class="s3"># simulated control-C during raiser, which is *protected*, so the KI gets</span>
+    <span class="s3"># delivered to the main task instead</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 2&quot;</span><span class="s2">)</span>
+    <span class="s1">record_set </span><span class="s2">= </span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">check_protected_kill</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sleeper</span><span class="s2">, </span><span class="s4">&quot;s1&quot;</span><span class="s2">, </span><span class="s1">record_set</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sleeper</span><span class="s2">, </span><span class="s4">&quot;s2&quot;</span><span class="s2">, </span><span class="s1">record_set</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span><span class="s2">(</span><span class="s1">raiser</span><span class="s2">), </span><span class="s4">&quot;r1&quot;</span><span class="s2">, </span><span class="s1">record_set</span><span class="s2">)</span>
+            <span class="s3"># __aexit__ blocks, and then receives the KI</span>
+
+    <span class="s3"># raises inside a nursery, so the KeyboardInterrupt is wrapped in an ExceptionGroup</span>
+    <span class="s0">with </span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">check_protected_kill</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record_set </span><span class="s2">== {</span><span class="s4">&quot;s1 ok&quot;</span><span class="s2">, </span><span class="s4">&quot;s2 ok&quot;</span><span class="s2">, </span><span class="s4">&quot;r1 cancel ok&quot;</span><span class="s2">}</span>
+
+    <span class="s3"># kill at last moment still raises (run_sync_soon until it raises an</span>
+    <span class="s3"># error, then kill)</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 3&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">check_kill_during_shutdown</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">token </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">kill_during_shutdown</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">token</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span><span class="s1">kill_during_shutdown</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">RunFinishedError</span><span class="s2">:</span>
+                <span class="s3"># it's too late for regular handling! handle this!</span>
+                <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;kill! kill!&quot;</span><span class="s2">)</span>
+                <span class="s1">ki_self</span><span class="s2">()</span>
+
+        <span class="s1">token</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span><span class="s1">kill_during_shutdown</span><span class="s2">)</span>
+
+    <span class="s3"># no nurseries involved, so the KeyboardInterrupt isn't wrapped</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">check_kill_during_shutdown</span><span class="s2">)</span>
+
+    <span class="s3"># KI arrives very early, before main is even spawned</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 4&quot;</span><span class="s2">)</span>
+
+    <span class="s0">class </span><span class="s1">InstrumentOfDeath</span><span class="s2">(</span><span class="s1">Instrument</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">before_run</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">ki_self</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">main_1</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s3"># no nurseries involved, so the KeyboardInterrupt isn't wrapped</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_1</span><span class="s2">, </span><span class="s1">instruments</span><span class="s2">=[</span><span class="s1">InstrumentOfDeath</span><span class="s2">()])</span>
+
+    <span class="s3"># checkpoint_if_cancelled notices pending KI</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 5&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">main_2</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint_if_cancelled</span><span class="s2">()</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_2</span><span class="s2">)</span>
+
+    <span class="s3"># KI arrives while main task is not abortable, b/c already scheduled</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 6&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">main_3</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">cancel_shielded_checkpoint</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">cancel_shielded_checkpoint</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">cancel_shielded_checkpoint</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_3</span><span class="s2">)</span>
+
+    <span class="s3"># KI arrives while main task is not abortable, b/c refuses to be aborted</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 7&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">main_4</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+        <span class="s1">task </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">abort</span><span class="s2">(</span><span class="s1">_</span><span class="s2">: </span><span class="s1">RaiseCancelT</span><span class="s2">) </span><span class="s1">-&gt; Abort</span><span class="s2">:</span>
+            <span class="s1">_core</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">Value</span><span class="s2">(</span><span class="s5">1</span><span class="s2">))</span>
+            <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">FAILED</span>
+
+        <span class="s0">assert await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s1">abort</span><span class="s2">) == </span><span class="s5">1</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_4</span><span class="s2">)</span>
+
+    <span class="s3"># KI delivered via slow abort</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 8&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">main_5</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+        <span class="s1">task </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_task</span><span class="s2">()</span>
+
+        <span class="s0">def </span><span class="s1">abort</span><span class="s2">(</span><span class="s1">raise_cancel</span><span class="s2">: </span><span class="s1">RaiseCancelT</span><span class="s2">) </span><span class="s1">-&gt; Abort</span><span class="s2">:</span>
+            <span class="s1">result </span><span class="s2">= </span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">capture</span><span class="s2">(</span><span class="s1">raise_cancel</span><span class="s2">)</span>
+            <span class="s1">_core</span><span class="s2">.</span><span class="s1">reschedule</span><span class="s2">(</span><span class="s1">task</span><span class="s2">, </span><span class="s1">result</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Abort</span><span class="s2">.</span><span class="s1">FAILED</span>
+
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+            <span class="s0">assert await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_task_rescheduled</span><span class="s2">(</span><span class="s1">abort</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_5</span><span class="s2">)</span>
+
+    <span class="s3"># KI arrives just before main task exits, so the run_sync_soon machinery</span>
+    <span class="s3"># is still functioning and will accept the callback to deliver the KI, but</span>
+    <span class="s3"># by the time the callback is actually run, main has exited and can't be</span>
+    <span class="s3"># aborted.</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 9&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">main_6</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_6</span><span class="s2">)</span>
+
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 10&quot;</span><span class="s2">)</span>
+    <span class="s3"># KI in unprotected code, with</span>
+    <span class="s3"># restrict_keyboard_interrupt_to_checkpoints=True</span>
+    <span class="s1">record_list </span><span class="s2">= []</span>
+
+    <span class="s0">async def </span><span class="s1">main_7</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># We're not KI protected...</span>
+        <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s1">ki_self</span><span class="s2">()</span>
+        <span class="s3"># ...but even after the KI, we keep running uninterrupted...</span>
+        <span class="s1">record_list</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;ok&quot;</span><span class="s2">)</span>
+        <span class="s3"># ...until we hit a checkpoint:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">10</span><span class="s2">)</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_7</span><span class="s2">, </span><span class="s1">restrict_keyboard_interrupt_to_checkpoints</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record_list </span><span class="s2">== [</span><span class="s4">&quot;ok&quot;</span><span class="s2">]</span>
+    <span class="s1">record_list </span><span class="s2">= []</span>
+    <span class="s3"># Exact same code raises KI early if we leave off the argument, doesn't</span>
+    <span class="s3"># even reach the record.append call:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_7</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">record_list </span><span class="s2">== []</span>
+
+    <span class="s3"># KI arrives while main task is inside a cancelled cancellation scope</span>
+    <span class="s3"># the KeyboardInterrupt should take priority</span>
+    <span class="s1">print</span><span class="s2">(</span><span class="s4">&quot;check 11&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+    <span class="s0">async def </span><span class="s1">main_8</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+            <span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">):</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+            <span class="s1">ki_self</span><span class="s2">()</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">KeyboardInterrupt</span><span class="s2">):</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">Cancelled</span><span class="s2">):</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main_8</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_ki_is_good_neighbor</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># in the unlikely event someone overwrites our signal handler, we leave</span>
+    <span class="s3"># the overwritten one be</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">orig </span><span class="s2">= </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">getsignal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">)</span>
+
+        <span class="s0">def </span><span class="s1">my_handler</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">: </span><span class="s1">object</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+            <span class="s0">pass</span>
+
+        <span class="s0">async def </span><span class="s1">main</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">, </span><span class="s1">my_handler</span><span class="s2">)</span>
+
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">main</span><span class="s2">)</span>
+
+        <span class="s0">assert </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">getsignal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">) </span><span class="s0">is </span><span class="s1">my_handler</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">, </span><span class="s1">orig</span><span class="s2">)</span>
+
+
+<span class="s3"># Regression test for #461</span>
+<span class="s3"># don't know if _active not being visible is a problem</span>
+<span class="s0">def </span><span class="s1">test_ki_with_broken_threads</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">thread </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">main_thread</span><span class="s2">()</span>
+
+    <span class="s3"># scary!</span>
+    <span class="s1">original </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">_active</span><span class="s2">[</span><span class="s1">thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">]  </span><span class="s3"># type: ignore[attr-defined]</span>
+
+    <span class="s3"># put this in a try finally so we don't have a chance of cascading a</span>
+    <span class="s3"># breakage down to everything else</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">del </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">_active</span><span class="s2">[</span><span class="s1">thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">]  </span><span class="s3"># type: ignore[attr-defined]</span>
+
+        <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+        <span class="s0">async def </span><span class="s1">inner</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">getsignal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">) != </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">default_int_handler</span>
+
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">inner</span><span class="s2">)</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">threading</span><span class="s2">.</span><span class="s1">_active</span><span class="s2">[</span><span class="s1">thread</span><span class="s2">.</span><span class="s1">ident</span><span class="s2">] = </span><span class="s1">original  </span><span class="s3"># type: ignore[attr-defined]</span>
+
+
+<span class="s1">_T </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;_T&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_identity</span><span class="s2">(</span><span class="s1">v</span><span class="s2">: </span><span class="s1">_T</span><span class="s2">) </span><span class="s1">-&gt; _T</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">v</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">xfail</span><span class="s2">(</span>
+    <span class="s1">strict</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">raises</span><span class="s2">=</span><span class="s1">AssertionError</span><span class="s2">,</span>
+    <span class="s1">reason</span><span class="s2">=(</span>
+        <span class="s4">&quot;it was decided not to protect against this case, see discussion in: &quot;</span>
+        <span class="s4">&quot;https://github.com/python-trio/trio/pull/3110#discussion_r1802123644&quot;</span>
+    <span class="s2">),</span>
+<span class="s2">)</span>
+<span class="s0">async def </span><span class="s1">test_ki_does_not_leak_across_different_calls_to_inner_functions</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">factory</span><span class="s2">(</span><span class="s1">enabled</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; Callable</span><span class="s2">[[], </span><span class="s1">bool</span><span class="s2">]:</span>
+        <span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection </span><span class="s0">if </span><span class="s1">enabled </span><span class="s0">else </span><span class="s1">_identity</span>
+        <span class="s0">def </span><span class="s1">decorated</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+
+        <span class="s0">return </span><span class="s1">decorated</span>
+
+    <span class="s1">decorated_enabled </span><span class="s2">= </span><span class="s1">factory</span><span class="s2">(</span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s1">decorated_disabled </span><span class="s2">= </span><span class="s1">factory</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">decorated_enabled</span><span class="s2">()</span>
+    <span class="s0">assert not </span><span class="s1">decorated_disabled</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">test_ki_protection_check_does_not_freeze_locals</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">class </span><span class="s1">A</span><span class="s2">:</span>
+        <span class="s0">pass</span>
+
+    <span class="s1">a </span><span class="s2">= </span><span class="s1">A</span><span class="s2">()</span>
+    <span class="s1">wr_a </span><span class="s2">= </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+    <span class="s0">assert not </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">currently_ki_protected</span><span class="s2">()</span>
+    <span class="s0">del </span><span class="s1">a</span>
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">implementation</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">&quot;pypy&quot;</span><span class="s2">:</span>
+        <span class="s1">gc_collect_harder</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">wr_a</span><span class="s2">() </span><span class="s0">is None</span>
+
+
+<span class="s0">def </span><span class="s1">test_identity_weakref_internals</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;To cover the parts WeakKeyIdentityDictionary won't ever reach.&quot;&quot;&quot;</span>
+
+    <span class="s0">class </span><span class="s1">A</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+
+    <span class="s1">a </span><span class="s2">= </span><span class="s1">A</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">a </span><span class="s2">!= </span><span class="s1">a</span>
+    <span class="s1">wr </span><span class="s2">= </span><span class="s1">_ki</span><span class="s2">.</span><span class="s1">_IdRef</span><span class="s2">(</span><span class="s1">a</span><span class="s2">)</span>
+    <span class="s1">wr_other_is_self </span><span class="s2">= </span><span class="s1">wr</span>
+
+    <span class="s3"># dict always checks identity before equality so we need to do it here</span>
+    <span class="s3"># to cover `if self is other`</span>
+    <span class="s0">assert </span><span class="s1">wr </span><span class="s2">== </span><span class="s1">wr_other_is_self</span>
+
+    <span class="s3"># we want to cover __ne__ and `return NotImplemented`</span>
+    <span class="s0">assert </span><span class="s1">wr </span><span class="s2">!= </span><span class="s1">object</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">test_weak_key_identity_dict_remove_callback_keyerror</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;We need to cover the KeyError in self._remove.&quot;&quot;&quot;</span>
+
+    <span class="s0">class </span><span class="s1">A</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+
+    <span class="s1">a </span><span class="s2">= </span><span class="s1">A</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">a </span><span class="s2">!= </span><span class="s1">a</span>
+    <span class="s1">d</span><span class="s2">: </span><span class="s1">_ki</span><span class="s2">.</span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">[</span><span class="s1">A</span><span class="s2">, </span><span class="s1">bool</span><span class="s2">] = </span><span class="s1">_ki</span><span class="s2">.</span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">()</span>
+
+    <span class="s1">d</span><span class="s2">[</span><span class="s1">a</span><span class="s2">] = </span><span class="s0">True</span>
+
+    <span class="s1">data_copy </span><span class="s2">= </span><span class="s1">d</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">.</span><span class="s1">copy</span><span class="s2">()</span>
+    <span class="s1">d</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">.</span><span class="s1">clear</span><span class="s2">()</span>
+    <span class="s0">del </span><span class="s1">a</span>
+
+    <span class="s1">gc_collect_harder</span><span class="s2">()  </span><span class="s3"># would call sys.unraisablehook if there's a problem</span>
+    <span class="s0">assert </span><span class="s1">data_copy</span>
+
+
+<span class="s0">def </span><span class="s1">test_weak_key_identity_dict_remove_callback_selfref_expired</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;We need to cover the KeyError in self._remove.&quot;&quot;&quot;</span>
+
+    <span class="s0">class </span><span class="s1">A</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+
+    <span class="s1">a </span><span class="s2">= </span><span class="s1">A</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">a </span><span class="s2">!= </span><span class="s1">a</span>
+    <span class="s1">d</span><span class="s2">: </span><span class="s1">_ki</span><span class="s2">.</span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">[</span><span class="s1">A</span><span class="s2">, </span><span class="s1">bool</span><span class="s2">] = </span><span class="s1">_ki</span><span class="s2">.</span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">()</span>
+
+    <span class="s1">d</span><span class="s2">[</span><span class="s1">a</span><span class="s2">] = </span><span class="s0">True</span>
+
+    <span class="s1">data_copy </span><span class="s2">= </span><span class="s1">d</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">.</span><span class="s1">copy</span><span class="s2">()</span>
+    <span class="s1">wr_d </span><span class="s2">= </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">(</span><span class="s1">d</span><span class="s2">)</span>
+    <span class="s0">del </span><span class="s1">d</span>
+    <span class="s1">gc_collect_harder</span><span class="s2">()  </span><span class="s3"># would call sys.unraisablehook if there's a problem</span>
+    <span class="s0">assert </span><span class="s1">wr_d</span><span class="s2">() </span><span class="s0">is None</span>
+    <span class="s0">del </span><span class="s1">a</span>
+    <span class="s1">gc_collect_harder</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">data_copy</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+<span class="s0">async def </span><span class="s1">_protected_async_gen_fn</span><span class="s2">() </span><span class="s1">-&gt; AsyncGenerator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">yield</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+<span class="s0">async def </span><span class="s1">_protected_async_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">pass</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">enable_ki_protection</span>
+<span class="s0">def </span><span class="s1">_protected_gen_fn</span><span class="s2">() </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">yield</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+<span class="s0">async def </span><span class="s1">_unprotected_async_gen_fn</span><span class="s2">() </span><span class="s1">-&gt; AsyncGenerator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">yield</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+<span class="s0">async def </span><span class="s1">_unprotected_async_fn</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">pass</span>
+
+
+<span class="s2">@</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">disable_ki_protection</span>
+<span class="s0">def </span><span class="s1">_unprotected_gen_fn</span><span class="s2">() </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">yield</span>
+
+
+<span class="s0">async def </span><span class="s1">_consume_async_generator</span><span class="s2">(</span><span class="s1">agen</span><span class="s2">: </span><span class="s1">AsyncGenerator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">StopAsyncIteration</span><span class="s2">):</span>
+            <span class="s0">while True</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">agen</span><span class="s2">.</span><span class="s1">asend</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">agen</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">_consume_function_for_coverage</span><span class="s2">(</span>
+    <span class="s1">fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">object</span><span class="s2">],</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">result </span><span class="s2">= </span><span class="s1">fn</span><span class="s2">()</span>
+    <span class="s0">if </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isasyncgen</span><span class="s2">(</span><span class="s1">result</span><span class="s2">):</span>
+        <span class="s1">result </span><span class="s2">= </span><span class="s1">_consume_async_generator</span><span class="s2">(</span><span class="s1">result</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isgenerator</span><span class="s2">(</span><span class="s1">result</span><span class="s2">) </span><span class="s0">or </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">iscoroutine</span><span class="s2">(</span><span class="s1">result</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">StopIteration</span><span class="s2">):</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s1">result</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_enable_disable_ki_protection_passes_on_inspect_flags</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isasyncgenfunction</span><span class="s2">(</span><span class="s1">_protected_async_gen_fn</span><span class="s2">)</span>
+    <span class="s1">_consume_function_for_coverage</span><span class="s2">(</span><span class="s1">_protected_async_gen_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">iscoroutinefunction</span><span class="s2">(</span><span class="s1">_protected_async_fn</span><span class="s2">)</span>
+    <span class="s1">_consume_function_for_coverage</span><span class="s2">(</span><span class="s1">_protected_async_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isgeneratorfunction</span><span class="s2">(</span><span class="s1">_protected_gen_fn</span><span class="s2">)</span>
+    <span class="s1">_consume_function_for_coverage</span><span class="s2">(</span><span class="s1">_protected_gen_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isasyncgenfunction</span><span class="s2">(</span><span class="s1">_unprotected_async_gen_fn</span><span class="s2">)</span>
+    <span class="s1">_consume_function_for_coverage</span><span class="s2">(</span><span class="s1">_unprotected_async_gen_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">iscoroutinefunction</span><span class="s2">(</span><span class="s1">_unprotected_async_fn</span><span class="s2">)</span>
+    <span class="s1">_consume_function_for_coverage</span><span class="s2">(</span><span class="s1">_unprotected_async_fn</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">isgeneratorfunction</span><span class="s2">(</span><span class="s1">_unprotected_gen_fn</span><span class="s2">)</span>
+    <span class="s1">_consume_function_for_coverage</span><span class="s2">(</span><span class="s1">_unprotected_gen_fn</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

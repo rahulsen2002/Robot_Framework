@@ -1,0 +1,636 @@
+<html>
+<head>
+<title>link.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+link.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">posixpath</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Mapping</span>
+<span class="s0">from </span><span class="s1">dataclasses </span><span class="s0">import </span><span class="s1">dataclass</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">NamedTuple</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">deprecation </span><span class="s0">import </span><span class="s1">deprecated</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">filetypes </span><span class="s0">import </span><span class="s1">WHEEL_EXTENSION</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">hashes </span><span class="s0">import </span><span class="s1">Hashes</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">misc </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">pairwise</span><span class="s2">,</span>
+    <span class="s1">redact_auth_from_url</span><span class="s2">,</span>
+    <span class="s1">split_auth_from_netloc</span><span class="s2">,</span>
+    <span class="s1">splitext</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">urls </span><span class="s0">import </span><span class="s1">path_to_url</span><span class="s2">, </span><span class="s1">url_to_path</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">index</span><span class="s2">.</span><span class="s1">collector </span><span class="s0">import </span><span class="s1">IndexContent</span>
+
+<span class="s1">logger </span><span class="s2">= </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">getLogger</span><span class="s2">(</span><span class="s1">__name__</span><span class="s2">)</span>
+
+
+<span class="s3"># Order matters, earlier hashes have a precedence over later hashes for what</span>
+<span class="s3"># we will pick to use.</span>
+<span class="s1">_SUPPORTED_HASHES </span><span class="s2">= (</span><span class="s4">&quot;sha512&quot;</span><span class="s2">, </span><span class="s4">&quot;sha384&quot;</span><span class="s2">, </span><span class="s4">&quot;sha256&quot;</span><span class="s2">, </span><span class="s4">&quot;sha224&quot;</span><span class="s2">, </span><span class="s4">&quot;sha1&quot;</span><span class="s2">, </span><span class="s4">&quot;md5&quot;</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">dataclass</span><span class="s2">(</span><span class="s1">frozen</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">LinkHash</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Links to content may have embedded hash values. This class parses those. 
+ 
+    `name` must be any member of `_SUPPORTED_HASHES`. 
+ 
+    This class can be converted to and from `ArchiveInfo`. While ArchiveInfo intends to 
+    be JSON-serializable to conform to PEP 610, this class contains the logic for 
+    parsing a hash name and value for correctness, and then checking whether that hash 
+    conforms to a schema with `.is_hash_allowed()`.&quot;&quot;&quot;</span>
+
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">value</span><span class="s2">: </span><span class="s1">str</span>
+
+    <span class="s1">_hash_url_fragment_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span>
+        <span class="s3"># NB: we do not validate that the second group (.*) is a valid hex</span>
+        <span class="s3"># digest. Instead, we simply keep that string in this class, and then check it</span>
+        <span class="s3"># against Hashes when hash-checking is needed. This is easier to debug than</span>
+        <span class="s3"># proactively discarding an invalid hex digest, as we handle incorrect hashes</span>
+        <span class="s3"># and malformed hashes in the same place.</span>
+        <span class="s4">r&quot;[#&amp;]({choices})=([^&amp;]*)&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span>
+            <span class="s1">choices</span><span class="s2">=</span><span class="s4">&quot;|&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">re</span><span class="s2">.</span><span class="s1">escape</span><span class="s2">(</span><span class="s1">hash_name</span><span class="s2">) </span><span class="s0">for </span><span class="s1">hash_name </span><span class="s0">in </span><span class="s1">_SUPPORTED_HASHES</span><span class="s2">)</span>
+        <span class="s2">),</span>
+    <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__post_init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">name </span><span class="s0">in </span><span class="s1">_SUPPORTED_HASHES</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s2">@</span><span class="s1">functools</span><span class="s2">.</span><span class="s1">cache</span>
+    <span class="s0">def </span><span class="s1">find_hash_url_fragment</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; LinkHash </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Search a string for a checksum algorithm name and encoded output value.&quot;&quot;&quot;</span>
+        <span class="s1">match </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">_hash_url_fragment_re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s1">url</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">match </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">value </span><span class="s2">= </span><span class="s1">match</span><span class="s2">.</span><span class="s1">groups</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">name</span><span class="s2">=</span><span class="s1">name</span><span class="s2">, </span><span class="s1">value</span><span class="s2">=</span><span class="s1">value</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">as_dict</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s2">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">name</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">value</span><span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">as_hashes</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Hashes</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Return a Hashes instance which checks only for the current hash.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">Hashes</span><span class="s2">({</span><span class="s1">self</span><span class="s2">.</span><span class="s1">name</span><span class="s2">: [</span><span class="s1">self</span><span class="s2">.</span><span class="s1">value</span><span class="s2">]})</span>
+
+    <span class="s0">def </span><span class="s1">is_hash_allowed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">hashes</span><span class="s2">: </span><span class="s1">Hashes </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Return True if the current hash is allowed by `hashes`. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">hashes </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+        <span class="s0">return </span><span class="s1">hashes</span><span class="s2">.</span><span class="s1">is_hash_allowed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">name</span><span class="s2">, </span><span class="s1">hex_digest</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">value</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">dataclass</span><span class="s2">(</span><span class="s1">frozen</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">MetadataFile</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Information about a core metadata file associated with a distribution.&quot;&quot;&quot;</span>
+
+    <span class="s1">hashes</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">__post_init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">hashes </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">all</span><span class="s2">(</span><span class="s1">name </span><span class="s0">in </span><span class="s1">_SUPPORTED_HASHES </span><span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">hashes</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">supported_hashes</span><span class="s2">(</span><span class="s1">hashes</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3"># Remove any unsupported hash types from the mapping. If this leaves no</span>
+    <span class="s3"># supported hashes, return None</span>
+    <span class="s0">if </span><span class="s1">hashes </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+    <span class="s1">hashes </span><span class="s2">= {</span><span class="s1">n</span><span class="s2">: </span><span class="s1">v </span><span class="s0">for </span><span class="s1">n</span><span class="s2">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">hashes</span><span class="s2">.</span><span class="s1">items</span><span class="s2">() </span><span class="s0">if </span><span class="s1">n </span><span class="s0">in </span><span class="s1">_SUPPORTED_HASHES</span><span class="s2">}</span>
+    <span class="s0">if not </span><span class="s1">hashes</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+    <span class="s0">return </span><span class="s1">hashes</span>
+
+
+<span class="s0">def </span><span class="s1">_clean_url_path_part</span><span class="s2">(</span><span class="s1">part</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Clean a &quot;part&quot; of a URL path (i.e. after splitting on &quot;@&quot; characters). 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># We unquote prior to quoting to make sure nothing is double quoted.</span>
+    <span class="s0">return </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">quote</span><span class="s2">(</span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">unquote</span><span class="s2">(</span><span class="s1">part</span><span class="s2">))</span>
+
+
+<span class="s0">def </span><span class="s1">_clean_file_url_path</span><span class="s2">(</span><span class="s1">part</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Clean the first part of a URL path that corresponds to a local 
+    filesystem path (i.e. the first part after splitting on &quot;@&quot; characters). 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># We unquote prior to quoting to make sure nothing is double quoted.</span>
+    <span class="s3"># Also, on Windows the path part might contain a drive letter which</span>
+    <span class="s3"># should not be quoted. On Linux where drive letters do not</span>
+    <span class="s3"># exist, the colon should be quoted. We rely on urllib.request</span>
+    <span class="s3"># to do the right thing here.</span>
+    <span class="s1">ret </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">request</span><span class="s2">.</span><span class="s1">pathname2url</span><span class="s2">(</span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">request</span><span class="s2">.</span><span class="s1">url2pathname</span><span class="s2">(</span><span class="s1">part</span><span class="s2">))</span>
+    <span class="s0">if </span><span class="s1">ret</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;///&quot;</span><span class="s2">):</span>
+        <span class="s3"># Remove any URL authority section, leaving only the URL path.</span>
+        <span class="s1">ret </span><span class="s2">= </span><span class="s1">ret</span><span class="s2">.</span><span class="s1">removeprefix</span><span class="s2">(</span><span class="s4">&quot;//&quot;</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">ret</span>
+
+
+<span class="s3"># percent-encoded:                   /</span>
+<span class="s1">_reserved_chars_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">&quot;(@|%2F)&quot;</span><span class="s2">, </span><span class="s1">re</span><span class="s2">.</span><span class="s1">IGNORECASE</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_clean_url_path</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">is_local_path</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Clean the path portion of a URL. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">is_local_path</span><span class="s2">:</span>
+        <span class="s1">clean_func </span><span class="s2">= </span><span class="s1">_clean_file_url_path</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">clean_func </span><span class="s2">= </span><span class="s1">_clean_url_path_part</span>
+
+    <span class="s3"># Split on the reserved characters prior to cleaning so that</span>
+    <span class="s3"># revision strings in VCS URLs are properly preserved.</span>
+    <span class="s1">parts </span><span class="s2">= </span><span class="s1">_reserved_chars_re</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+
+    <span class="s1">cleaned_parts </span><span class="s2">= []</span>
+    <span class="s0">for </span><span class="s1">to_clean</span><span class="s2">, </span><span class="s1">reserved </span><span class="s0">in </span><span class="s1">pairwise</span><span class="s2">(</span><span class="s1">itertools</span><span class="s2">.</span><span class="s1">chain</span><span class="s2">(</span><span class="s1">parts</span><span class="s2">, [</span><span class="s4">&quot;&quot;</span><span class="s2">])):</span>
+        <span class="s1">cleaned_parts</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">clean_func</span><span class="s2">(</span><span class="s1">to_clean</span><span class="s2">))</span>
+        <span class="s3"># Normalize %xx escapes (e.g. %2f -&gt; %2F)</span>
+        <span class="s1">cleaned_parts</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">reserved</span><span class="s2">.</span><span class="s1">upper</span><span class="s2">())</span>
+
+    <span class="s0">return </span><span class="s4">&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">cleaned_parts</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_ensure_quoted_url</span><span class="s2">(</span><span class="s1">url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Make sure a link is fully quoted. 
+    For example, if ' ' occurs in the URL, it will be replaced with &quot;%20&quot;, 
+    and without double-quoting other characters. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Split the URL into parts according to the general structure</span>
+    <span class="s3"># `scheme://netloc/path?query#fragment`.</span>
+    <span class="s1">result </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">urlsplit</span><span class="s2">(</span><span class="s1">url</span><span class="s2">)</span>
+    <span class="s3"># If the netloc is empty, then the URL refers to a local filesystem path.</span>
+    <span class="s1">is_local_path </span><span class="s2">= </span><span class="s0">not </span><span class="s1">result</span><span class="s2">.</span><span class="s1">netloc</span>
+    <span class="s1">path </span><span class="s2">= </span><span class="s1">_clean_url_path</span><span class="s2">(</span><span class="s1">result</span><span class="s2">.</span><span class="s1">path</span><span class="s2">, </span><span class="s1">is_local_path</span><span class="s2">=</span><span class="s1">is_local_path</span><span class="s2">)</span>
+    <span class="s3"># Temporarily replace scheme with file to ensure the URL generated by</span>
+    <span class="s3"># urlunsplit() contains an empty netloc (file://) as per RFC 1738.</span>
+    <span class="s1">ret </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">urlunsplit</span><span class="s2">(</span><span class="s1">result</span><span class="s2">.</span><span class="s1">_replace</span><span class="s2">(</span><span class="s1">scheme</span><span class="s2">=</span><span class="s4">&quot;file&quot;</span><span class="s2">, </span><span class="s1">path</span><span class="s2">=</span><span class="s1">path</span><span class="s2">))</span>
+    <span class="s1">ret </span><span class="s2">= </span><span class="s1">result</span><span class="s2">.</span><span class="s1">scheme </span><span class="s2">+ </span><span class="s1">ret</span><span class="s2">[</span><span class="s6">4</span><span class="s2">:]  </span><span class="s3"># Restore original scheme.</span>
+    <span class="s0">return </span><span class="s1">ret</span>
+
+
+<span class="s0">def </span><span class="s1">_absolute_link_url</span><span class="s2">(</span><span class="s1">base_url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    A faster implementation of urllib.parse.urljoin with a shortcut 
+    for absolute http/https URLs. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">url</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">((</span><span class="s4">&quot;https://&quot;</span><span class="s2">, </span><span class="s4">&quot;http://&quot;</span><span class="s2">)):</span>
+        <span class="s0">return </span><span class="s1">url</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">urljoin</span><span class="s2">(</span><span class="s1">base_url</span><span class="s2">, </span><span class="s1">url</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">functools</span><span class="s2">.</span><span class="s1">total_ordering</span>
+<span class="s0">class </span><span class="s1">Link</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Represents a parsed link from a Package Index's simple URL&quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s2">= [</span>
+        <span class="s4">&quot;_parsed_url&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;_url&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;_path&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;_hashes&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;comes_from&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;requires_python&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;yanked_reason&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;metadata_file_data&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;cache_link_parsing&quot;</span><span class="s2">,</span>
+        <span class="s4">&quot;egg_fragment&quot;</span><span class="s2">,</span>
+    <span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">comes_from</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">IndexContent </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">requires_python</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">yanked_reason</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">metadata_file_data</span><span class="s2">: </span><span class="s1">MetadataFile </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">cache_link_parsing</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">hashes</span><span class="s2">: </span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        :param url: url of the resource pointed to (href of the link) 
+        :param comes_from: instance of IndexContent where the link was found, 
+            or string. 
+        :param requires_python: String containing the `Requires-Python` 
+            metadata field, specified in PEP 345. This may be specified by 
+            a data-requires-python attribute in the HTML link tag, as 
+            described in PEP 503. 
+        :param yanked_reason: the reason the file has been yanked, if the 
+            file has been yanked, or None if the file hasn't been yanked. 
+            This is the value of the &quot;data-yanked&quot; attribute, if present, in 
+            a simple repository HTML link. If the file has been yanked but 
+            no reason was provided, this should be the empty string. See 
+            PEP 592 for more information and the specification. 
+        :param metadata_file_data: the metadata attached to the file, or None if 
+            no such metadata is provided. This argument, if not None, indicates 
+            that a separate metadata file exists, and also optionally supplies 
+            hashes for that file. 
+        :param cache_link_parsing: A flag that is used elsewhere to determine 
+            whether resources retrieved from this link should be cached. PyPI 
+            URLs should generally have this set to False, for example. 
+        :param hashes: A mapping of hash names to digests to allow us to 
+            determine the validity of a download. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3"># The comes_from, requires_python, and metadata_file_data arguments are</span>
+        <span class="s3"># only used by classmethods of this class, and are not used in client</span>
+        <span class="s3"># code directly.</span>
+
+        <span class="s3"># url can be a UNC windows share</span>
+        <span class="s0">if </span><span class="s1">url</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;</span><span class="s0">\\\\</span><span class="s4">&quot;</span><span class="s2">):</span>
+            <span class="s1">url </span><span class="s2">= </span><span class="s1">path_to_url</span><span class="s2">(</span><span class="s1">url</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_parsed_url </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">urlsplit</span><span class="s2">(</span><span class="s1">url</span><span class="s2">)</span>
+        <span class="s3"># Store the url as a private attribute to prevent accidentally</span>
+        <span class="s3"># trying to set a new value.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_url </span><span class="s2">= </span><span class="s1">url</span>
+        <span class="s3"># The .path property is hot, so calculate its value ahead of time.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_path </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">unquote</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_parsed_url</span><span class="s2">.</span><span class="s1">path</span><span class="s2">)</span>
+
+        <span class="s1">link_hash </span><span class="s2">= </span><span class="s1">LinkHash</span><span class="s2">.</span><span class="s1">find_hash_url_fragment</span><span class="s2">(</span><span class="s1">url</span><span class="s2">)</span>
+        <span class="s1">hashes_from_link </span><span class="s2">= {} </span><span class="s0">if </span><span class="s1">link_hash </span><span class="s0">is None else </span><span class="s1">link_hash</span><span class="s2">.</span><span class="s1">as_dict</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">hashes </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes </span><span class="s2">= </span><span class="s1">hashes_from_link</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes </span><span class="s2">= {**</span><span class="s1">hashes</span><span class="s2">, **</span><span class="s1">hashes_from_link</span><span class="s2">}</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">comes_from </span><span class="s2">= </span><span class="s1">comes_from</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">requires_python </span><span class="s2">= </span><span class="s1">requires_python </span><span class="s0">if </span><span class="s1">requires_python </span><span class="s0">else None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">yanked_reason </span><span class="s2">= </span><span class="s1">yanked_reason</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s1">metadata_file_data</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">cache_link_parsing </span><span class="s2">= </span><span class="s1">cache_link_parsing</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">egg_fragment </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_egg_fragment</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">from_json</span><span class="s2">(</span>
+        <span class="s1">cls</span><span class="s2">,</span>
+        <span class="s1">file_data</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">],</span>
+        <span class="s1">page_url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; Link </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Convert an pypi json document from a simple repository page into a Link. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">file_url </span><span class="s2">= </span><span class="s1">file_data</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;url&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">file_url </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+
+        <span class="s1">url </span><span class="s2">= </span><span class="s1">_ensure_quoted_url</span><span class="s2">(</span><span class="s1">_absolute_link_url</span><span class="s2">(</span><span class="s1">page_url</span><span class="s2">, </span><span class="s1">file_url</span><span class="s2">))</span>
+        <span class="s1">pyrequire </span><span class="s2">= </span><span class="s1">file_data</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;requires-python&quot;</span><span class="s2">)</span>
+        <span class="s1">yanked_reason </span><span class="s2">= </span><span class="s1">file_data</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;yanked&quot;</span><span class="s2">)</span>
+        <span class="s1">hashes </span><span class="s2">= </span><span class="s1">file_data</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;hashes&quot;</span><span class="s2">, {})</span>
+
+        <span class="s3"># PEP 714: Indexes must use the name core-metadata, but</span>
+        <span class="s3"># clients should support the old name as a fallback for compatibility.</span>
+        <span class="s1">metadata_info </span><span class="s2">= </span><span class="s1">file_data</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;core-metadata&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">metadata_info </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">metadata_info </span><span class="s2">= </span><span class="s1">file_data</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;dist-info-metadata&quot;</span><span class="s2">)</span>
+
+        <span class="s3"># The metadata info value may be a boolean, or a dict of hashes.</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">metadata_info</span><span class="s2">, </span><span class="s1">dict</span><span class="s2">):</span>
+            <span class="s3"># The file exists, and hashes have been supplied</span>
+            <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s1">MetadataFile</span><span class="s2">(</span><span class="s1">supported_hashes</span><span class="s2">(</span><span class="s1">metadata_info</span><span class="s2">))</span>
+        <span class="s0">elif </span><span class="s1">metadata_info</span><span class="s2">:</span>
+            <span class="s3"># The file exists, but there are no hashes</span>
+            <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s1">MetadataFile</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s3"># False or not present: the file does not exist</span>
+            <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s3"># The Link.yanked_reason expects an empty string instead of a boolean.</span>
+        <span class="s0">if </span><span class="s1">yanked_reason </span><span class="s0">and not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">yanked_reason</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+            <span class="s1">yanked_reason </span><span class="s2">= </span><span class="s4">&quot;&quot;</span>
+        <span class="s3"># The Link.yanked_reason expects None instead of False.</span>
+        <span class="s0">elif not </span><span class="s1">yanked_reason</span><span class="s2">:</span>
+            <span class="s1">yanked_reason </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span>
+            <span class="s1">url</span><span class="s2">,</span>
+            <span class="s1">comes_from</span><span class="s2">=</span><span class="s1">page_url</span><span class="s2">,</span>
+            <span class="s1">requires_python</span><span class="s2">=</span><span class="s1">pyrequire</span><span class="s2">,</span>
+            <span class="s1">yanked_reason</span><span class="s2">=</span><span class="s1">yanked_reason</span><span class="s2">,</span>
+            <span class="s1">hashes</span><span class="s2">=</span><span class="s1">hashes</span><span class="s2">,</span>
+            <span class="s1">metadata_file_data</span><span class="s2">=</span><span class="s1">metadata_file_data</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">from_element</span><span class="s2">(</span>
+        <span class="s1">cls</span><span class="s2">,</span>
+        <span class="s1">anchor_attribs</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">],</span>
+        <span class="s1">page_url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">base_url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; Link </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Convert an anchor element's attributes in a simple repository page to a Link. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">href </span><span class="s2">= </span><span class="s1">anchor_attribs</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;href&quot;</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">href</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+
+        <span class="s1">url </span><span class="s2">= </span><span class="s1">_ensure_quoted_url</span><span class="s2">(</span><span class="s1">_absolute_link_url</span><span class="s2">(</span><span class="s1">base_url</span><span class="s2">, </span><span class="s1">href</span><span class="s2">))</span>
+        <span class="s1">pyrequire </span><span class="s2">= </span><span class="s1">anchor_attribs</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;data-requires-python&quot;</span><span class="s2">)</span>
+        <span class="s1">yanked_reason </span><span class="s2">= </span><span class="s1">anchor_attribs</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;data-yanked&quot;</span><span class="s2">)</span>
+
+        <span class="s3"># PEP 714: Indexes must use the name data-core-metadata, but</span>
+        <span class="s3"># clients should support the old name as a fallback for compatibility.</span>
+        <span class="s1">metadata_info </span><span class="s2">= </span><span class="s1">anchor_attribs</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;data-core-metadata&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">metadata_info </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">metadata_info </span><span class="s2">= </span><span class="s1">anchor_attribs</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;data-dist-info-metadata&quot;</span><span class="s2">)</span>
+        <span class="s3"># The metadata info value may be the string &quot;true&quot;, or a string of</span>
+        <span class="s3"># the form &quot;hashname=hashval&quot;</span>
+        <span class="s0">if </span><span class="s1">metadata_info </span><span class="s2">== </span><span class="s4">&quot;true&quot;</span><span class="s2">:</span>
+            <span class="s3"># The file exists, but there are no hashes</span>
+            <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s1">MetadataFile</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+        <span class="s0">elif </span><span class="s1">metadata_info </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s3"># The file does not exist</span>
+            <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s3"># The file exists, and hashes have been supplied</span>
+            <span class="s1">hashname</span><span class="s2">, </span><span class="s1">sep</span><span class="s2">, </span><span class="s1">hashval </span><span class="s2">= </span><span class="s1">metadata_info</span><span class="s2">.</span><span class="s1">partition</span><span class="s2">(</span><span class="s4">&quot;=&quot;</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">sep </span><span class="s2">== </span><span class="s4">&quot;=&quot;</span><span class="s2">:</span>
+                <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s1">MetadataFile</span><span class="s2">(</span><span class="s1">supported_hashes</span><span class="s2">({</span><span class="s1">hashname</span><span class="s2">: </span><span class="s1">hashval</span><span class="s2">}))</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># Error - data is wrong. Treat as no hashes supplied.</span>
+                <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span>
+                    <span class="s4">&quot;Index returned invalid data-dist-info-metadata value: %s&quot;</span><span class="s2">,</span>
+                    <span class="s1">metadata_info</span><span class="s2">,</span>
+                <span class="s2">)</span>
+                <span class="s1">metadata_file_data </span><span class="s2">= </span><span class="s1">MetadataFile</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span>
+            <span class="s1">url</span><span class="s2">,</span>
+            <span class="s1">comes_from</span><span class="s2">=</span><span class="s1">page_url</span><span class="s2">,</span>
+            <span class="s1">requires_python</span><span class="s2">=</span><span class="s1">pyrequire</span><span class="s2">,</span>
+            <span class="s1">yanked_reason</span><span class="s2">=</span><span class="s1">yanked_reason</span><span class="s2">,</span>
+            <span class="s1">metadata_file_data</span><span class="s2">=</span><span class="s1">metadata_file_data</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__str__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">requires_python</span><span class="s2">:</span>
+            <span class="s1">rp </span><span class="s2">= </span><span class="s4">f&quot; (requires-python:</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">requires_python</span><span class="s0">}</span><span class="s4">)&quot;</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">rp </span><span class="s2">= </span><span class="s4">&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">comes_from</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">redacted_url</span><span class="s0">} </span><span class="s4">(from </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">comes_from</span><span class="s0">}</span><span class="s4">)</span><span class="s0">{</span><span class="s1">rp</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">redacted_url</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s4">f&quot;&lt;Link </span><span class="s0">{</span><span class="s1">self</span><span class="s0">}</span><span class="s4">&gt;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__hash__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">hash</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">url</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">Link</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">url </span><span class="s2">== </span><span class="s1">other</span><span class="s2">.</span><span class="s1">url</span>
+
+    <span class="s0">def </span><span class="s1">__lt__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">Link</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">url </span><span class="s2">&lt; </span><span class="s1">other</span><span class="s2">.</span><span class="s1">url</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">url</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_url</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">redacted_url</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">redact_auth_from_url</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">url</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">filename</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">rstrip</span><span class="s2">(</span><span class="s4">&quot;/&quot;</span><span class="s2">)</span>
+        <span class="s1">name </span><span class="s2">= </span><span class="s1">posixpath</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">name</span><span class="s2">:</span>
+            <span class="s3"># Make sure we don't leak auth information if the netloc</span>
+            <span class="s3"># includes a username and password.</span>
+            <span class="s1">netloc</span><span class="s2">, </span><span class="s1">user_pass </span><span class="s2">= </span><span class="s1">split_auth_from_netloc</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">netloc</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">netloc</span>
+
+        <span class="s1">name </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">unquote</span><span class="s2">(</span><span class="s1">name</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">name</span><span class="s2">, </span><span class="s4">f&quot;URL </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_url</span><span class="s0">!r} </span><span class="s4">produced no filename&quot;</span>
+        <span class="s0">return </span><span class="s1">name</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">file_path</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">url_to_path</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">url</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">scheme</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_parsed_url</span><span class="s2">.</span><span class="s1">scheme</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">netloc</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        This can contain auth information. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_parsed_url</span><span class="s2">.</span><span class="s1">netloc</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">path</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span>
+
+    <span class="s0">def </span><span class="s1">splitext</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">splitext</span><span class="s2">(</span><span class="s1">posixpath</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">rstrip</span><span class="s2">(</span><span class="s4">&quot;/&quot;</span><span class="s2">)))</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">ext</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">splitext</span><span class="s2">()[</span><span class="s6">1</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">url_without_fragment</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_parsed_url</span>
+        <span class="s0">return </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">urlunsplit</span><span class="s2">((</span><span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s2">))</span>
+
+    <span class="s1">_egg_fragment_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">r&quot;[#&amp;]egg=([^&amp;]*)&quot;</span><span class="s2">)</span>
+
+    <span class="s3"># Per PEP 508.</span>
+    <span class="s1">_project_name_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span>
+        <span class="s4">r&quot;^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$&quot;</span><span class="s2">, </span><span class="s1">re</span><span class="s2">.</span><span class="s1">IGNORECASE</span>
+    <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_egg_fragment</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">match </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_egg_fragment_re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_url</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">match</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+
+        <span class="s3"># An egg fragment looks like a PEP 508 project name, along with</span>
+        <span class="s3"># an optional extras specifier. Anything else is invalid.</span>
+        <span class="s1">project_name </span><span class="s2">= </span><span class="s1">match</span><span class="s2">.</span><span class="s1">group</span><span class="s2">(</span><span class="s6">1</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_project_name_re</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">project_name</span><span class="s2">):</span>
+            <span class="s1">deprecated</span><span class="s2">(</span>
+                <span class="s1">reason</span><span class="s2">=</span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">self</span><span class="s0">} </span><span class="s4">contains an egg fragment with a non-PEP 508 name.&quot;</span><span class="s2">,</span>
+                <span class="s1">replacement</span><span class="s2">=</span><span class="s4">&quot;to use the req @ url syntax, and remove the egg fragment&quot;</span><span class="s2">,</span>
+                <span class="s1">gone_in</span><span class="s2">=</span><span class="s4">&quot;25.3&quot;</span><span class="s2">,</span>
+                <span class="s1">issue</span><span class="s2">=</span><span class="s6">13157</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">project_name</span>
+
+    <span class="s1">_subdirectory_fragment_re </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">r&quot;[#&amp;]subdirectory=([^&amp;]*)&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">subdirectory_fragment</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">match </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_subdirectory_fragment_re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_url</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">match</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s0">return </span><span class="s1">match</span><span class="s2">.</span><span class="s1">group</span><span class="s2">(</span><span class="s6">1</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">metadata_link</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Link </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Return a link to the associated core metadata file (if any).&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">metadata_file_data </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s1">metadata_url </span><span class="s2">= </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">url_without_fragment</span><span class="s0">}</span><span class="s4">.metadata&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">metadata_file_data</span><span class="s2">.</span><span class="s1">hashes </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">Link</span><span class="s2">(</span><span class="s1">metadata_url</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">Link</span><span class="s2">(</span><span class="s1">metadata_url</span><span class="s2">, </span><span class="s1">hashes</span><span class="s2">=</span><span class="s1">self</span><span class="s2">.</span><span class="s1">metadata_file_data</span><span class="s2">.</span><span class="s1">hashes</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">as_hashes</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Hashes</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">Hashes</span><span class="s2">({</span><span class="s1">k</span><span class="s2">: [</span><span class="s1">v</span><span class="s2">] </span><span class="s0">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes</span><span class="s2">.</span><span class="s1">items</span><span class="s2">()})</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">hash</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">next</span><span class="s2">(</span><span class="s1">iter</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes</span><span class="s2">.</span><span class="s1">values</span><span class="s2">()), </span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">hash_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">next</span><span class="s2">(</span><span class="s1">iter</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes</span><span class="s2">), </span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">show_url</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">posixpath</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_url</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;#&quot;</span><span class="s2">, </span><span class="s6">1</span><span class="s2">)[</span><span class="s6">0</span><span class="s2">].</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;?&quot;</span><span class="s2">, </span><span class="s6">1</span><span class="s2">)[</span><span class="s6">0</span><span class="s2">])</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">is_file</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">scheme </span><span class="s2">== </span><span class="s4">&quot;file&quot;</span>
+
+    <span class="s0">def </span><span class="s1">is_existing_dir</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">is_file </span><span class="s0">and </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">isdir</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">file_path</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">is_wheel</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ext </span><span class="s2">== </span><span class="s1">WHEEL_EXTENSION</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">is_vcs</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">vcs </span><span class="s0">import </span><span class="s1">vcs</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">scheme </span><span class="s0">in </span><span class="s1">vcs</span><span class="s2">.</span><span class="s1">all_schemes</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">is_yanked</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">yanked_reason </span><span class="s0">is not None</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">has_hash</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">is_hash_allowed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">hashes</span><span class="s2">: </span><span class="s1">Hashes </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Return True if the link has a hash and it is allowed by `hashes`. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">hashes </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+        <span class="s0">return </span><span class="s1">any</span><span class="s2">(</span><span class="s1">hashes</span><span class="s2">.</span><span class="s1">is_hash_allowed</span><span class="s2">(</span><span class="s1">k</span><span class="s2">, </span><span class="s1">v</span><span class="s2">) </span><span class="s0">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_hashes</span><span class="s2">.</span><span class="s1">items</span><span class="s2">())</span>
+
+
+<span class="s0">class </span><span class="s1">_CleanResult</span><span class="s2">(</span><span class="s1">NamedTuple</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot;Convert link for equivalency check. 
+ 
+    This is used in the resolver to check whether two URL-specified requirements 
+    likely point to the same distribution and can be considered equivalent. This 
+    equivalency logic avoids comparing URLs literally, which can be too strict 
+    (e.g. &quot;a=1&amp;b=2&quot; vs &quot;b=2&amp;a=1&quot;) and produce conflicts unexpecting to users. 
+ 
+    Currently this does three things: 
+ 
+    1. Drop the basic auth part. This is technically wrong since a server can 
+       serve different content based on auth, but if it does that, it is even 
+       impossible to guarantee two URLs without auth are equivalent, since 
+       the user can input different auth information when prompted. So the 
+       practical solution is to assume the auth doesn't affect the response. 
+    2. Parse the query to avoid the ordering issue. Note that ordering under the 
+       same key in the query are NOT cleaned; i.e. &quot;a=1&amp;a=2&quot; and &quot;a=2&amp;a=1&quot; are 
+       still considered different. 
+    3. Explicitly drop most of the fragment part, except ``subdirectory=`` and 
+       hash values, since it should have no impact the downloaded content. Note 
+       that this drops the &quot;egg=&quot; part historically used to denote the requested 
+       project (and extras), which is wrong in the strictest sense, but too many 
+       people are supplying it inconsistently to cause superfluous resolution 
+       conflicts, so we choose to also ignore them. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">parsed</span><span class="s2">: </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">SplitResult</span>
+    <span class="s1">query</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]]</span>
+    <span class="s1">subdirectory</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">hashes</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]</span>
+
+
+<span class="s0">def </span><span class="s1">_clean_link</span><span class="s2">(</span><span class="s1">link</span><span class="s2">: </span><span class="s1">Link</span><span class="s2">) </span><span class="s1">-&gt; _CleanResult</span><span class="s2">:</span>
+    <span class="s1">parsed </span><span class="s2">= </span><span class="s1">link</span><span class="s2">.</span><span class="s1">_parsed_url</span>
+    <span class="s1">netloc </span><span class="s2">= </span><span class="s1">parsed</span><span class="s2">.</span><span class="s1">netloc</span><span class="s2">.</span><span class="s1">rsplit</span><span class="s2">(</span><span class="s4">&quot;@&quot;</span><span class="s2">, </span><span class="s6">1</span><span class="s2">)[-</span><span class="s6">1</span><span class="s2">]</span>
+    <span class="s3"># According to RFC 8089, an empty host in file: means localhost.</span>
+    <span class="s0">if </span><span class="s1">parsed</span><span class="s2">.</span><span class="s1">scheme </span><span class="s2">== </span><span class="s4">&quot;file&quot; </span><span class="s0">and not </span><span class="s1">netloc</span><span class="s2">:</span>
+        <span class="s1">netloc </span><span class="s2">= </span><span class="s4">&quot;localhost&quot;</span>
+    <span class="s1">fragment </span><span class="s2">= </span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">parse_qs</span><span class="s2">(</span><span class="s1">parsed</span><span class="s2">.</span><span class="s1">fragment</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s4">&quot;egg&quot; </span><span class="s0">in </span><span class="s1">fragment</span><span class="s2">:</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span><span class="s4">&quot;Ignoring egg= fragment in %s&quot;</span><span class="s2">, </span><span class="s1">link</span><span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s3"># If there are multiple subdirectory values, use the first one.</span>
+        <span class="s3"># This matches the behavior of Link.subdirectory_fragment.</span>
+        <span class="s1">subdirectory </span><span class="s2">= </span><span class="s1">fragment</span><span class="s2">[</span><span class="s4">&quot;subdirectory&quot;</span><span class="s2">][</span><span class="s6">0</span><span class="s2">]</span>
+    <span class="s0">except </span><span class="s2">(</span><span class="s1">IndexError</span><span class="s2">, </span><span class="s1">KeyError</span><span class="s2">):</span>
+        <span class="s1">subdirectory </span><span class="s2">= </span><span class="s4">&quot;&quot;</span>
+    <span class="s3"># If there are multiple hash values under the same algorithm, use the</span>
+    <span class="s3"># first one. This matches the behavior of Link.hash_value.</span>
+    <span class="s1">hashes </span><span class="s2">= {</span><span class="s1">k</span><span class="s2">: </span><span class="s1">fragment</span><span class="s2">[</span><span class="s1">k</span><span class="s2">][</span><span class="s6">0</span><span class="s2">] </span><span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">_SUPPORTED_HASHES </span><span class="s0">if </span><span class="s1">k </span><span class="s0">in </span><span class="s1">fragment</span><span class="s2">}</span>
+    <span class="s0">return </span><span class="s1">_CleanResult</span><span class="s2">(</span>
+        <span class="s1">parsed</span><span class="s2">=</span><span class="s1">parsed</span><span class="s2">.</span><span class="s1">_replace</span><span class="s2">(</span><span class="s1">netloc</span><span class="s2">=</span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">query</span><span class="s2">=</span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s1">fragment</span><span class="s2">=</span><span class="s4">&quot;&quot;</span><span class="s2">),</span>
+        <span class="s1">query</span><span class="s2">=</span><span class="s1">urllib</span><span class="s2">.</span><span class="s1">parse</span><span class="s2">.</span><span class="s1">parse_qs</span><span class="s2">(</span><span class="s1">parsed</span><span class="s2">.</span><span class="s1">query</span><span class="s2">),</span>
+        <span class="s1">subdirectory</span><span class="s2">=</span><span class="s1">subdirectory</span><span class="s2">,</span>
+        <span class="s1">hashes</span><span class="s2">=</span><span class="s1">hashes</span><span class="s2">,</span>
+    <span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">functools</span><span class="s2">.</span><span class="s1">cache</span>
+<span class="s0">def </span><span class="s1">links_equivalent</span><span class="s2">(</span><span class="s1">link1</span><span class="s2">: </span><span class="s1">Link</span><span class="s2">, </span><span class="s1">link2</span><span class="s2">: </span><span class="s1">Link</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">_clean_link</span><span class="s2">(</span><span class="s1">link1</span><span class="s2">) == </span><span class="s1">_clean_link</span><span class="s2">(</span><span class="s1">link2</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

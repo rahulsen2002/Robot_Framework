@@ -1,0 +1,282 @@
+<html>
+<head>
+<title>freeze.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+freeze.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">collections</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Container</span><span class="s2">, </span><span class="s1">Generator</span><span class="s2">, </span><span class="s1">Iterable</span>
+<span class="s0">from </span><span class="s1">dataclasses </span><span class="s0">import </span><span class="s1">dataclass</span><span class="s2">, </span><span class="s1">field</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">NamedTuple</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">packaging</span><span class="s2">.</span><span class="s1">utils </span><span class="s0">import </span><span class="s1">NormalizedName</span><span class="s2">, </span><span class="s1">canonicalize_name</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_vendor</span><span class="s2">.</span><span class="s1">packaging</span><span class="s2">.</span><span class="s1">version </span><span class="s0">import </span><span class="s1">InvalidVersion</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">exceptions </span><span class="s0">import </span><span class="s1">BadCommand</span><span class="s2">, </span><span class="s1">InstallationError</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">metadata </span><span class="s0">import </span><span class="s1">BaseDistribution</span><span class="s2">, </span><span class="s1">get_environment</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">req</span><span class="s2">.</span><span class="s1">constructors </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">install_req_from_editable</span><span class="s2">,</span>
+    <span class="s1">install_req_from_line</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">req</span><span class="s2">.</span><span class="s1">req_file </span><span class="s0">import </span><span class="s1">COMMENT_RE</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">direct_url_helpers </span><span class="s0">import </span><span class="s1">direct_url_as_pep440_direct_reference</span>
+
+<span class="s1">logger </span><span class="s2">= </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">getLogger</span><span class="s2">(</span><span class="s1">__name__</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">_EditableInfo</span><span class="s2">(</span><span class="s1">NamedTuple</span><span class="s2">):</span>
+    <span class="s1">requirement</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">comments</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]</span>
+
+
+<span class="s0">def </span><span class="s1">freeze</span><span class="s2">(</span>
+    <span class="s1">requirement</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">local_only</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s1">user_only</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s1">paths</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">isolated</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s1">exclude_editable</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s1">skip</span><span class="s2">: </span><span class="s1">Container</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = (),</span>
+<span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s1">installations</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">FrozenRequirement</span><span class="s2">] = {}</span>
+
+    <span class="s1">dists </span><span class="s2">= </span><span class="s1">get_environment</span><span class="s2">(</span><span class="s1">paths</span><span class="s2">).</span><span class="s1">iter_installed_distributions</span><span class="s2">(</span>
+        <span class="s1">local_only</span><span class="s2">=</span><span class="s1">local_only</span><span class="s2">,</span>
+        <span class="s1">skip</span><span class="s2">=(),</span>
+        <span class="s1">user_only</span><span class="s2">=</span><span class="s1">user_only</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">for </span><span class="s1">dist </span><span class="s0">in </span><span class="s1">dists</span><span class="s2">:</span>
+        <span class="s1">req </span><span class="s2">= </span><span class="s1">FrozenRequirement</span><span class="s2">.</span><span class="s1">from_dist</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">exclude_editable </span><span class="s0">and </span><span class="s1">req</span><span class="s2">.</span><span class="s1">editable</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+        <span class="s1">installations</span><span class="s2">[</span><span class="s1">req</span><span class="s2">.</span><span class="s1">canonical_name</span><span class="s2">] = </span><span class="s1">req</span>
+
+    <span class="s0">if </span><span class="s1">requirement</span><span class="s2">:</span>
+        <span class="s3"># the options that don't get turned into an InstallRequirement</span>
+        <span class="s3"># should only be emitted once, even if the same option is in multiple</span>
+        <span class="s3"># requirements files, so we need to keep track of what has been emitted</span>
+        <span class="s3"># so that we don't emit it again if it's seen again</span>
+        <span class="s1">emitted_options</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s3"># keep track of which files a requirement is in so that we can</span>
+        <span class="s3"># give an accurate warning if a requirement appears multiple times.</span>
+        <span class="s1">req_files</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]] = </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">defaultdict</span><span class="s2">(</span><span class="s1">list</span><span class="s2">)</span>
+        <span class="s0">for </span><span class="s1">req_file_path </span><span class="s0">in </span><span class="s1">requirement</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">open</span><span class="s2">(</span><span class="s1">req_file_path</span><span class="s2">) </span><span class="s0">as </span><span class="s1">req_file</span><span class="s2">:</span>
+                <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">req_file</span><span class="s2">:</span>
+                    <span class="s0">if </span><span class="s2">(</span>
+                        <span class="s0">not </span><span class="s1">line</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">()</span>
+                        <span class="s0">or </span><span class="s1">line</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">().</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;#&quot;</span><span class="s2">)</span>
+                        <span class="s0">or </span><span class="s1">line</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span>
+                            <span class="s2">(</span>
+                                <span class="s4">&quot;-r&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--requirement&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;-f&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--find-links&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;-i&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--index-url&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--pre&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--trusted-host&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--process-dependency-links&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--extra-index-url&quot;</span><span class="s2">,</span>
+                                <span class="s4">&quot;--use-feature&quot;</span><span class="s2">,</span>
+                            <span class="s2">)</span>
+                        <span class="s2">)</span>
+                    <span class="s2">):</span>
+                        <span class="s1">line </span><span class="s2">= </span><span class="s1">line</span><span class="s2">.</span><span class="s1">rstrip</span><span class="s2">()</span>
+                        <span class="s0">if </span><span class="s1">line </span><span class="s0">not in </span><span class="s1">emitted_options</span><span class="s2">:</span>
+                            <span class="s1">emitted_options</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">line</span><span class="s2">)</span>
+                            <span class="s0">yield </span><span class="s1">line</span>
+                        <span class="s0">continue</span>
+
+                    <span class="s0">if </span><span class="s1">line</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">((</span><span class="s4">&quot;-e&quot;</span><span class="s2">, </span><span class="s4">&quot;--editable&quot;</span><span class="s2">)):</span>
+                        <span class="s0">if </span><span class="s1">line</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;-e&quot;</span><span class="s2">):</span>
+                            <span class="s1">line </span><span class="s2">= </span><span class="s1">line</span><span class="s2">[</span><span class="s5">2</span><span class="s2">:].</span><span class="s1">strip</span><span class="s2">()</span>
+                        <span class="s0">else</span><span class="s2">:</span>
+                            <span class="s1">line </span><span class="s2">= </span><span class="s1">line</span><span class="s2">[</span><span class="s1">len</span><span class="s2">(</span><span class="s4">&quot;--editable&quot;</span><span class="s2">) :].</span><span class="s1">strip</span><span class="s2">().</span><span class="s1">lstrip</span><span class="s2">(</span><span class="s4">&quot;=&quot;</span><span class="s2">)</span>
+                        <span class="s1">line_req </span><span class="s2">= </span><span class="s1">install_req_from_editable</span><span class="s2">(</span>
+                            <span class="s1">line</span><span class="s2">,</span>
+                            <span class="s1">isolated</span><span class="s2">=</span><span class="s1">isolated</span><span class="s2">,</span>
+                        <span class="s2">)</span>
+                    <span class="s0">else</span><span class="s2">:</span>
+                        <span class="s1">line_req </span><span class="s2">= </span><span class="s1">install_req_from_line</span><span class="s2">(</span>
+                            <span class="s1">COMMENT_RE</span><span class="s2">.</span><span class="s1">sub</span><span class="s2">(</span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s1">line</span><span class="s2">).</span><span class="s1">strip</span><span class="s2">(),</span>
+                            <span class="s1">isolated</span><span class="s2">=</span><span class="s1">isolated</span><span class="s2">,</span>
+                        <span class="s2">)</span>
+
+                    <span class="s0">if not </span><span class="s1">line_req</span><span class="s2">.</span><span class="s1">name</span><span class="s2">:</span>
+                        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span>
+                            <span class="s4">&quot;Skipping line in requirement file [%s] because &quot;</span>
+                            <span class="s4">&quot;it's not clear what it would install: %s&quot;</span><span class="s2">,</span>
+                            <span class="s1">req_file_path</span><span class="s2">,</span>
+                            <span class="s1">line</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">(),</span>
+                        <span class="s2">)</span>
+                        <span class="s1">logger</span><span class="s2">.</span><span class="s1">info</span><span class="s2">(</span>
+                            <span class="s4">&quot;  (add #egg=PackageName to the URL to avoid&quot;</span>
+                            <span class="s4">&quot; this warning)&quot;</span>
+                        <span class="s2">)</span>
+                    <span class="s0">else</span><span class="s2">:</span>
+                        <span class="s1">line_req_canonical_name </span><span class="s2">= </span><span class="s1">canonicalize_name</span><span class="s2">(</span><span class="s1">line_req</span><span class="s2">.</span><span class="s1">name</span><span class="s2">)</span>
+                        <span class="s0">if </span><span class="s1">line_req_canonical_name </span><span class="s0">not in </span><span class="s1">installations</span><span class="s2">:</span>
+                            <span class="s3"># either it's not installed, or it is installed</span>
+                            <span class="s3"># but has been processed already</span>
+                            <span class="s0">if not </span><span class="s1">req_files</span><span class="s2">[</span><span class="s1">line_req</span><span class="s2">.</span><span class="s1">name</span><span class="s2">]:</span>
+                                <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span>
+                                    <span class="s4">&quot;Requirement file [%s] contains %s, but &quot;</span>
+                                    <span class="s4">&quot;package %r is not installed&quot;</span><span class="s2">,</span>
+                                    <span class="s1">req_file_path</span><span class="s2">,</span>
+                                    <span class="s1">COMMENT_RE</span><span class="s2">.</span><span class="s1">sub</span><span class="s2">(</span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s1">line</span><span class="s2">).</span><span class="s1">strip</span><span class="s2">(),</span>
+                                    <span class="s1">line_req</span><span class="s2">.</span><span class="s1">name</span><span class="s2">,</span>
+                                <span class="s2">)</span>
+                            <span class="s0">else</span><span class="s2">:</span>
+                                <span class="s1">req_files</span><span class="s2">[</span><span class="s1">line_req</span><span class="s2">.</span><span class="s1">name</span><span class="s2">].</span><span class="s1">append</span><span class="s2">(</span><span class="s1">req_file_path</span><span class="s2">)</span>
+                        <span class="s0">else</span><span class="s2">:</span>
+                            <span class="s0">yield </span><span class="s1">str</span><span class="s2">(</span><span class="s1">installations</span><span class="s2">[</span><span class="s1">line_req_canonical_name</span><span class="s2">]).</span><span class="s1">rstrip</span><span class="s2">()</span>
+                            <span class="s0">del </span><span class="s1">installations</span><span class="s2">[</span><span class="s1">line_req_canonical_name</span><span class="s2">]</span>
+                            <span class="s1">req_files</span><span class="s2">[</span><span class="s1">line_req</span><span class="s2">.</span><span class="s1">name</span><span class="s2">].</span><span class="s1">append</span><span class="s2">(</span><span class="s1">req_file_path</span><span class="s2">)</span>
+
+        <span class="s3"># Warn about requirements that were included multiple times (in a</span>
+        <span class="s3"># single requirements file or in different requirements files).</span>
+        <span class="s0">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">req_files</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">files</span><span class="s2">) &gt; </span><span class="s5">1</span><span class="s2">:</span>
+                <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span>
+                    <span class="s4">&quot;Requirement %s included multiple times [%s]&quot;</span><span class="s2">,</span>
+                    <span class="s1">name</span><span class="s2">,</span>
+                    <span class="s4">&quot;, &quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">set</span><span class="s2">(</span><span class="s1">files</span><span class="s2">))),</span>
+                <span class="s2">)</span>
+
+        <span class="s0">yield </span><span class="s2">(</span><span class="s4">&quot;## The following requirements were added by pip freeze:&quot;</span><span class="s2">)</span>
+    <span class="s0">for </span><span class="s1">installation </span><span class="s0">in </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">installations</span><span class="s2">.</span><span class="s1">values</span><span class="s2">(), </span><span class="s1">key</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">x</span><span class="s2">: </span><span class="s1">x</span><span class="s2">.</span><span class="s1">name</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()):</span>
+        <span class="s0">if </span><span class="s1">installation</span><span class="s2">.</span><span class="s1">canonical_name </span><span class="s0">not in </span><span class="s1">skip</span><span class="s2">:</span>
+            <span class="s0">yield </span><span class="s1">str</span><span class="s2">(</span><span class="s1">installation</span><span class="s2">).</span><span class="s1">rstrip</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">_format_as_name_version</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">: </span><span class="s1">BaseDistribution</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">dist_version </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">version</span>
+    <span class="s0">except </span><span class="s1">InvalidVersion</span><span class="s2">:</span>
+        <span class="s3"># legacy version</span>
+        <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">raw_name</span><span class="s0">}</span><span class="s4">===</span><span class="s0">{</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">raw_version</span><span class="s0">}</span><span class="s4">&quot;</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">raw_name</span><span class="s0">}</span><span class="s4">==</span><span class="s0">{</span><span class="s1">dist_version</span><span class="s0">}</span><span class="s4">&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_get_editable_info</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">: </span><span class="s1">BaseDistribution</span><span class="s2">) </span><span class="s1">-&gt; _EditableInfo</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Compute and return values (req, comments) for use in 
+    FrozenRequirement.from_dist(). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">editable_project_location </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">editable_project_location</span>
+    <span class="s0">assert </span><span class="s1">editable_project_location</span>
+    <span class="s1">location </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">normcase</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">abspath</span><span class="s2">(</span><span class="s1">editable_project_location</span><span class="s2">))</span>
+
+    <span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">vcs </span><span class="s0">import </span><span class="s1">RemoteNotFoundError</span><span class="s2">, </span><span class="s1">RemoteNotValidError</span><span class="s2">, </span><span class="s1">vcs</span>
+
+    <span class="s1">vcs_backend </span><span class="s2">= </span><span class="s1">vcs</span><span class="s2">.</span><span class="s1">get_backend_for_dir</span><span class="s2">(</span><span class="s1">location</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">vcs_backend </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">display </span><span class="s2">= </span><span class="s1">_format_as_name_version</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span>
+            <span class="s4">'No VCS found for editable requirement &quot;%s&quot; in: %r'</span><span class="s2">,</span>
+            <span class="s1">display</span><span class="s2">,</span>
+            <span class="s1">location</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo</span><span class="s2">(</span>
+            <span class="s1">requirement</span><span class="s2">=</span><span class="s1">location</span><span class="s2">,</span>
+            <span class="s1">comments</span><span class="s2">=[</span><span class="s4">f&quot;# Editable install with no version control (</span><span class="s0">{</span><span class="s1">display</span><span class="s0">}</span><span class="s4">)&quot;</span><span class="s2">],</span>
+        <span class="s2">)</span>
+
+    <span class="s1">vcs_name </span><span class="s2">= </span><span class="s1">type</span><span class="s2">(</span><span class="s1">vcs_backend</span><span class="s2">).</span><span class="s1">__name__</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">req </span><span class="s2">= </span><span class="s1">vcs_backend</span><span class="s2">.</span><span class="s1">get_src_requirement</span><span class="s2">(</span><span class="s1">location</span><span class="s2">, </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">raw_name</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">RemoteNotFoundError</span><span class="s2">:</span>
+        <span class="s1">display </span><span class="s2">= </span><span class="s1">_format_as_name_version</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo</span><span class="s2">(</span>
+            <span class="s1">requirement</span><span class="s2">=</span><span class="s1">location</span><span class="s2">,</span>
+            <span class="s1">comments</span><span class="s2">=[</span><span class="s4">f&quot;# Editable </span><span class="s0">{</span><span class="s1">vcs_name</span><span class="s0">} </span><span class="s4">install with no remote (</span><span class="s0">{</span><span class="s1">display</span><span class="s0">}</span><span class="s4">)&quot;</span><span class="s2">],</span>
+        <span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">RemoteNotValidError </span><span class="s0">as </span><span class="s1">ex</span><span class="s2">:</span>
+        <span class="s1">display </span><span class="s2">= </span><span class="s1">_format_as_name_version</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo</span><span class="s2">(</span>
+            <span class="s1">requirement</span><span class="s2">=</span><span class="s1">location</span><span class="s2">,</span>
+            <span class="s1">comments</span><span class="s2">=[</span>
+                <span class="s4">f&quot;# Editable </span><span class="s0">{</span><span class="s1">vcs_name</span><span class="s0">} </span><span class="s4">install (</span><span class="s0">{</span><span class="s1">display</span><span class="s0">}</span><span class="s4">) with either a deleted &quot;</span>
+                <span class="s4">f&quot;local remote or invalid URI:&quot;</span><span class="s2">,</span>
+                <span class="s4">f&quot;# '</span><span class="s0">{</span><span class="s1">ex</span><span class="s2">.</span><span class="s1">url</span><span class="s0">}</span><span class="s4">'&quot;</span><span class="s2">,</span>
+            <span class="s2">],</span>
+        <span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">BadCommand</span><span class="s2">:</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span>
+            <span class="s4">&quot;cannot determine version of editable source in %s &quot;</span>
+            <span class="s4">&quot;(%s command not found in path)&quot;</span><span class="s2">,</span>
+            <span class="s1">location</span><span class="s2">,</span>
+            <span class="s1">vcs_backend</span><span class="s2">.</span><span class="s1">name</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo</span><span class="s2">(</span><span class="s1">requirement</span><span class="s2">=</span><span class="s1">location</span><span class="s2">, </span><span class="s1">comments</span><span class="s2">=[])</span>
+    <span class="s0">except </span><span class="s1">InstallationError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span><span class="s4">&quot;Error when trying to get requirement for VCS system %s&quot;</span><span class="s2">, </span><span class="s1">exc</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo</span><span class="s2">(</span><span class="s1">requirement</span><span class="s2">=</span><span class="s1">req</span><span class="s2">, </span><span class="s1">comments</span><span class="s2">=[])</span>
+
+    <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span><span class="s4">&quot;Could not determine repository location of %s&quot;</span><span class="s2">, </span><span class="s1">location</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">_EditableInfo</span><span class="s2">(</span>
+        <span class="s1">requirement</span><span class="s2">=</span><span class="s1">location</span><span class="s2">,</span>
+        <span class="s1">comments</span><span class="s2">=[</span><span class="s4">&quot;## !! Could not determine repository location&quot;</span><span class="s2">],</span>
+    <span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">dataclass</span><span class="s2">(</span><span class="s1">frozen</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">FrozenRequirement</span><span class="s2">:</span>
+    <span class="s1">name</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">req</span><span class="s2">: </span><span class="s1">str</span>
+    <span class="s1">editable</span><span class="s2">: </span><span class="s1">bool</span>
+    <span class="s1">comments</span><span class="s2">: </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">field</span><span class="s2">(</span><span class="s1">default_factory</span><span class="s2">=</span><span class="s1">tuple</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">canonical_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; NormalizedName</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">canonicalize_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">name</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">from_dist</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">dist</span><span class="s2">: </span><span class="s1">BaseDistribution</span><span class="s2">) </span><span class="s1">-&gt; FrozenRequirement</span><span class="s2">:</span>
+        <span class="s1">editable </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">editable</span>
+        <span class="s0">if </span><span class="s1">editable</span><span class="s2">:</span>
+            <span class="s1">req</span><span class="s2">, </span><span class="s1">comments </span><span class="s2">= </span><span class="s1">_get_editable_info</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">comments </span><span class="s2">= []</span>
+            <span class="s1">direct_url </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">direct_url</span>
+            <span class="s0">if </span><span class="s1">direct_url</span><span class="s2">:</span>
+                <span class="s3"># if PEP 610 metadata is present, use it</span>
+                <span class="s1">req </span><span class="s2">= </span><span class="s1">direct_url_as_pep440_direct_reference</span><span class="s2">(</span><span class="s1">direct_url</span><span class="s2">, </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">raw_name</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># name==version requirement</span>
+                <span class="s1">req </span><span class="s2">= </span><span class="s1">_format_as_name_version</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">raw_name</span><span class="s2">, </span><span class="s1">req</span><span class="s2">, </span><span class="s1">editable</span><span class="s2">, </span><span class="s1">comments</span><span class="s2">=</span><span class="s1">comments</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__str__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">req </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">req</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">editable</span><span class="s2">:</span>
+            <span class="s1">req </span><span class="s2">= </span><span class="s4">f&quot;-e </span><span class="s0">{</span><span class="s1">req</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">return </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">list</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">comments</span><span class="s2">) + [</span><span class="s1">str</span><span class="s2">(</span><span class="s1">req</span><span class="s2">)]) + </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span>
+</pre>
+</body>
+</html>

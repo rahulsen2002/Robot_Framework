@@ -1,0 +1,1211 @@
+<html>
+<head>
+<title>_subprocess.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_subprocess.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">ExitStack</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Final</span><span class="s2">,</span>
+    <span class="s1">Literal</span><span class="s2">,</span>
+    <span class="s1">Protocol</span><span class="s2">,</span>
+    <span class="s1">TypedDict</span><span class="s2">,</span>
+    <span class="s1">Union</span><span class="s2">,</span>
+    <span class="s1">overload</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_core </span><span class="s0">import </span><span class="s1">ClosedResourceError</span><span class="s2">, </span><span class="s1">TaskStatus</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_highlevel_generic </span><span class="s0">import </span><span class="s1">StapledStream</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_subprocess_platform </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">create_pipe_from_child_output</span><span class="s2">,</span>
+    <span class="s1">create_pipe_to_child_stdin</span><span class="s2">,</span>
+    <span class="s1">wait_child_exiting</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_sync </span><span class="s0">import </span><span class="s1">Lock</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">NoPublicConstructor</span><span class="s2">, </span><span class="s1">final</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">import </span><span class="s1">signal</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Awaitable</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Iterable</span><span class="s2">, </span><span class="s1">Mapping</span><span class="s2">, </span><span class="s1">Sequence</span>
+    <span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">TextIOWrapper</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">TypeAlias</span><span class="s2">, </span><span class="s1">Unpack</span>
+
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">ReceiveStream</span><span class="s2">, </span><span class="s1">SendStream</span>
+
+
+<span class="s3"># Sphinx cannot parse the stringified version</span>
+<span class="s1">StrOrBytesPath</span><span class="s2">: </span><span class="s1">TypeAlias </span><span class="s2">= </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">PathLike</span><span class="s2">[</span><span class="s1">str</span><span class="s2">], </span><span class="s1">os</span><span class="s2">.</span><span class="s1">PathLike</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]]</span>
+
+
+<span class="s3"># Linux-specific, but has complex lifetime management stuff so we hard-code it</span>
+<span class="s3"># here instead of hiding it behind the _subprocess_platform abstraction</span>
+<span class="s1">can_try_pidfd_open</span><span class="s2">: </span><span class="s1">bool</span>
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+
+    <span class="s0">def </span><span class="s1">pidfd_open</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">_subprocess_platform </span><span class="s0">import </span><span class="s1">ClosableReceiveStream</span><span class="s2">, </span><span class="s1">ClosableSendStream</span>
+
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s1">can_try_pidfd_open </span><span class="s2">= </span><span class="s0">True</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">from </span><span class="s1">os </span><span class="s0">import </span><span class="s1">pidfd_open</span>
+    <span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">&quot;linux&quot;</span><span class="s2">:</span>
+            <span class="s3"># this workaround is needed on:</span>
+            <span class="s3">#  - CPython &lt;= 3.8</span>
+            <span class="s3">#  - non-CPython (maybe?)</span>
+            <span class="s3">#  - Anaconda's interpreter (as it is built to assume an older</span>
+            <span class="s3">#    than current linux kernel)</span>
+            <span class="s3">#</span>
+            <span class="s3"># The last point implies that other custom builds might not work;</span>
+            <span class="s3"># therefore, no assertion should be here.</span>
+            <span class="s0">import </span><span class="s1">ctypes</span>
+
+            <span class="s1">_cdll_for_pidfd_open </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">CDLL</span><span class="s2">(</span><span class="s0">None</span><span class="s2">, </span><span class="s1">use_errno</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+            <span class="s1">_cdll_for_pidfd_open</span><span class="s2">.</span><span class="s1">syscall</span><span class="s2">.</span><span class="s1">restype </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_long</span>
+            <span class="s3"># pid and flags are actually int-sized, but the syscall() function</span>
+            <span class="s3"># always takes longs. (Except on x32 where long is 32-bits and syscall</span>
+            <span class="s3"># takes 64-bit arguments. But in the unlikely case that anyone is</span>
+            <span class="s3"># using x32, this will still work, b/c we only need to pass in 32 bits</span>
+            <span class="s3"># of data, and the C ABI doesn't distinguish between passing 32-bit vs</span>
+            <span class="s3"># 64-bit integers; our 32-bit values will get loaded into 64-bit</span>
+            <span class="s3"># registers where syscall() will find them.)</span>
+            <span class="s1">_cdll_for_pidfd_open</span><span class="s2">.</span><span class="s1">syscall</span><span class="s2">.</span><span class="s1">argtypes </span><span class="s2">= [</span>
+                <span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_long</span><span class="s2">,  </span><span class="s3"># syscall number</span>
+                <span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_long</span><span class="s2">,  </span><span class="s3"># pid</span>
+                <span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_long</span><span class="s2">,  </span><span class="s3"># flags</span>
+            <span class="s2">]</span>
+            <span class="s1">__NR_pidfd_open </span><span class="s2">= </span><span class="s5">434</span>
+
+            <span class="s0">def </span><span class="s1">pidfd_open</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+                <span class="s1">result </span><span class="s2">= </span><span class="s1">_cdll_for_pidfd_open</span><span class="s2">.</span><span class="s1">syscall</span><span class="s2">(</span><span class="s1">__NR_pidfd_open</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">result </span><span class="s2">&lt; </span><span class="s5">0</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+                    <span class="s1">err </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">get_errno</span><span class="s2">()</span>
+                    <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s1">err</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">strerror</span><span class="s2">(</span><span class="s1">err</span><span class="s2">))</span>
+                <span class="s0">return </span><span class="s1">result</span>
+
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">can_try_pidfd_open </span><span class="s2">= </span><span class="s0">False</span>
+
+
+<span class="s0">class </span><span class="s1">HasFileno</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot;Represents any file-like object that has a file descriptor.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">fileno</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">Process</span><span class="s2">(</span><span class="s1">metaclass</span><span class="s2">=</span><span class="s1">NoPublicConstructor</span><span class="s2">):</span>
+    <span class="s6">r&quot;&quot;&quot;A child process. Like :class:`subprocess.Popen`, but async. 
+ 
+    This class has no public constructor. The most common way to get a 
+    `Process` object is to combine `Nursery.start` with `run_process`:: 
+ 
+       process_object = await nursery.start(run_process, ...) 
+ 
+    This way, `run_process` supervises the process and makes sure that it is 
+    cleaned up properly, while optionally checking the return value, feeding 
+    it input, and so on. 
+ 
+    If you need more control – for example, because you want to spawn a child 
+    process that outlives your program – then another option is to use 
+    `trio.lowlevel.open_process`:: 
+ 
+       process_object = await trio.lowlevel.open_process(...) 
+ 
+    Attributes: 
+      args (str or list): The ``command`` passed at construction time, 
+          specifying the process to execute and its arguments. 
+      pid (int): The process ID of the child process managed by this object. 
+      stdin (trio.abc.SendStream or None): A stream connected to the child's 
+          standard input stream: when you write bytes here, they become available 
+          for the child to read. Only available if the :class:`Process` 
+          was constructed using ``stdin=PIPE``; otherwise this will be None. 
+      stdout (trio.abc.ReceiveStream or None): A stream connected to 
+          the child's standard output stream: when the child writes to 
+          standard output, the written bytes become available for you 
+          to read here. Only available if the :class:`Process` was 
+          constructed using ``stdout=PIPE``; otherwise this will be None. 
+      stderr (trio.abc.ReceiveStream or None): A stream connected to 
+          the child's standard error stream: when the child writes to 
+          standard error, the written bytes become available for you 
+          to read here. Only available if the :class:`Process` was 
+          constructed using ``stderr=PIPE``; otherwise this will be None. 
+      stdio (trio.StapledStream or None): A stream that sends data to 
+          the child's standard input and receives from the child's standard 
+          output. Only available if both :attr:`stdin` and :attr:`stdout` are 
+          available; otherwise this will be None. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3"># We're always in binary mode.</span>
+    <span class="s1">universal_newlines</span><span class="s2">: </span><span class="s1">Final </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s1">Final </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s1">Final </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s3"># Available for the per-platform wait_child_exiting() implementations</span>
+    <span class="s3"># to stash some state; waitid platforms use this to avoid spawning</span>
+    <span class="s3"># arbitrarily many threads if wait() keeps getting cancelled.</span>
+    <span class="s1">_wait_for_exit_data</span><span class="s2">: </span><span class="s1">object </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">popen</span><span class="s2">: </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">Popen</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">],</span>
+        <span class="s1">stdin</span><span class="s2">: </span><span class="s1">SendStream </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">stdout</span><span class="s2">: </span><span class="s1">ReceiveStream </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">stderr</span><span class="s2">: </span><span class="s1">ReceiveStream </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_proc </span><span class="s2">= </span><span class="s1">popen</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stdin </span><span class="s2">= </span><span class="s1">stdin</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">stdout</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">= </span><span class="s1">stderr</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">stdio</span><span class="s2">: </span><span class="s1">StapledStream</span><span class="s2">[</span><span class="s1">SendStream</span><span class="s2">, </span><span class="s1">ReceiveStream</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stdin </span><span class="s0">is not None and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">stdio </span><span class="s2">= </span><span class="s1">StapledStream</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_wait_lock</span><span class="s2">: </span><span class="s1">Lock </span><span class="s2">= </span><span class="s1">Lock</span><span class="s2">()</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd</span><span class="s2">: </span><span class="s1">TextIOWrapper </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">can_try_pidfd_open</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">fd</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">pidfd_open</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">pid</span><span class="s2">, </span><span class="s5">0</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+                <span class="s3"># Well, we tried, but it didn't work (probably because we're</span>
+                <span class="s3"># running on an older kernel, or in an older sandbox, that</span>
+                <span class="s3"># hasn't been updated to support pidfd_open). We'll fall back</span>
+                <span class="s3"># on waitid instead.</span>
+                <span class="s0">pass</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># It worked! Wrap the raw fd up in a Python file object to</span>
+                <span class="s3"># make sure it'll get closed.</span>
+                <span class="s3"># SIM115: open-file-with-context-handler</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s2">= </span><span class="s1">open</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">)  </span><span class="s3"># noqa: SIM115</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">args</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">] = </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">args</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">pid</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">pid</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">returncode </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">returncode</span>
+        <span class="s0">if </span><span class="s1">returncode </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">status </span><span class="s2">= </span><span class="s4">f&quot;running with PID </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">pid</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">returncode </span><span class="s2">&lt; </span><span class="s5">0</span><span class="s2">:</span>
+                <span class="s1">status </span><span class="s2">= </span><span class="s4">f&quot;exited with signal </span><span class="s0">{</span><span class="s2">-</span><span class="s1">returncode</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">status </span><span class="s2">= </span><span class="s4">f&quot;exited with status </span><span class="s0">{</span><span class="s1">returncode</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">return </span><span class="s4">f&quot;&lt;trio.Process </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">args</span><span class="s0">!r}</span><span class="s4">: </span><span class="s0">{</span><span class="s1">status</span><span class="s0">}</span><span class="s4">&gt;&quot;</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">returncode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;The exit status of the process (an integer), or ``None`` if it's 
+        still running. 
+ 
+        By convention, a return code of zero indicates success.  On 
+        UNIX, negative values indicate termination due to a signal, 
+        e.g., -11 if terminated by signal 11 (``SIGSEGV``).  On 
+        Windows, a process that exits due to a call to 
+        :meth:`Process.terminate` will have an exit status of 1. 
+ 
+        Unlike the standard library `subprocess.Popen.returncode`, you don't 
+        have to call `poll` or `wait` to update this attribute; it's 
+        automatically updated as needed, and will always give you the latest 
+        information. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">poll</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">result </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_close_pidfd</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">_close_pidfd</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">notify_closing</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">async def </span><span class="s1">wait</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Block until the process exits. 
+ 
+        Returns: 
+          The exit status of the process; see :attr:`returncode`. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">async with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wait_lock</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">poll</span><span class="s2">() </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s0">is not None</span><span class="s2">:</span>
+                    <span class="s0">with </span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">suppress</span><span class="s2">(</span>
+                        <span class="s1">ClosedResourceError</span><span class="s2">,</span>
+                    <span class="s2">):  </span><span class="s3"># something else (probably a call to poll) already closed the pidfd</span>
+                        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pidfd</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">wait_child_exiting</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span>
+                <span class="s3"># We have to use .wait() here, not .poll(), because on macOS</span>
+                <span class="s3"># (and maybe other systems, who knows), there's a race</span>
+                <span class="s3"># condition inside the kernel that creates a tiny window where</span>
+                <span class="s3"># kqueue reports that the process has exited, but</span>
+                <span class="s3"># waitpid(WNOHANG) can't yet reap it. So this .wait() may</span>
+                <span class="s3"># actually block for a tiny fraction of a second.</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_close_pidfd</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is not None</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">returncode</span>
+
+    <span class="s0">def </span><span class="s1">poll</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Returns the exit status of the process (an integer), or ``None`` if 
+        it's still running. 
+ 
+        Note that on Trio (unlike the standard library `subprocess.Popen`), 
+        ``process.poll()`` and ``process.returncode`` always give the same 
+        result. See `returncode` for more details. This method is only 
+        included to make it easier to port code from `subprocess`. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">returncode</span>
+
+    <span class="s0">def </span><span class="s1">send_signal</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sig</span><span class="s2">: </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">Signals </span><span class="s2">| </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Send signal ``sig`` to the process. 
+ 
+        On UNIX, ``sig`` may be any signal defined in the 
+        :mod:`signal` module, such as ``signal.SIGINT`` or 
+        ``signal.SIGTERM``. On Windows, it may be anything accepted by 
+        the standard library :meth:`subprocess.Popen.send_signal`. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">send_signal</span><span class="s2">(</span><span class="s1">sig</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">terminate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Terminate the process, politely if possible. 
+ 
+        On UNIX, this is equivalent to 
+        ``send_signal(signal.SIGTERM)``; by convention this requests 
+        graceful termination, but a misbehaving or buggy process might 
+        ignore it. On Windows, :meth:`terminate` forcibly terminates the 
+        process in the same manner as :meth:`kill`. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">kill</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Immediately terminate the process. 
+ 
+        On UNIX, this is equivalent to 
+        ``send_signal(signal.SIGKILL)``.  On Windows, it calls 
+        ``TerminateProcess``. In both cases, the process cannot 
+        prevent itself from being killed, but the termination will be 
+        delivered asynchronously; use :meth:`wait` if you want to 
+        ensure the process is actually dead before proceeding. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">_open_process</span><span class="s2">(</span>
+    <span class="s1">command</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">],</span>
+    <span class="s2">*,</span>
+    <span class="s1">stdin</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">stdout</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">stderr</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">options</span><span class="s2">: </span><span class="s1">object</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; Process</span><span class="s2">:</span>
+    <span class="s6">r&quot;&quot;&quot;Execute a child program in a new process. 
+ 
+    After construction, you can interact with the child process by writing data to its 
+    `~trio.Process.stdin` stream (a `~trio.abc.SendStream`), reading data from its 
+    `~trio.Process.stdout` and/or `~trio.Process.stderr` streams (both 
+    `~trio.abc.ReceiveStream`\s), sending it signals using `~trio.Process.terminate`, 
+    `~trio.Process.kill`, or `~trio.Process.send_signal`, and waiting for it to exit 
+    using `~trio.Process.wait`. See `trio.Process` for details. 
+ 
+    Each standard stream is only available if you specify that a pipe should be created 
+    for it. For example, if you pass ``stdin=subprocess.PIPE``, you can write to the 
+    `~trio.Process.stdin` stream, else `~trio.Process.stdin` will be ``None``. 
+ 
+    Unlike `trio.run_process`, this function doesn't do any kind of automatic 
+    management of the child process. It's up to you to implement whatever semantics you 
+    want. 
+ 
+    Args: 
+      command: The command to run. Typically this is a sequence of strings or 
+          bytes such as ``['ls', '-l', 'directory with spaces']``, where the 
+          first element names the executable to invoke and the other elements 
+          specify its arguments. With ``shell=True`` in the ``**options``, or on 
+          Windows, ``command`` can be a string or bytes, which will be parsed 
+          following platform-dependent :ref:`quoting rules 
+          &lt;subprocess-quoting&gt;`. In all cases ``command`` can be a path or a 
+          sequence of paths. 
+      stdin: Specifies what the child process's standard input 
+          stream should connect to: output written by the parent 
+          (``subprocess.PIPE``), nothing (``subprocess.DEVNULL``), 
+          or an open file (pass a file descriptor or something whose 
+          ``fileno`` method returns one). If ``stdin`` is unspecified, 
+          the child process will have the same standard input stream 
+          as its parent. 
+      stdout: Like ``stdin``, but for the child process's standard output 
+          stream. 
+      stderr: Like ``stdin``, but for the child process's standard error 
+          stream. An additional value ``subprocess.STDOUT`` is supported, 
+          which causes the child's standard output and standard error 
+          messages to be intermixed on a single standard output stream, 
+          attached to whatever the ``stdout`` option says to attach it to. 
+      **options: Other :ref:`general subprocess options &lt;subprocess-options&gt;` 
+          are also accepted. 
+ 
+    Returns: 
+      A new `trio.Process` object. 
+ 
+    Raises: 
+      OSError: if the process spawning fails, for example because the 
+         specified command could not be found. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s2">(</span><span class="s4">&quot;universal_newlines&quot;</span><span class="s2">, </span><span class="s4">&quot;text&quot;</span><span class="s2">, </span><span class="s4">&quot;encoding&quot;</span><span class="s2">, </span><span class="s4">&quot;errors&quot;</span><span class="s2">, </span><span class="s4">&quot;bufsize&quot;</span><span class="s2">):</span>
+        <span class="s0">if </span><span class="s1">options</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">key</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span>
+                <span class="s4">&quot;trio.Process only supports communicating over &quot;</span>
+                <span class="s4">f&quot;unbuffered byte streams; the '</span><span class="s0">{</span><span class="s1">key</span><span class="s0">}</span><span class="s4">' option is not supported&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">&quot;posix&quot;</span><span class="s2">:</span>
+        <span class="s3"># TODO: how do paths and sequences thereof play with `shell=True`?</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">command</span><span class="s2">, (</span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">)) </span><span class="s0">and not </span><span class="s1">options</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;shell&quot;</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span>
+                <span class="s4">&quot;command must be a sequence (not a string or bytes) if &quot;</span>
+                <span class="s4">&quot;shell=False on UNIX systems&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">command</span><span class="s2">, (</span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">)) </span><span class="s0">and </span><span class="s1">options</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;shell&quot;</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span>
+                <span class="s4">&quot;command must be a string or bytes (not a sequence) if &quot;</span>
+                <span class="s4">&quot;shell=True on UNIX systems&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+    <span class="s1">trio_stdin</span><span class="s2">: </span><span class="s1">ClosableSendStream </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">trio_stdout</span><span class="s2">: </span><span class="s1">ClosableReceiveStream </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">trio_stderr</span><span class="s2">: </span><span class="s1">ClosableReceiveStream </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s3"># Close the parent's handle for each child side of a pipe; we want the child to</span>
+    <span class="s3"># have the only copy, so that when it exits we can read EOF on our side. The</span>
+    <span class="s3"># trio ends of pipes will be transferred to the Process object, which will be</span>
+    <span class="s3"># responsible for their lifetime. If process spawning fails, though, we still</span>
+    <span class="s3"># want to close them before letting the failure bubble out</span>
+    <span class="s0">with </span><span class="s1">ExitStack</span><span class="s2">() </span><span class="s0">as </span><span class="s1">always_cleanup</span><span class="s2">, </span><span class="s1">ExitStack</span><span class="s2">() </span><span class="s0">as </span><span class="s1">cleanup_on_fail</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">stdin </span><span class="s2">== </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">:</span>
+            <span class="s1">trio_stdin</span><span class="s2">, </span><span class="s1">stdin </span><span class="s2">= </span><span class="s1">create_pipe_to_child_stdin</span><span class="s2">()</span>
+            <span class="s1">always_cleanup</span><span class="s2">.</span><span class="s1">callback</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">, </span><span class="s1">stdin</span><span class="s2">)</span>
+            <span class="s1">cleanup_on_fail</span><span class="s2">.</span><span class="s1">callback</span><span class="s2">(</span><span class="s1">trio_stdin</span><span class="s2">.</span><span class="s1">close</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">stdout </span><span class="s2">== </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">:</span>
+            <span class="s1">trio_stdout</span><span class="s2">, </span><span class="s1">stdout </span><span class="s2">= </span><span class="s1">create_pipe_from_child_output</span><span class="s2">()</span>
+            <span class="s1">always_cleanup</span><span class="s2">.</span><span class="s1">callback</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">)</span>
+            <span class="s1">cleanup_on_fail</span><span class="s2">.</span><span class="s1">callback</span><span class="s2">(</span><span class="s1">trio_stdout</span><span class="s2">.</span><span class="s1">close</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">stderr </span><span class="s2">== </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">STDOUT</span><span class="s2">:</span>
+            <span class="s3"># If we created a pipe for stdout, pass the same pipe for</span>
+            <span class="s3"># stderr.  If stdout was some non-pipe thing (DEVNULL or a</span>
+            <span class="s3"># given FD), pass the same thing. If stdout was passed as</span>
+            <span class="s3"># None, keep stderr as STDOUT to allow subprocess to dup</span>
+            <span class="s3"># our stdout. Regardless of which of these is applicable,</span>
+            <span class="s3"># don't create a new Trio stream for stderr -- if stdout</span>
+            <span class="s3"># is piped, stderr will be intermixed on the stdout stream.</span>
+            <span class="s0">if </span><span class="s1">stdout </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s1">stderr </span><span class="s2">= </span><span class="s1">stdout</span>
+        <span class="s0">elif </span><span class="s1">stderr </span><span class="s2">== </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">:</span>
+            <span class="s1">trio_stderr</span><span class="s2">, </span><span class="s1">stderr </span><span class="s2">= </span><span class="s1">create_pipe_from_child_output</span><span class="s2">()</span>
+            <span class="s1">always_cleanup</span><span class="s2">.</span><span class="s1">callback</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">, </span><span class="s1">stderr</span><span class="s2">)</span>
+            <span class="s1">cleanup_on_fail</span><span class="s2">.</span><span class="s1">callback</span><span class="s2">(</span><span class="s1">trio_stderr</span><span class="s2">.</span><span class="s1">close</span><span class="s2">)</span>
+
+        <span class="s1">popen </span><span class="s2">= </span><span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span>
+            <span class="s1">partial</span><span class="s2">(</span>
+                <span class="s1">subprocess</span><span class="s2">.</span><span class="s1">Popen</span><span class="s2">,</span>
+                <span class="s1">command</span><span class="s2">,</span>
+                <span class="s1">stdin</span><span class="s2">=</span><span class="s1">stdin</span><span class="s2">,</span>
+                <span class="s1">stdout</span><span class="s2">=</span><span class="s1">stdout</span><span class="s2">,</span>
+                <span class="s1">stderr</span><span class="s2">=</span><span class="s1">stderr</span><span class="s2">,</span>
+                <span class="s2">**</span><span class="s1">options</span><span class="s2">,</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s3"># We did not fail, so dismiss the stack for the trio ends</span>
+        <span class="s1">cleanup_on_fail</span><span class="s2">.</span><span class="s1">pop_all</span><span class="s2">()</span>
+
+    <span class="s0">return </span><span class="s1">Process</span><span class="s2">.</span><span class="s1">_create</span><span class="s2">(</span><span class="s1">popen</span><span class="s2">, </span><span class="s1">trio_stdin</span><span class="s2">, </span><span class="s1">trio_stdout</span><span class="s2">, </span><span class="s1">trio_stderr</span><span class="s2">)</span>
+
+
+<span class="s3"># async function missing await</span>
+<span class="s0">async def </span><span class="s1">_windows_deliver_cancel</span><span class="s2">(</span><span class="s1">p</span><span class="s2">: </span><span class="s1">Process</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># noqa: RUF029</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">p</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">()</span>
+    <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+        <span class="s1">warnings</span><span class="s2">.</span><span class="s1">warn</span><span class="s2">(</span>
+            <span class="s1">RuntimeWarning</span><span class="s2">(</span><span class="s4">f&quot;TerminateProcess on </span><span class="s0">{</span><span class="s1">p</span><span class="s0">!r} </span><span class="s4">failed with: </span><span class="s0">{</span><span class="s1">exc</span><span class="s0">!r}</span><span class="s4">&quot;</span><span class="s2">),</span>
+            <span class="s1">stacklevel</span><span class="s2">=</span><span class="s5">1</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">_posix_deliver_cancel</span><span class="s2">(</span><span class="s1">p</span><span class="s2">: </span><span class="s1">Process</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">p</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">5</span><span class="s2">)</span>
+        <span class="s1">warnings</span><span class="s2">.</span><span class="s1">warn</span><span class="s2">(</span>
+            <span class="s1">RuntimeWarning</span><span class="s2">(</span>
+                <span class="s4">f&quot;process </span><span class="s0">{</span><span class="s1">p</span><span class="s0">!r} </span><span class="s4">ignored SIGTERM for 5 seconds. &quot;</span>
+                <span class="s4">&quot;(Maybe you should pass a custom deliver_cancel?) &quot;</span>
+                <span class="s4">&quot;Trying SIGKILL.&quot;</span><span class="s2">,</span>
+            <span class="s2">),</span>
+            <span class="s1">stacklevel</span><span class="s2">=</span><span class="s5">1</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">p</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+    <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+        <span class="s1">warnings</span><span class="s2">.</span><span class="s1">warn</span><span class="s2">(</span>
+            <span class="s1">RuntimeWarning</span><span class="s2">(</span><span class="s4">f&quot;tried to kill process </span><span class="s0">{</span><span class="s1">p</span><span class="s0">!r}</span><span class="s4">, but failed with: </span><span class="s0">{</span><span class="s1">exc</span><span class="s0">!r}</span><span class="s4">&quot;</span><span class="s2">),</span>
+            <span class="s1">stacklevel</span><span class="s2">=</span><span class="s5">1</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+
+<span class="s3"># Use a private name, so we can declare platform-specific stubs below.</span>
+<span class="s3"># This is also the signature read by Sphinx</span>
+<span class="s0">async def </span><span class="s1">_run_process</span><span class="s2">(</span>
+    <span class="s1">command</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">],</span>
+    <span class="s2">*,</span>
+    <span class="s1">stdin</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray </span><span class="s2">| </span><span class="s1">memoryview </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s7">b&quot;&quot;</span><span class="s2">,</span>
+    <span class="s1">capture_stdout</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s1">capture_stderr</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s1">check</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">deliver_cancel</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Process</span><span class="s2">], </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">task_status</span><span class="s2">: </span><span class="s1">TaskStatus</span><span class="s2">[</span><span class="s1">Process</span><span class="s2">] = </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">TASK_STATUS_IGNORED</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">options</span><span class="s2">: </span><span class="s1">object</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; subprocess</span><span class="s2">.</span><span class="s1">CompletedProcess</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;Run ``command`` in a subprocess and wait for it to complete. 
+ 
+    This function can be called in two different ways. 
+ 
+    One option is a direct call, like:: 
+ 
+        completed_process_info = await trio.run_process(...) 
+ 
+    In this case, it returns a :class:`subprocess.CompletedProcess` instance 
+    describing the results. Use this if you want to treat a process like a 
+    function call. 
+ 
+    The other option is to run it as a task using `Nursery.start` – the enhanced version 
+    of `~Nursery.start_soon` that lets a task pass back a value during startup:: 
+ 
+        process = await nursery.start(trio.run_process, ...) 
+ 
+    In this case, `~Nursery.start` returns a `Process` object that you can use 
+    to interact with the process while it's running. Use this if you want to 
+    treat a process like a background task. 
+ 
+    Either way, `run_process` makes sure that the process has exited before 
+    returning, handles cancellation, optionally checks for errors, and 
+    provides some convenient shorthands for dealing with the child's 
+    input/output. 
+ 
+    **Input:** `run_process` supports all the same ``stdin=`` arguments as 
+    `subprocess.Popen`. In addition, if you simply want to pass in some fixed 
+    data, you can pass a plain `bytes` object, and `run_process` will take 
+    care of setting up a pipe, feeding in the data you gave, and then sending 
+    end-of-file. The default is ``b&quot;&quot;``, which means that the child will receive 
+    an empty stdin. If you want the child to instead read from the parent's 
+    stdin, use ``stdin=None``. 
+ 
+    **Output:** By default, any output produced by the subprocess is 
+    passed through to the standard output and error streams of the 
+    parent Trio process. 
+ 
+    When calling `run_process` directly, you can capture the subprocess's output by 
+    passing ``capture_stdout=True`` to capture the subprocess's standard output, and/or 
+    ``capture_stderr=True`` to capture its standard error. Captured data is collected up 
+    by Trio into an in-memory buffer, and then provided as the 
+    :attr:`~subprocess.CompletedProcess.stdout` and/or 
+    :attr:`~subprocess.CompletedProcess.stderr` attributes of the returned 
+    :class:`~subprocess.CompletedProcess` object. The value for any stream that was not 
+    captured will be ``None``. 
+ 
+    If you want to capture both stdout and stderr while keeping them 
+    separate, pass ``capture_stdout=True, capture_stderr=True``. 
+ 
+    If you want to capture both stdout and stderr but mixed together 
+    in the order they were printed, use: ``capture_stdout=True, stderr=subprocess.STDOUT``. 
+    This directs the child's stderr into its stdout, so the combined 
+    output will be available in the `~subprocess.CompletedProcess.stdout` 
+    attribute. 
+ 
+    If you're using ``await nursery.start(trio.run_process, ...)`` and want to capture 
+    the subprocess's output for further processing, then use ``stdout=subprocess.PIPE`` 
+    and then make sure to read the data out of the `Process.stdout` stream. If you want 
+    to capture stderr separately, use ``stderr=subprocess.PIPE``. If you want to capture 
+    both, but mixed together in the correct order, use ``stdout=subprocess.PIPE, 
+    stderr=subprocess.STDOUT``. 
+ 
+    **Error checking:** If the subprocess exits with a nonzero status 
+    code, indicating failure, :func:`run_process` raises a 
+    :exc:`subprocess.CalledProcessError` exception rather than 
+    returning normally. The captured outputs are still available as 
+    the :attr:`~subprocess.CalledProcessError.stdout` and 
+    :attr:`~subprocess.CalledProcessError.stderr` attributes of that 
+    exception.  To disable this behavior, so that :func:`run_process` 
+    returns normally even if the subprocess exits abnormally, pass ``check=False``. 
+ 
+    Note that this can make the ``capture_stdout`` and ``capture_stderr`` 
+    arguments useful even when starting `run_process` as a task: if you only 
+    care about the output if the process fails, then you can enable capturing 
+    and then read the output off of the `~subprocess.CalledProcessError`. 
+ 
+    **Cancellation:** If cancelled, `run_process` sends a termination 
+    request to the subprocess, then waits for it to fully exit. The 
+    ``deliver_cancel`` argument lets you control how the process is terminated. 
+ 
+    .. note:: `run_process` is intentionally similar to the standard library 
+       `subprocess.run`, but some of the defaults are different. Specifically, we 
+       default to: 
+ 
+       - ``check=True``, because `&quot;errors should never pass silently / unless 
+         explicitly silenced&quot; &lt;https://www.python.org/dev/peps/pep-0020/&gt;`__. 
+ 
+       - ``stdin=b&quot;&quot;``, because it produces less-confusing results if a subprocess 
+         unexpectedly tries to read from stdin. 
+ 
+       To get the `subprocess.run` semantics, use ``check=False, stdin=None``. 
+ 
+    Args: 
+      command (list or str): The command to run. Typically this is a 
+          sequence of strings such as ``['ls', '-l', 'directory with spaces']``, 
+          where the first element names the executable to invoke and the other 
+          elements specify its arguments. With ``shell=True`` in the 
+          ``**options``, or on Windows, ``command`` may alternatively 
+          be a string, which will be parsed following platform-dependent 
+          :ref:`quoting rules &lt;subprocess-quoting&gt;`. 
+ 
+      stdin (:obj:`bytes`, subprocess.PIPE, file descriptor, or None): The 
+          bytes to provide to the subprocess on its standard input stream, or 
+          ``None`` if the subprocess's standard input should come from the 
+          same place as the parent Trio process's standard input. As is the 
+          case with the :mod:`subprocess` module, you can also pass a file 
+          descriptor or an object with a ``fileno()`` method, in which case 
+          the subprocess's standard input will come from that file. 
+ 
+          When starting `run_process` as a background task, you can also use 
+          ``stdin=subprocess.PIPE``, in which case `Process.stdin` will be a 
+          `~trio.abc.SendStream` that you can use to send data to the child. 
+ 
+      capture_stdout (bool): If true, capture the bytes that the subprocess 
+          writes to its standard output stream and return them in the 
+          `~subprocess.CompletedProcess.stdout` attribute of the returned 
+          `subprocess.CompletedProcess` or `subprocess.CalledProcessError`. 
+ 
+      capture_stderr (bool): If true, capture the bytes that the subprocess 
+          writes to its standard error stream and return them in the 
+          `~subprocess.CompletedProcess.stderr` attribute of the returned 
+          `~subprocess.CompletedProcess` or `subprocess.CalledProcessError`. 
+ 
+      check (bool): If false, don't validate that the subprocess exits 
+          successfully. You should be sure to check the 
+          ``returncode`` attribute of the returned object if you pass 
+          ``check=False``, so that errors don't pass silently. 
+ 
+      deliver_cancel (async function or None): If `run_process` is cancelled, 
+          then it needs to kill the child process. There are multiple ways to 
+          do this, so we let you customize it. 
+ 
+          If you pass None (the default), then the behavior depends on the 
+          platform: 
+ 
+          - On Windows, Trio calls ``TerminateProcess``, which should kill the 
+            process immediately. 
+ 
+          - On Unix-likes, the default behavior is to send a ``SIGTERM``, wait 
+            5 seconds, and send a ``SIGKILL``. 
+ 
+          Alternatively, you can customize this behavior by passing in an 
+          arbitrary async function, which will be called with the `Process` 
+          object as an argument. For example, the default Unix behavior could 
+          be implemented like this:: 
+ 
+             async def my_deliver_cancel(process): 
+                 process.send_signal(signal.SIGTERM) 
+                 await trio.sleep(5) 
+                 process.send_signal(signal.SIGKILL) 
+ 
+          When the process actually exits, the ``deliver_cancel`` function 
+          will automatically be cancelled – so if the process exits after 
+          ``SIGTERM``, then we'll never reach the ``SIGKILL``. 
+ 
+          In any case, `run_process` will always wait for the child process to 
+          exit before raising `Cancelled`. 
+ 
+      **options: :func:`run_process` also accepts any :ref:`general subprocess 
+          options &lt;subprocess-options&gt;` and passes them on to the 
+          :class:`~trio.Process` constructor. This includes the 
+          ``stdout`` and ``stderr`` options, which provide additional 
+          redirection possibilities such as ``stderr=subprocess.STDOUT``, 
+          ``stdout=subprocess.DEVNULL``, or file descriptors. 
+ 
+    Returns: 
+ 
+      When called normally – a `subprocess.CompletedProcess` instance 
+      describing the return code and outputs. 
+ 
+      When called via `Nursery.start` – a `trio.Process` instance. 
+ 
+    Raises: 
+      UnicodeError: if ``stdin`` is specified as a Unicode string, rather 
+          than bytes 
+      ValueError: if multiple redirections are specified for the same 
+          stream, e.g., both ``capture_stdout=True`` and 
+          ``stdout=subprocess.DEVNULL`` 
+      subprocess.CalledProcessError: if ``check=False`` is not passed 
+          and the process exits with a nonzero exit status 
+      OSError: if an error is encountered starting or communicating with 
+          the process 
+      ExceptionGroup: if exceptions occur in ``deliver_cancel``, 
+          or when exceptions occur when communicating with the subprocess. 
+          If strict_exception_groups is set to false in the global context, 
+          which is deprecated, then single exceptions will be collapsed. 
+ 
+    .. note:: The child process runs in the same process group as the parent 
+       Trio process, so a Ctrl+C will be delivered simultaneously to both 
+       parent and child. If you don't want this behavior, consult your 
+       platform's documentation for starting child processes in a different 
+       process group. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">stdin</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+        <span class="s0">raise </span><span class="s1">UnicodeError</span><span class="s2">(</span><span class="s4">&quot;process stdin must be bytes, not str&quot;</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">task_status </span><span class="s0">is </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">TASK_STATUS_IGNORED</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">stdin </span><span class="s0">is </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">&quot;stdout=subprocess.PIPE is only valid with nursery.start, &quot;</span>
+                <span class="s4">&quot;since that's the only way to access the pipe; use nursery.start &quot;</span>
+                <span class="s4">&quot;or pass the data you want to write directly&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">options</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;stdout&quot;</span><span class="s2">) </span><span class="s0">is </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">&quot;stdout=subprocess.PIPE is only valid with nursery.start, &quot;</span>
+                <span class="s4">&quot;since that's the only way to access the pipe&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">options</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">&quot;stderr&quot;</span><span class="s2">) </span><span class="s0">is </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">&quot;stderr=subprocess.PIPE is only valid with nursery.start, &quot;</span>
+                <span class="s4">&quot;since that's the only way to access the pipe&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">stdin</span><span class="s2">, (</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytearray</span><span class="s2">, </span><span class="s1">memoryview</span><span class="s2">)):</span>
+        <span class="s1">input_ </span><span class="s2">= </span><span class="s1">stdin</span>
+        <span class="s1">options</span><span class="s2">[</span><span class="s4">&quot;stdin&quot;</span><span class="s2">] = </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s3"># stdin should be something acceptable to Process</span>
+        <span class="s3"># (None, DEVNULL, a file descriptor, etc) and Process</span>
+        <span class="s3"># will raise if it's not</span>
+        <span class="s1">input_ </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s1">options</span><span class="s2">[</span><span class="s4">&quot;stdin&quot;</span><span class="s2">] = </span><span class="s1">stdin</span>
+
+    <span class="s0">if </span><span class="s1">capture_stdout</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s4">&quot;stdout&quot; </span><span class="s0">in </span><span class="s1">options</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s4">&quot;can't specify both stdout and capture_stdout&quot;</span><span class="s2">)</span>
+        <span class="s1">options</span><span class="s2">[</span><span class="s4">&quot;stdout&quot;</span><span class="s2">] = </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span>
+    <span class="s0">if </span><span class="s1">capture_stderr</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s4">&quot;stderr&quot; </span><span class="s0">in </span><span class="s1">options</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s4">&quot;can't specify both stderr and capture_stderr&quot;</span><span class="s2">)</span>
+        <span class="s1">options</span><span class="s2">[</span><span class="s4">&quot;stderr&quot;</span><span class="s2">] = </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span>
+
+    <span class="s0">if </span><span class="s1">deliver_cancel </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">&quot;nt&quot;</span><span class="s2">:</span>
+            <span class="s1">deliver_cancel </span><span class="s2">= </span><span class="s1">_windows_deliver_cancel</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">&quot;posix&quot;</span>
+            <span class="s1">deliver_cancel </span><span class="s2">= </span><span class="s1">_posix_deliver_cancel</span>
+
+    <span class="s1">stdout_chunks</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray</span><span class="s2">] = []</span>
+    <span class="s1">stderr_chunks</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray</span><span class="s2">] = []</span>
+
+    <span class="s0">async def </span><span class="s1">feed_input</span><span class="s2">(</span><span class="s1">stream</span><span class="s2">: </span><span class="s1">SendStream</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">input_ </span><span class="s0">is not None</span>
+                <span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">input_</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError</span><span class="s2">:</span>
+                <span class="s0">pass</span>
+
+    <span class="s0">async def </span><span class="s1">read_output</span><span class="s2">(</span>
+        <span class="s1">stream</span><span class="s2">: </span><span class="s1">ReceiveStream</span><span class="s2">,</span>
+        <span class="s1">chunks</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+            <span class="s0">async for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">stream</span><span class="s2">:</span>
+                <span class="s1">chunks</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">chunk</span><span class="s2">)  </span><span class="s3"># noqa: PERF401</span>
+
+    <span class="s3"># Opening the process does not need to be inside the nursery, so we put it outside</span>
+    <span class="s3"># so any exceptions get directly seen by users.</span>
+    <span class="s3"># options needs a complex TypedDict. The overload error only occurs on Unix.</span>
+    <span class="s1">proc </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_process</span><span class="s2">(</span><span class="s1">command</span><span class="s2">, **</span><span class="s1">options</span><span class="s2">)  </span><span class="s3"># type: ignore[arg-type, call-overload, unused-ignore]</span>
+    <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">input_ </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin </span><span class="s0">is not None</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">feed_input</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">)</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin </span><span class="s2">= </span><span class="s0">None</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio </span><span class="s2">= </span><span class="s0">None</span>
+            <span class="s0">if </span><span class="s1">capture_stdout</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is not None</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">read_output</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stdout_chunks</span><span class="s2">)</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">= </span><span class="s0">None</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio </span><span class="s2">= </span><span class="s0">None</span>
+            <span class="s0">if </span><span class="s1">capture_stderr</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is not None</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">read_output</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">, </span><span class="s1">stderr_chunks</span><span class="s2">)</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">= </span><span class="s0">None</span>
+            <span class="s1">task_status</span><span class="s2">.</span><span class="s1">started</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">BaseException</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">(</span><span class="s1">shield</span><span class="s2">=</span><span class="s0">True</span><span class="s2">):</span>
+                <span class="s1">killer_cscope </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">(</span><span class="s1">shield</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+                <span class="s0">async def </span><span class="s1">killer</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+                    <span class="s0">with </span><span class="s1">killer_cscope</span><span class="s2">:</span>
+                        <span class="s0">await </span><span class="s1">deliver_cancel</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">)</span>
+
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">killer</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+                <span class="s1">killer_cscope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+                <span class="s0">raise</span>
+
+    <span class="s1">stdout </span><span class="s2">= </span><span class="s7">b&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">stdout_chunks</span><span class="s2">) </span><span class="s0">if </span><span class="s1">capture_stdout </span><span class="s0">else None</span>
+    <span class="s1">stderr </span><span class="s2">= </span><span class="s7">b&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">stderr_chunks</span><span class="s2">) </span><span class="s0">if </span><span class="s1">capture_stderr </span><span class="s0">else None</span>
+
+    <span class="s0">if </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">and </span><span class="s1">check</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">CalledProcessError</span><span class="s2">(</span>
+            <span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode</span><span class="s2">,</span>
+            <span class="s1">proc</span><span class="s2">.</span><span class="s1">args</span><span class="s2">,</span>
+            <span class="s1">output</span><span class="s2">=</span><span class="s1">stdout</span><span class="s2">,</span>
+            <span class="s1">stderr</span><span class="s2">=</span><span class="s1">stderr</span><span class="s2">,</span>
+        <span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is not None</span>
+        <span class="s0">return </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">CompletedProcess</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">args</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">stderr</span><span class="s2">)</span>
+
+
+<span class="s3"># There's a lot of duplication here because type checkers don't</span>
+<span class="s3"># have a good way to represent overloads that differ only</span>
+<span class="s3"># slightly. A cheat sheet:</span>
+<span class="s3">#</span>
+<span class="s3"># - on Windows, command is Union[str, Sequence[str]];</span>
+<span class="s3">#   on Unix, command is str if shell=True and Sequence[str] otherwise</span>
+<span class="s3">#</span>
+<span class="s3"># - on Windows, there are startupinfo and creationflags options;</span>
+<span class="s3">#   on Unix, there are preexec_fn, restore_signals, start_new_session,</span>
+<span class="s3">#            pass_fds, group (3.9+), extra_groups (3.9+), user (3.9+),</span>
+<span class="s3">#            umask (3.9+), pipesize (3.10+), process_group (3.11+)</span>
+<span class="s3">#</span>
+<span class="s3"># - run_process() has the signature of open_process() plus arguments</span>
+<span class="s3">#   capture_stdout, capture_stderr, check, deliver_cancel, the ability</span>
+<span class="s3">#   to pass bytes as stdin, and the ability to run in `nursery.start`</span>
+
+
+<span class="s0">class </span><span class="s1">GeneralProcessArgs</span><span class="s2">(</span><span class="s1">TypedDict</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot;Arguments shared between all runs.&quot;&quot;&quot;</span>
+
+    <span class="s1">stdout</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">stderr</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">close_fds</span><span class="s2">: </span><span class="s1">bool</span>
+    <span class="s1">cwd</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">env</span><span class="s2">: </span><span class="s1">Mapping</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None</span>
+    <span class="s1">executable</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s0">None</span>
+
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">&quot;win32&quot;</span><span class="s2">:</span>
+
+        <span class="s0">class </span><span class="s1">WindowsProcessArgs</span><span class="s2">(</span><span class="s1">GeneralProcessArgs</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+            <span class="s6">&quot;&quot;&quot;Arguments shared between all Windows runs.&quot;&quot;&quot;</span>
+
+            <span class="s1">shell</span><span class="s2">: </span><span class="s1">bool</span>
+            <span class="s1">startupinfo</span><span class="s2">: </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">STARTUPINFO </span><span class="s2">| </span><span class="s0">None</span>
+            <span class="s1">creationflags</span><span class="s2">: </span><span class="s1">int</span>
+
+        <span class="s0">async def </span><span class="s1">open_process</span><span class="s2">(</span>
+            <span class="s1">command</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">],</span>
+            <span class="s2">*,</span>
+            <span class="s1">stdin</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">WindowsProcessArgs</span><span class="s2">],</span>
+        <span class="s2">) </span><span class="s1">-&gt; trio</span><span class="s2">.</span><span class="s1">Process</span><span class="s2">:</span>
+            <span class="s6">r&quot;&quot;&quot;Execute a child program in a new process. 
+ 
+            After construction, you can interact with the child process by writing data to its 
+            `~trio.Process.stdin` stream (a `~trio.abc.SendStream`), reading data from its 
+            `~trio.Process.stdout` and/or `~trio.Process.stderr` streams (both 
+            `~trio.abc.ReceiveStream`\s), sending it signals using `~trio.Process.terminate`, 
+            `~trio.Process.kill`, or `~trio.Process.send_signal`, and waiting for it to exit 
+            using `~trio.Process.wait`. See `trio.Process` for details. 
+ 
+            Each standard stream is only available if you specify that a pipe should be created 
+            for it. For example, if you pass ``stdin=subprocess.PIPE``, you can write to the 
+            `~trio.Process.stdin` stream, else `~trio.Process.stdin` will be ``None``. 
+ 
+            Unlike `trio.run_process`, this function doesn't do any kind of automatic 
+            management of the child process. It's up to you to implement whatever semantics you 
+            want. 
+ 
+            Args: 
+              command (list or str): The command to run. Typically this is a 
+                  sequence of strings such as ``['ls', '-l', 'directory with spaces']``, 
+                  where the first element names the executable to invoke and the other 
+                  elements specify its arguments. With ``shell=True`` in the 
+                  ``**options``, or on Windows, ``command`` may alternatively 
+                  be a string, which will be parsed following platform-dependent 
+                  :ref:`quoting rules &lt;subprocess-quoting&gt;`. 
+              stdin: Specifies what the child process's standard input 
+                  stream should connect to: output written by the parent 
+                  (``subprocess.PIPE``), nothing (``subprocess.DEVNULL``), 
+                  or an open file (pass a file descriptor or something whose 
+                  ``fileno`` method returns one). If ``stdin`` is unspecified, 
+                  the child process will have the same standard input stream 
+                  as its parent. 
+              stdout: Like ``stdin``, but for the child process's standard output 
+                  stream. 
+              stderr: Like ``stdin``, but for the child process's standard error 
+                  stream. An additional value ``subprocess.STDOUT`` is supported, 
+                  which causes the child's standard output and standard error 
+                  messages to be intermixed on a single standard output stream, 
+                  attached to whatever the ``stdout`` option says to attach it to. 
+              **options: Other :ref:`general subprocess options &lt;subprocess-options&gt;` 
+                  are also accepted. 
+ 
+            Returns: 
+              A new `trio.Process` object. 
+ 
+            Raises: 
+              OSError: if the process spawning fails, for example because the 
+                 specified command could not be found. 
+ 
+            &quot;&quot;&quot;</span>
+            <span class="s2">...</span>
+
+        <span class="s0">async def </span><span class="s1">run_process</span><span class="s2">(</span>
+            <span class="s1">command</span><span class="s2">: </span><span class="s1">StrOrBytesPath </span><span class="s2">| </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">],</span>
+            <span class="s2">*,</span>
+            <span class="s1">task_status</span><span class="s2">: </span><span class="s1">TaskStatus</span><span class="s2">[</span><span class="s1">Process</span><span class="s2">] = </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">TASK_STATUS_IGNORED</span><span class="s2">,</span>
+            <span class="s1">stdin</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray </span><span class="s2">| </span><span class="s1">memoryview </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s1">capture_stdout</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+            <span class="s1">capture_stderr</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+            <span class="s1">check</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+            <span class="s1">deliver_cancel</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Process</span><span class="s2">], </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">WindowsProcessArgs</span><span class="s2">],</span>
+        <span class="s2">) </span><span class="s1">-&gt; subprocess</span><span class="s2">.</span><span class="s1">CompletedProcess</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]:</span>
+            <span class="s6">&quot;&quot;&quot;Run ``command`` in a subprocess and wait for it to complete. 
+ 
+            This function can be called in two different ways. 
+ 
+            One option is a direct call, like:: 
+ 
+                completed_process_info = await trio.run_process(...) 
+ 
+            In this case, it returns a :class:`subprocess.CompletedProcess` instance 
+            describing the results. Use this if you want to treat a process like a 
+            function call. 
+ 
+            The other option is to run it as a task using `Nursery.start` – the enhanced version 
+            of `~Nursery.start_soon` that lets a task pass back a value during startup:: 
+ 
+                process = await nursery.start(trio.run_process, ...) 
+ 
+            In this case, `~Nursery.start` returns a `Process` object that you can use 
+            to interact with the process while it's running. Use this if you want to 
+            treat a process like a background task. 
+ 
+            Either way, `run_process` makes sure that the process has exited before 
+            returning, handles cancellation, optionally checks for errors, and 
+            provides some convenient shorthands for dealing with the child's 
+            input/output. 
+ 
+            **Input:** `run_process` supports all the same ``stdin=`` arguments as 
+            `subprocess.Popen`. In addition, if you simply want to pass in some fixed 
+            data, you can pass a plain `bytes` object, and `run_process` will take 
+            care of setting up a pipe, feeding in the data you gave, and then sending 
+            end-of-file. The default is ``b&quot;&quot;``, which means that the child will receive 
+            an empty stdin. If you want the child to instead read from the parent's 
+            stdin, use ``stdin=None``. 
+ 
+            **Output:** By default, any output produced by the subprocess is 
+            passed through to the standard output and error streams of the 
+            parent Trio process. 
+ 
+            When calling `run_process` directly, you can capture the subprocess's output by 
+            passing ``capture_stdout=True`` to capture the subprocess's standard output, and/or 
+            ``capture_stderr=True`` to capture its standard error. Captured data is collected up 
+            by Trio into an in-memory buffer, and then provided as the 
+            :attr:`~subprocess.CompletedProcess.stdout` and/or 
+            :attr:`~subprocess.CompletedProcess.stderr` attributes of the returned 
+            :class:`~subprocess.CompletedProcess` object. The value for any stream that was not 
+            captured will be ``None``. 
+ 
+            If you want to capture both stdout and stderr while keeping them 
+            separate, pass ``capture_stdout=True, capture_stderr=True``. 
+ 
+            If you want to capture both stdout and stderr but mixed together 
+            in the order they were printed, use: ``capture_stdout=True, stderr=subprocess.STDOUT``. 
+            This directs the child's stderr into its stdout, so the combined 
+            output will be available in the `~subprocess.CompletedProcess.stdout` 
+            attribute. 
+ 
+            If you're using ``await nursery.start(trio.run_process, ...)`` and want to capture 
+            the subprocess's output for further processing, then use ``stdout=subprocess.PIPE`` 
+            and then make sure to read the data out of the `Process.stdout` stream. If you want 
+            to capture stderr separately, use ``stderr=subprocess.PIPE``. If you want to capture 
+            both, but mixed together in the correct order, use ``stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT``. 
+ 
+            **Error checking:** If the subprocess exits with a nonzero status 
+            code, indicating failure, :func:`run_process` raises a 
+            :exc:`subprocess.CalledProcessError` exception rather than 
+            returning normally. The captured outputs are still available as 
+            the :attr:`~subprocess.CalledProcessError.stdout` and 
+            :attr:`~subprocess.CalledProcessError.stderr` attributes of that 
+            exception.  To disable this behavior, so that :func:`run_process` 
+            returns normally even if the subprocess exits abnormally, pass ``check=False``. 
+ 
+            Note that this can make the ``capture_stdout`` and ``capture_stderr`` 
+            arguments useful even when starting `run_process` as a task: if you only 
+            care about the output if the process fails, then you can enable capturing 
+            and then read the output off of the `~subprocess.CalledProcessError`. 
+ 
+            **Cancellation:** If cancelled, `run_process` sends a termination 
+            request to the subprocess, then waits for it to fully exit. The 
+            ``deliver_cancel`` argument lets you control how the process is terminated. 
+ 
+            .. note:: `run_process` is intentionally similar to the standard library 
+               `subprocess.run`, but some of the defaults are different. Specifically, we 
+               default to: 
+ 
+               - ``check=True``, because `&quot;errors should never pass silently / unless 
+                 explicitly silenced&quot; &lt;https://www.python.org/dev/peps/pep-0020/&gt;`__. 
+ 
+               - ``stdin=b&quot;&quot;``, because it produces less-confusing results if a subprocess 
+                 unexpectedly tries to read from stdin. 
+ 
+               To get the `subprocess.run` semantics, use ``check=False, stdin=None``. 
+ 
+            Args: 
+              command (list or str): The command to run. Typically this is a 
+                  sequence of strings such as ``['ls', '-l', 'directory with spaces']``, 
+                  where the first element names the executable to invoke and the other 
+                  elements specify its arguments. With ``shell=True`` in the 
+                  ``**options``, or on Windows, ``command`` may alternatively 
+                  be a string, which will be parsed following platform-dependent 
+                  :ref:`quoting rules &lt;subprocess-quoting&gt;`. 
+ 
+              stdin (:obj:`bytes`, subprocess.PIPE, file descriptor, or None): The 
+                  bytes to provide to the subprocess on its standard input stream, or 
+                  ``None`` if the subprocess's standard input should come from the 
+                  same place as the parent Trio process's standard input. As is the 
+                  case with the :mod:`subprocess` module, you can also pass a file 
+                  descriptor or an object with a ``fileno()`` method, in which case 
+                  the subprocess's standard input will come from that file. 
+ 
+                  When starting `run_process` as a background task, you can also use 
+                  ``stdin=subprocess.PIPE``, in which case `Process.stdin` will be a 
+                  `~trio.abc.SendStream` that you can use to send data to the child. 
+ 
+              capture_stdout (bool): If true, capture the bytes that the subprocess 
+                  writes to its standard output stream and return them in the 
+                  `~subprocess.CompletedProcess.stdout` attribute of the returned 
+                  `subprocess.CompletedProcess` or `subprocess.CalledProcessError`. 
+ 
+              capture_stderr (bool): If true, capture the bytes that the subprocess 
+                  writes to its standard error stream and return them in the 
+                  `~subprocess.CompletedProcess.stderr` attribute of the returned 
+                  `~subprocess.CompletedProcess` or `subprocess.CalledProcessError`. 
+ 
+              check (bool): If false, don't validate that the subprocess exits 
+                  successfully. You should be sure to check the 
+                  ``returncode`` attribute of the returned object if you pass 
+                  ``check=False``, so that errors don't pass silently. 
+ 
+              deliver_cancel (async function or None): If `run_process` is cancelled, 
+                  then it needs to kill the child process. There are multiple ways to 
+                  do this, so we let you customize it. 
+ 
+                  If you pass None (the default), then the behavior depends on the 
+                  platform: 
+ 
+                  - On Windows, Trio calls ``TerminateProcess``, which should kill the 
+                    process immediately. 
+ 
+                  - On Unix-likes, the default behavior is to send a ``SIGTERM``, wait 
+                    5 seconds, and send a ``SIGKILL``. 
+ 
+                  Alternatively, you can customize this behavior by passing in an 
+                  arbitrary async function, which will be called with the `Process` 
+                  object as an argument. For example, the default Unix behavior could 
+                  be implemented like this:: 
+ 
+                     async def my_deliver_cancel(process): 
+                         process.send_signal(signal.SIGTERM) 
+                         await trio.sleep(5) 
+                         process.send_signal(signal.SIGKILL) 
+ 
+                  When the process actually exits, the ``deliver_cancel`` function 
+                  will automatically be cancelled – so if the process exits after 
+                  ``SIGTERM``, then we'll never reach the ``SIGKILL``. 
+ 
+                  In any case, `run_process` will always wait for the child process to 
+                  exit before raising `Cancelled`. 
+ 
+              **options: :func:`run_process` also accepts any :ref:`general subprocess 
+                  options &lt;subprocess-options&gt;` and passes them on to the 
+                  :class:`~trio.Process` constructor. This includes the 
+                  ``stdout`` and ``stderr`` options, which provide additional 
+                  redirection possibilities such as ``stderr=subprocess.STDOUT``, 
+                  ``stdout=subprocess.DEVNULL``, or file descriptors. 
+ 
+            Returns: 
+ 
+              When called normally – a `subprocess.CompletedProcess` instance 
+              describing the return code and outputs. 
+ 
+              When called via `Nursery.start` – a `trio.Process` instance. 
+ 
+            Raises: 
+              UnicodeError: if ``stdin`` is specified as a Unicode string, rather 
+                  than bytes 
+              ValueError: if multiple redirections are specified for the same 
+                  stream, e.g., both ``capture_stdout=True`` and 
+                  ``stdout=subprocess.DEVNULL`` 
+              subprocess.CalledProcessError: if ``check=False`` is not passed 
+                  and the process exits with a nonzero exit status 
+              OSError: if an error is encountered starting or communicating with 
+                  the process 
+ 
+            .. note:: The child process runs in the same process group as the parent 
+               Trio process, so a Ctrl+C will be delivered simultaneously to both 
+               parent and child. If you don't want this behavior, consult your 
+               platform's documentation for starting child processes in a different 
+               process group. 
+ 
+            &quot;&quot;&quot;</span>
+            <span class="s2">...</span>
+
+    <span class="s0">else</span><span class="s2">:  </span><span class="s3"># Unix</span>
+        <span class="s3"># pyright doesn't give any error about overloads missing docstrings as they're</span>
+        <span class="s3"># overloads. But might still be a problem for other static analyzers / docstring</span>
+        <span class="s3"># readers (?)</span>
+
+        <span class="s0">class </span><span class="s1">UnixProcessArgs3_9</span><span class="s2">(</span><span class="s1">GeneralProcessArgs</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+            <span class="s6">&quot;&quot;&quot;Arguments shared between all Unix runs.&quot;&quot;&quot;</span>
+
+            <span class="s1">preexec_fn</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">object</span><span class="s2">] | </span><span class="s0">None</span>
+            <span class="s1">restore_signals</span><span class="s2">: </span><span class="s1">bool</span>
+            <span class="s1">start_new_session</span><span class="s2">: </span><span class="s1">bool</span>
+            <span class="s1">pass_fds</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]</span>
+
+            <span class="s3"># 3.9+</span>
+            <span class="s1">group</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span>
+            <span class="s1">extra_groups</span><span class="s2">: </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s1">int</span><span class="s2">] | </span><span class="s0">None</span>
+            <span class="s1">user</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span>
+            <span class="s1">umask</span><span class="s2">: </span><span class="s1">int</span>
+
+        <span class="s0">class </span><span class="s1">UnixProcessArgs3_10</span><span class="s2">(</span><span class="s1">UnixProcessArgs3_9</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+            <span class="s6">&quot;&quot;&quot;Arguments shared between all Unix runs on 3.10+.&quot;&quot;&quot;</span>
+
+            <span class="s1">pipesize</span><span class="s2">: </span><span class="s1">int</span>
+
+        <span class="s0">class </span><span class="s1">UnixProcessArgs3_11</span><span class="s2">(</span><span class="s1">UnixProcessArgs3_10</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+            <span class="s6">&quot;&quot;&quot;Arguments shared between all Unix runs on 3.11+.&quot;&quot;&quot;</span>
+
+            <span class="s1">process_group</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span>
+
+        <span class="s0">class </span><span class="s1">UnixRunProcessMixin</span><span class="s2">(</span><span class="s1">TypedDict</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+            <span class="s6">&quot;&quot;&quot;Arguments unique to run_process on Unix.&quot;&quot;&quot;</span>
+
+            <span class="s1">task_status</span><span class="s2">: </span><span class="s1">TaskStatus</span><span class="s2">[</span><span class="s1">Process</span><span class="s2">]</span>
+            <span class="s1">capture_stdout</span><span class="s2">: </span><span class="s1">bool</span>
+            <span class="s1">capture_stderr</span><span class="s2">: </span><span class="s1">bool</span>
+            <span class="s1">check</span><span class="s2">: </span><span class="s1">bool</span>
+            <span class="s1">deliver_cancel</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Process</span><span class="s2">], </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]] | </span><span class="s0">None</span>
+
+        <span class="s3"># TODO: once https://github.com/python/mypy/issues/18692 is</span>
+        <span class="s3">#       fixed, move the `UnixRunProcessArgs` definition down.</span>
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&gt;= (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">11</span><span class="s2">):</span>
+            <span class="s1">UnixProcessArgs </span><span class="s2">= </span><span class="s1">UnixProcessArgs3_11</span>
+
+            <span class="s0">class </span><span class="s1">UnixRunProcessArgs</span><span class="s2">(</span><span class="s1">UnixProcessArgs3_11</span><span class="s2">, </span><span class="s1">UnixRunProcessMixin</span><span class="s2">):</span>
+                <span class="s6">&quot;&quot;&quot;Arguments for run_process on Unix with 3.11+&quot;&quot;&quot;</span>
+
+        <span class="s0">elif </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&gt;= (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">10</span><span class="s2">):</span>
+            <span class="s1">UnixProcessArgs </span><span class="s2">= </span><span class="s1">UnixProcessArgs3_10</span>
+
+            <span class="s0">class </span><span class="s1">UnixRunProcessArgs</span><span class="s2">(</span><span class="s1">UnixProcessArgs3_10</span><span class="s2">, </span><span class="s1">UnixRunProcessMixin</span><span class="s2">):</span>
+                <span class="s6">&quot;&quot;&quot;Arguments for run_process on Unix with 3.10+&quot;&quot;&quot;</span>
+
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">UnixProcessArgs </span><span class="s2">= </span><span class="s1">UnixProcessArgs3_9</span>
+
+            <span class="s0">class </span><span class="s1">UnixRunProcessArgs</span><span class="s2">(</span><span class="s1">UnixProcessArgs3_9</span><span class="s2">, </span><span class="s1">UnixRunProcessMixin</span><span class="s2">):</span>
+                <span class="s6">&quot;&quot;&quot;Arguments for run_process on Unix with 3.9+&quot;&quot;&quot;</span>
+
+        <span class="s2">@</span><span class="s1">overload  </span><span class="s3"># type: ignore[no-overload-impl]</span>
+        <span class="s0">async def </span><span class="s1">open_process</span><span class="s2">(</span>
+            <span class="s1">command</span><span class="s2">: </span><span class="s1">StrOrBytesPath</span><span class="s2">,</span>
+            <span class="s2">*,</span>
+            <span class="s1">stdin</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s1">shell</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s0">True</span><span class="s2">],</span>
+            <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">UnixProcessArgs</span><span class="s2">],</span>
+        <span class="s2">) </span><span class="s1">-&gt; trio</span><span class="s2">.</span><span class="s1">Process</span><span class="s2">: ...</span>
+
+        <span class="s2">@</span><span class="s1">overload</span>
+        <span class="s0">async def </span><span class="s1">open_process</span><span class="s2">(</span>
+            <span class="s1">command</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">],</span>
+            <span class="s2">*,</span>
+            <span class="s1">stdin</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s1">shell</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+            <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">UnixProcessArgs</span><span class="s2">],</span>
+        <span class="s2">) </span><span class="s1">-&gt; trio</span><span class="s2">.</span><span class="s1">Process</span><span class="s2">: ...</span>
+
+        <span class="s2">@</span><span class="s1">overload  </span><span class="s3"># type: ignore[no-overload-impl]</span>
+        <span class="s0">async def </span><span class="s1">run_process</span><span class="s2">(</span>
+            <span class="s1">command</span><span class="s2">: </span><span class="s1">StrOrBytesPath</span><span class="s2">,</span>
+            <span class="s2">*,</span>
+            <span class="s1">stdin</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray </span><span class="s2">| </span><span class="s1">memoryview </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s1">shell</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s0">True</span><span class="s2">],</span>
+            <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">UnixRunProcessArgs</span><span class="s2">],</span>
+        <span class="s2">) </span><span class="s1">-&gt; subprocess</span><span class="s2">.</span><span class="s1">CompletedProcess</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]: ...</span>
+
+        <span class="s2">@</span><span class="s1">overload</span>
+        <span class="s0">async def </span><span class="s1">run_process</span><span class="s2">(</span>
+            <span class="s1">command</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">StrOrBytesPath</span><span class="s2">],</span>
+            <span class="s2">*,</span>
+            <span class="s1">stdin</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">bytearray </span><span class="s2">| </span><span class="s1">memoryview </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s1">HasFileno </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+            <span class="s1">shell</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+            <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Unpack</span><span class="s2">[</span><span class="s1">UnixRunProcessArgs</span><span class="s2">],</span>
+        <span class="s2">) </span><span class="s1">-&gt; subprocess</span><span class="s2">.</span><span class="s1">CompletedProcess</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]: ...</span>
+
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s3"># At runtime, use the actual implementations.</span>
+    <span class="s1">open_process </span><span class="s2">= </span><span class="s1">_open_process</span>
+    <span class="s1">open_process</span><span class="s2">.</span><span class="s1">__name__ </span><span class="s2">= </span><span class="s1">open_process</span><span class="s2">.</span><span class="s1">__qualname__ </span><span class="s2">= </span><span class="s4">&quot;open_process&quot;</span>
+
+    <span class="s1">run_process </span><span class="s2">= </span><span class="s1">_run_process</span>
+    <span class="s1">run_process</span><span class="s2">.</span><span class="s1">__name__ </span><span class="s2">= </span><span class="s1">run_process</span><span class="s2">.</span><span class="s1">__qualname__ </span><span class="s2">= </span><span class="s4">&quot;run_process&quot;</span>
+</pre>
+</body>
+</html>

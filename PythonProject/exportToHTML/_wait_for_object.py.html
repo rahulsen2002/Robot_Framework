@@ -1,0 +1,89 @@
+<html>
+<head>
+<title>_wait_for_object.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_wait_for_object.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">math</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_windows_cffi </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">CData</span><span class="s2">,</span>
+    <span class="s1">ErrorCodes</span><span class="s2">,</span>
+    <span class="s1">_handle</span><span class="s2">,</span>
+    <span class="s1">ffi</span><span class="s2">,</span>
+    <span class="s1">handle_array</span><span class="s2">,</span>
+    <span class="s1">kernel32</span><span class="s2">,</span>
+    <span class="s1">raise_winerror</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">WaitForSingleObject</span><span class="s2">(</span><span class="s1">obj</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot;Async and cancellable variant of WaitForSingleObject. Windows only. 
+ 
+    Args: 
+      handle: A Win32 handle, as a Python integer. 
+ 
+    Raises: 
+      OSError: If the handle is invalid, e.g. when it is already closed. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># Allow ints or whatever we can convert to a win handle</span>
+    <span class="s1">handle </span><span class="s2">= </span><span class="s1">_handle</span><span class="s2">(</span><span class="s1">obj</span><span class="s2">)</span>
+
+    <span class="s4"># Quick check; we might not even need to spawn a thread. The zero</span>
+    <span class="s4"># means a zero timeout; this call never blocks. We also exit here</span>
+    <span class="s4"># if the handle is already closed for some reason.</span>
+    <span class="s1">retcode </span><span class="s2">= </span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">WaitForSingleObject</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s5">0</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">retcode </span><span class="s2">== </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">WAIT_FAILED</span><span class="s2">:</span>
+        <span class="s1">raise_winerror</span><span class="s2">()</span>
+    <span class="s0">elif </span><span class="s1">retcode </span><span class="s2">!= </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">WAIT_TIMEOUT</span><span class="s2">:</span>
+        <span class="s0">return</span>
+
+    <span class="s4"># Wait for a thread that waits for two handles: the handle plus a handle</span>
+    <span class="s4"># that we can use to cancel the thread.</span>
+    <span class="s1">cancel_handle </span><span class="s2">= </span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CreateEventA</span><span class="s2">(</span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">, </span><span class="s0">True</span><span class="s2">, </span><span class="s0">False</span><span class="s2">, </span><span class="s1">ffi</span><span class="s2">.</span><span class="s1">NULL</span><span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span>
+            <span class="s1">WaitForMultipleObjects_sync</span><span class="s2">,</span>
+            <span class="s1">handle</span><span class="s2">,</span>
+            <span class="s1">cancel_handle</span><span class="s2">,</span>
+            <span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+            <span class="s1">limiter</span><span class="s2">=</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">CapacityLimiter</span><span class="s2">(</span><span class="s1">math</span><span class="s2">.</span><span class="s1">inf</span><span class="s2">),</span>
+        <span class="s2">)</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s4"># Clean up our cancel handle. In case we get here because this task was</span>
+        <span class="s4"># cancelled, we also want to set the cancel_handle to stop the thread.</span>
+        <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">SetEvent</span><span class="s2">(</span><span class="s1">cancel_handle</span><span class="s2">)</span>
+        <span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CloseHandle</span><span class="s2">(</span><span class="s1">cancel_handle</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">WaitForMultipleObjects_sync</span><span class="s2">(*</span><span class="s1">handles</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">CData</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot;Wait for any of the given Windows handles to be signaled.&quot;&quot;&quot;</span>
+    <span class="s1">n </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">handles</span><span class="s2">)</span>
+    <span class="s1">handle_arr </span><span class="s2">= </span><span class="s1">handle_array</span><span class="s2">(</span><span class="s1">n</span><span class="s2">)</span>
+    <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">n</span><span class="s2">):</span>
+        <span class="s1">handle_arr</span><span class="s2">[</span><span class="s1">i</span><span class="s2">] = </span><span class="s1">handles</span><span class="s2">[</span><span class="s1">i</span><span class="s2">]</span>
+    <span class="s1">timeout </span><span class="s2">= </span><span class="s5">0xFFFFFFFF  </span><span class="s4"># INFINITE</span>
+    <span class="s1">retcode </span><span class="s2">= </span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">WaitForMultipleObjects</span><span class="s2">(</span><span class="s1">n</span><span class="s2">, </span><span class="s1">handle_arr</span><span class="s2">, </span><span class="s0">False</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">)  </span><span class="s4"># blocking</span>
+    <span class="s0">if </span><span class="s1">retcode </span><span class="s2">== </span><span class="s1">ErrorCodes</span><span class="s2">.</span><span class="s1">WAIT_FAILED</span><span class="s2">:</span>
+        <span class="s1">raise_winerror</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

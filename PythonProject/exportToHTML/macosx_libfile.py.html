@@ -1,0 +1,505 @@
+<html>
+<head>
+<title>macosx_libfile.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+macosx_libfile.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+This module contains function to analyse dynamic library 
+headers to extract system information 
+ 
+Currently only for MacOSX 
+ 
+Library file on macosx system starts with Mach-O or Fat field. 
+This can be distinguish by first 32 bites and it is called magic number. 
+Proper value of magic number is with suffix _MAGIC. Suffix _CIGAM means 
+reversed bytes order. 
+Both fields can occur in two types: 32 and 64 bytes. 
+ 
+FAT field inform that this library contains few version of library 
+(typically for different types version). It contains 
+information where Mach-O headers starts. 
+ 
+Each section started with Mach-O header contains one library 
+(So if file starts with this field it contains only one version). 
+ 
+After filed Mach-O there are section fields. 
+Each of them starts with two fields: 
+cmd - magic number for this command 
+cmdsize - total size occupied by this section information. 
+ 
+In this case only sections LC_VERSION_MIN_MACOSX (for macosx 10.13 and earlier) 
+and LC_BUILD_VERSION (for macosx 10.14 and newer) are interesting, 
+because them contains information about minimal system version. 
+ 
+Important remarks: 
+- For fat files this implementation looks for maximum number version. 
+  It not check if it is 32 or 64 and do not compare it with currently built package. 
+  So it is possible to false report higher version that needed. 
+- All structures signatures are taken form macosx header files. 
+- I think that binary format will be more stable than `otool` output. 
+  and if apple introduce some changes both implementation will need to be updated. 
+- The system compile will set the deployment target no lower than 
+  11.0 for arm64 builds. For &quot;Universal 2&quot; builds use the x86_64 deployment 
+  target when the arm64 target is 11.0. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">ctypes</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">io </span><span class="s2">import </span><span class="s1">BufferedIOBase</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Union</span>
+
+    <span class="s1">StrPath </span><span class="s3">= </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]</span>
+
+<span class="s4">&quot;&quot;&quot;here the needed const and struct from mach-o header files&quot;&quot;&quot;</span>
+
+<span class="s1">FAT_MAGIC </span><span class="s3">= </span><span class="s5">0xCAFEBABE</span>
+<span class="s1">FAT_CIGAM </span><span class="s3">= </span><span class="s5">0xBEBAFECA</span>
+<span class="s1">FAT_MAGIC_64 </span><span class="s3">= </span><span class="s5">0xCAFEBABF</span>
+<span class="s1">FAT_CIGAM_64 </span><span class="s3">= </span><span class="s5">0xBFBAFECA</span>
+<span class="s1">MH_MAGIC </span><span class="s3">= </span><span class="s5">0xFEEDFACE</span>
+<span class="s1">MH_CIGAM </span><span class="s3">= </span><span class="s5">0xCEFAEDFE</span>
+<span class="s1">MH_MAGIC_64 </span><span class="s3">= </span><span class="s5">0xFEEDFACF</span>
+<span class="s1">MH_CIGAM_64 </span><span class="s3">= </span><span class="s5">0xCFFAEDFE</span>
+
+<span class="s1">LC_VERSION_MIN_MACOSX </span><span class="s3">= </span><span class="s5">0x24</span>
+<span class="s1">LC_BUILD_VERSION </span><span class="s3">= </span><span class="s5">0x32</span>
+
+<span class="s1">CPU_TYPE_ARM64 </span><span class="s3">= </span><span class="s5">0x0100000C</span>
+
+<span class="s1">mach_header_fields </span><span class="s3">= [</span>
+    <span class="s3">(</span><span class="s4">&quot;magic&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;cputype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;cpusubtype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;filetype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;ncmds&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;sizeofcmds&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;flags&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct mach_header { 
+    uint32_t    magic;      /* mach magic number identifier */ 
+    cpu_type_t  cputype;    /* cpu specifier */ 
+    cpu_subtype_t   cpusubtype; /* machine specifier */ 
+    uint32_t    filetype;   /* type of file */ 
+    uint32_t    ncmds;      /* number of load commands */ 
+    uint32_t    sizeofcmds; /* the size of all the load commands */ 
+    uint32_t    flags;      /* flags */ 
+}; 
+typedef integer_t cpu_type_t; 
+typedef integer_t cpu_subtype_t; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">mach_header_fields_64 </span><span class="s3">= </span><span class="s1">mach_header_fields </span><span class="s3">+ [(</span><span class="s4">&quot;reserved&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">)]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct mach_header_64 { 
+    uint32_t    magic;      /* mach magic number identifier */ 
+    cpu_type_t  cputype;    /* cpu specifier */ 
+    cpu_subtype_t   cpusubtype; /* machine specifier */ 
+    uint32_t    filetype;   /* type of file */ 
+    uint32_t    ncmds;      /* number of load commands */ 
+    uint32_t    sizeofcmds; /* the size of all the load commands */ 
+    uint32_t    flags;      /* flags */ 
+    uint32_t    reserved;   /* reserved */ 
+}; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">fat_header_fields </span><span class="s3">= [(</span><span class="s4">&quot;magic&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">), (</span><span class="s4">&quot;nfat_arch&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">)]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct fat_header { 
+    uint32_t    magic;      /* FAT_MAGIC or FAT_MAGIC_64 */ 
+    uint32_t    nfat_arch;  /* number of structs that follow */ 
+}; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">fat_arch_fields </span><span class="s3">= [</span>
+    <span class="s3">(</span><span class="s4">&quot;cputype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;cpusubtype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;offset&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;size&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;align&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct fat_arch { 
+    cpu_type_t  cputype;    /* cpu specifier (int) */ 
+    cpu_subtype_t   cpusubtype; /* machine specifier (int) */ 
+    uint32_t    offset;     /* file offset to this object file */ 
+    uint32_t    size;       /* size of this object file */ 
+    uint32_t    align;      /* alignment as a power of 2 */ 
+}; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">fat_arch_64_fields </span><span class="s3">= [</span>
+    <span class="s3">(</span><span class="s4">&quot;cputype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;cpusubtype&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;offset&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint64</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;size&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint64</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;align&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;reserved&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct fat_arch_64 { 
+    cpu_type_t  cputype;    /* cpu specifier (int) */ 
+    cpu_subtype_t   cpusubtype; /* machine specifier (int) */ 
+    uint64_t    offset;     /* file offset to this object file */ 
+    uint64_t    size;       /* size of this object file */ 
+    uint32_t    align;      /* alignment as a power of 2 */ 
+    uint32_t    reserved;   /* reserved */ 
+}; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">segment_base_fields </span><span class="s3">= [(</span><span class="s4">&quot;cmd&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">), (</span><span class="s4">&quot;cmdsize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">)]</span>
+<span class="s4">&quot;&quot;&quot;base for reading segment info&quot;&quot;&quot;</span>
+
+<span class="s1">segment_command_fields </span><span class="s3">= [</span>
+    <span class="s3">(</span><span class="s4">&quot;cmd&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;cmdsize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;segname&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_char </span><span class="s3">* </span><span class="s5">16</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;vmaddr&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;vmsize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;fileoff&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;filesize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;maxprot&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;initprot&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;nsects&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;flags&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct segment_command { /* for 32-bit architectures */ 
+    uint32_t    cmd;        /* LC_SEGMENT */ 
+    uint32_t    cmdsize;    /* includes sizeof section structs */ 
+    char        segname[16];    /* segment name */ 
+    uint32_t    vmaddr;     /* memory address of this segment */ 
+    uint32_t    vmsize;     /* memory size of this segment */ 
+    uint32_t    fileoff;    /* file offset of this segment */ 
+    uint32_t    filesize;   /* amount to map from the file */ 
+    vm_prot_t   maxprot;    /* maximum VM protection */ 
+    vm_prot_t   initprot;   /* initial VM protection */ 
+    uint32_t    nsects;     /* number of sections in segment */ 
+    uint32_t    flags;      /* flags */ 
+}; 
+typedef int vm_prot_t; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">segment_command_fields_64 </span><span class="s3">= [</span>
+    <span class="s3">(</span><span class="s4">&quot;cmd&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;cmdsize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;segname&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_char </span><span class="s3">* </span><span class="s5">16</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;vmaddr&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint64</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;vmsize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint64</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;fileoff&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint64</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;filesize&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint64</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;maxprot&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;initprot&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_int</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;nsects&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;flags&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct segment_command_64 { /* for 64-bit architectures */ 
+    uint32_t    cmd;        /* LC_SEGMENT_64 */ 
+    uint32_t    cmdsize;    /* includes sizeof section_64 structs */ 
+    char        segname[16];    /* segment name */ 
+    uint64_t    vmaddr;     /* memory address of this segment */ 
+    uint64_t    vmsize;     /* memory size of this segment */ 
+    uint64_t    fileoff;    /* file offset of this segment */ 
+    uint64_t    filesize;   /* amount to map from the file */ 
+    vm_prot_t   maxprot;    /* maximum VM protection */ 
+    vm_prot_t   initprot;   /* initial VM protection */ 
+    uint32_t    nsects;     /* number of sections in segment */ 
+    uint32_t    flags;      /* flags */ 
+}; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">version_min_command_fields </span><span class="s3">= </span><span class="s1">segment_base_fields </span><span class="s3">+ [</span>
+    <span class="s3">(</span><span class="s4">&quot;version&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;sdk&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct version_min_command { 
+    uint32_t    cmd;        /* LC_VERSION_MIN_MACOSX or 
+                               LC_VERSION_MIN_IPHONEOS or 
+                               LC_VERSION_MIN_WATCHOS or 
+                               LC_VERSION_MIN_TVOS */ 
+    uint32_t    cmdsize;    /* sizeof(struct min_version_command) */ 
+    uint32_t    version;    /* X.Y.Z is encoded in nibbles xxxx.yy.zz */ 
+    uint32_t    sdk;        /* X.Y.Z is encoded in nibbles xxxx.yy.zz */ 
+}; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">build_version_command_fields </span><span class="s3">= </span><span class="s1">segment_base_fields </span><span class="s3">+ [</span>
+    <span class="s3">(</span><span class="s4">&quot;platform&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;minos&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;sdk&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">&quot;ntools&quot;</span><span class="s3">, </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">),</span>
+<span class="s3">]</span>
+<span class="s4">&quot;&quot;&quot; 
+struct build_version_command { 
+    uint32_t    cmd;        /* LC_BUILD_VERSION */ 
+    uint32_t    cmdsize;    /* sizeof(struct build_version_command) plus */ 
+                                /* ntools * sizeof(struct build_tool_version) */ 
+    uint32_t    platform;   /* platform */ 
+    uint32_t    minos;      /* X.Y.Z is encoded in nibbles xxxx.yy.zz */ 
+    uint32_t    sdk;        /* X.Y.Z is encoded in nibbles xxxx.yy.zz */ 
+    uint32_t    ntools;     /* number of tool entries following this */ 
+}; 
+&quot;&quot;&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">swap32</span><span class="s3">(</span><span class="s1">x</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s3">(</span>
+        <span class="s3">((</span><span class="s1">x </span><span class="s3">&lt;&lt; </span><span class="s5">24</span><span class="s3">) &amp; </span><span class="s5">0xFF000000</span><span class="s3">)</span>
+        <span class="s3">| ((</span><span class="s1">x </span><span class="s3">&lt;&lt; </span><span class="s5">8</span><span class="s3">) &amp; </span><span class="s5">0x00FF0000</span><span class="s3">)</span>
+        <span class="s3">| ((</span><span class="s1">x </span><span class="s3">&gt;&gt; </span><span class="s5">8</span><span class="s3">) &amp; </span><span class="s5">0x0000FF00</span><span class="s3">)</span>
+        <span class="s3">| ((</span><span class="s1">x </span><span class="s3">&gt;&gt; </span><span class="s5">24</span><span class="s3">) &amp; </span><span class="s5">0x000000FF</span><span class="s3">)</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_base_class_and_magic_number</span><span class="s3">(</span>
+    <span class="s1">lib_file</span><span class="s3">: </span><span class="s1">BufferedIOBase</span><span class="s3">,</span>
+    <span class="s1">seek</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">type</span><span class="s3">[</span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">Structure</span><span class="s3">], </span><span class="s1">int</span><span class="s3">]:</span>
+    <span class="s2">if </span><span class="s1">seek </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">seek </span><span class="s3">= </span><span class="s1">lib_file</span><span class="s3">.</span><span class="s1">tell</span><span class="s3">()</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">lib_file</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">seek</span><span class="s3">)</span>
+    <span class="s1">magic_number </span><span class="s3">= </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">.</span><span class="s1">from_buffer_copy</span><span class="s3">(</span>
+        <span class="s1">lib_file</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">sizeof</span><span class="s3">(</span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">c_uint32</span><span class="s3">))</span>
+    <span class="s3">).</span><span class="s1">value</span>
+
+    <span class="s6"># Handle wrong byte order</span>
+    <span class="s2">if </span><span class="s1">magic_number </span><span class="s2">in </span><span class="s3">[</span><span class="s1">FAT_CIGAM</span><span class="s3">, </span><span class="s1">FAT_CIGAM_64</span><span class="s3">, </span><span class="s1">MH_CIGAM</span><span class="s3">, </span><span class="s1">MH_CIGAM_64</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">byteorder </span><span class="s3">== </span><span class="s4">&quot;little&quot;</span><span class="s3">:</span>
+            <span class="s1">BaseClass </span><span class="s3">= </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">BigEndianStructure</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">BaseClass </span><span class="s3">= </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">LittleEndianStructure</span>
+
+        <span class="s1">magic_number </span><span class="s3">= </span><span class="s1">swap32</span><span class="s3">(</span><span class="s1">magic_number</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">BaseClass </span><span class="s3">= </span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">Structure</span>
+
+    <span class="s1">lib_file</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">seek</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">BaseClass</span><span class="s3">, </span><span class="s1">magic_number</span>
+
+
+<span class="s2">def </span><span class="s1">read_data</span><span class="s3">(</span><span class="s1">struct_class</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">Structure</span><span class="s3">], </span><span class="s1">lib_file</span><span class="s3">: </span><span class="s1">BufferedIOBase</span><span class="s3">):</span>
+    <span class="s2">return </span><span class="s1">struct_class</span><span class="s3">.</span><span class="s1">from_buffer_copy</span><span class="s3">(</span><span class="s1">lib_file</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">ctypes</span><span class="s3">.</span><span class="s1">sizeof</span><span class="s3">(</span><span class="s1">struct_class</span><span class="s3">)))</span>
+
+
+<span class="s2">def </span><span class="s1">extract_macosx_min_system_version</span><span class="s3">(</span><span class="s1">path_to_lib</span><span class="s3">: </span><span class="s1">str</span><span class="s3">):</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">path_to_lib</span><span class="s3">, </span><span class="s4">&quot;rb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">lib_file</span><span class="s3">:</span>
+        <span class="s1">BaseClass</span><span class="s3">, </span><span class="s1">magic_number </span><span class="s3">= </span><span class="s1">get_base_class_and_magic_number</span><span class="s3">(</span><span class="s1">lib_file</span><span class="s3">, </span><span class="s5">0</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">magic_number </span><span class="s2">not in </span><span class="s3">[</span><span class="s1">FAT_MAGIC</span><span class="s3">, </span><span class="s1">FAT_MAGIC_64</span><span class="s3">, </span><span class="s1">MH_MAGIC</span><span class="s3">, </span><span class="s1">MH_MAGIC_64</span><span class="s3">]:</span>
+            <span class="s2">return</span>
+
+        <span class="s2">if </span><span class="s1">magic_number </span><span class="s2">in </span><span class="s3">[</span><span class="s1">FAT_MAGIC</span><span class="s3">, </span><span class="s1">FAT_CIGAM_64</span><span class="s3">]:</span>
+
+            <span class="s2">class </span><span class="s1">FatHeader</span><span class="s3">(</span><span class="s1">BaseClass</span><span class="s3">):</span>
+                <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">fat_header_fields</span>
+
+            <span class="s1">fat_header </span><span class="s3">= </span><span class="s1">read_data</span><span class="s3">(</span><span class="s1">FatHeader</span><span class="s3">, </span><span class="s1">lib_file</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">magic_number </span><span class="s3">== </span><span class="s1">FAT_MAGIC</span><span class="s3">:</span>
+
+                <span class="s2">class </span><span class="s1">FatArch</span><span class="s3">(</span><span class="s1">BaseClass</span><span class="s3">):</span>
+                    <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">fat_arch_fields</span>
+
+            <span class="s2">else</span><span class="s3">:</span>
+
+                <span class="s2">class </span><span class="s1">FatArch</span><span class="s3">(</span><span class="s1">BaseClass</span><span class="s3">):</span>
+                    <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">fat_arch_64_fields</span>
+
+            <span class="s1">fat_arch_list </span><span class="s3">= [</span>
+                <span class="s1">read_data</span><span class="s3">(</span><span class="s1">FatArch</span><span class="s3">, </span><span class="s1">lib_file</span><span class="s3">) </span><span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">fat_header</span><span class="s3">.</span><span class="s1">nfat_arch</span><span class="s3">)</span>
+            <span class="s3">]</span>
+
+            <span class="s1">versions_list</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">]] = []</span>
+            <span class="s2">for </span><span class="s1">el </span><span class="s2">in </span><span class="s1">fat_arch_list</span><span class="s3">:</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">version </span><span class="s3">= </span><span class="s1">read_mach_header</span><span class="s3">(</span><span class="s1">lib_file</span><span class="s3">, </span><span class="s1">el</span><span class="s3">.</span><span class="s1">offset</span><span class="s3">)</span>
+                    <span class="s2">if </span><span class="s1">version </span><span class="s2">is not None</span><span class="s3">:</span>
+                        <span class="s2">if </span><span class="s1">el</span><span class="s3">.</span><span class="s1">cputype </span><span class="s3">== </span><span class="s1">CPU_TYPE_ARM64 </span><span class="s2">and </span><span class="s1">len</span><span class="s3">(</span><span class="s1">fat_arch_list</span><span class="s3">) != </span><span class="s5">1</span><span class="s3">:</span>
+                            <span class="s6"># Xcode will not set the deployment target below 11.0.0</span>
+                            <span class="s6"># for the arm64 architecture. Ignore the arm64 deployment</span>
+                            <span class="s6"># in fat binaries when the target is 11.0.0, that way</span>
+                            <span class="s6"># the other architectures can select a lower deployment</span>
+                            <span class="s6"># target.</span>
+                            <span class="s6"># This is safe because there is no arm64 variant for</span>
+                            <span class="s6"># macOS 10.15 or earlier.</span>
+                            <span class="s2">if </span><span class="s1">version </span><span class="s3">== (</span><span class="s5">11</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s5">0</span><span class="s3">):</span>
+                                <span class="s2">continue</span>
+                        <span class="s1">versions_list</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">version</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+                    <span class="s2">pass</span>
+
+            <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">versions_list</span><span class="s3">) &gt; </span><span class="s5">0</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">max</span><span class="s3">(</span><span class="s1">versions_list</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">read_mach_header</span><span class="s3">(</span><span class="s1">lib_file</span><span class="s3">, </span><span class="s5">0</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+                <span class="s4">&quot;&quot;&quot;when some error during read library files&quot;&quot;&quot;</span>
+                <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">read_mach_header</span><span class="s3">(</span>
+    <span class="s1">lib_file</span><span class="s3">: </span><span class="s1">BufferedIOBase</span><span class="s3">,</span>
+    <span class="s1">seek</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    This function parses a Mach-O header and extracts 
+    information about the minimal macOS version. 
+ 
+    :param lib_file: reference to opened library file with pointer 
+    &quot;&quot;&quot;</span>
+    <span class="s1">base_class</span><span class="s3">, </span><span class="s1">magic_number </span><span class="s3">= </span><span class="s1">get_base_class_and_magic_number</span><span class="s3">(</span><span class="s1">lib_file</span><span class="s3">, </span><span class="s1">seek</span><span class="s3">)</span>
+    <span class="s1">arch </span><span class="s3">= </span><span class="s4">&quot;32&quot; </span><span class="s2">if </span><span class="s1">magic_number </span><span class="s3">== </span><span class="s1">MH_MAGIC </span><span class="s2">else </span><span class="s4">&quot;64&quot;</span>
+
+    <span class="s2">class </span><span class="s1">SegmentBase</span><span class="s3">(</span><span class="s1">base_class</span><span class="s3">):</span>
+        <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">segment_base_fields</span>
+
+    <span class="s2">if </span><span class="s1">arch </span><span class="s3">== </span><span class="s4">&quot;32&quot;</span><span class="s3">:</span>
+
+        <span class="s2">class </span><span class="s1">MachHeader</span><span class="s3">(</span><span class="s1">base_class</span><span class="s3">):</span>
+            <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">mach_header_fields</span>
+
+    <span class="s2">else</span><span class="s3">:</span>
+
+        <span class="s2">class </span><span class="s1">MachHeader</span><span class="s3">(</span><span class="s1">base_class</span><span class="s3">):</span>
+            <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">mach_header_fields_64</span>
+
+    <span class="s1">mach_header </span><span class="s3">= </span><span class="s1">read_data</span><span class="s3">(</span><span class="s1">MachHeader</span><span class="s3">, </span><span class="s1">lib_file</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">_i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">mach_header</span><span class="s3">.</span><span class="s1">ncmds</span><span class="s3">):</span>
+        <span class="s1">pos </span><span class="s3">= </span><span class="s1">lib_file</span><span class="s3">.</span><span class="s1">tell</span><span class="s3">()</span>
+        <span class="s1">segment_base </span><span class="s3">= </span><span class="s1">read_data</span><span class="s3">(</span><span class="s1">SegmentBase</span><span class="s3">, </span><span class="s1">lib_file</span><span class="s3">)</span>
+        <span class="s1">lib_file</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">pos</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">segment_base</span><span class="s3">.</span><span class="s1">cmd </span><span class="s3">== </span><span class="s1">LC_VERSION_MIN_MACOSX</span><span class="s3">:</span>
+
+            <span class="s2">class </span><span class="s1">VersionMinCommand</span><span class="s3">(</span><span class="s1">base_class</span><span class="s3">):</span>
+                <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">version_min_command_fields</span>
+
+            <span class="s1">version_info </span><span class="s3">= </span><span class="s1">read_data</span><span class="s3">(</span><span class="s1">VersionMinCommand</span><span class="s3">, </span><span class="s1">lib_file</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">parse_version</span><span class="s3">(</span><span class="s1">version_info</span><span class="s3">.</span><span class="s1">version</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">segment_base</span><span class="s3">.</span><span class="s1">cmd </span><span class="s3">== </span><span class="s1">LC_BUILD_VERSION</span><span class="s3">:</span>
+
+            <span class="s2">class </span><span class="s1">VersionBuild</span><span class="s3">(</span><span class="s1">base_class</span><span class="s3">):</span>
+                <span class="s1">_fields_ </span><span class="s3">= </span><span class="s1">build_version_command_fields</span>
+
+            <span class="s1">version_info </span><span class="s3">= </span><span class="s1">read_data</span><span class="s3">(</span><span class="s1">VersionBuild</span><span class="s3">, </span><span class="s1">lib_file</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">parse_version</span><span class="s3">(</span><span class="s1">version_info</span><span class="s3">.</span><span class="s1">minos</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">lib_file</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">pos </span><span class="s3">+ </span><span class="s1">segment_base</span><span class="s3">.</span><span class="s1">cmdsize</span><span class="s3">)</span>
+            <span class="s2">continue</span>
+
+
+<span class="s2">def </span><span class="s1">parse_version</span><span class="s3">(</span><span class="s1">version</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">]:</span>
+    <span class="s1">x </span><span class="s3">= (</span><span class="s1">version </span><span class="s3">&amp; </span><span class="s5">0xFFFF0000</span><span class="s3">) &gt;&gt; </span><span class="s5">16</span>
+    <span class="s1">y </span><span class="s3">= (</span><span class="s1">version </span><span class="s3">&amp; </span><span class="s5">0x0000FF00</span><span class="s3">) &gt;&gt; </span><span class="s5">8</span>
+    <span class="s1">z </span><span class="s3">= </span><span class="s1">version </span><span class="s3">&amp; </span><span class="s5">0x000000FF</span>
+    <span class="s2">return </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">z</span>
+
+
+<span class="s2">def </span><span class="s1">calculate_macosx_platform_tag</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">, </span><span class="s1">platform_tag</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Calculate proper macosx platform tag basing on files which are included to wheel 
+ 
+    Example platform tag `macosx-10.14-x86_64` 
+    &quot;&quot;&quot;</span>
+    <span class="s1">prefix</span><span class="s3">, </span><span class="s1">base_version</span><span class="s3">, </span><span class="s1">suffix </span><span class="s3">= </span><span class="s1">platform_tag</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;-&quot;</span><span class="s3">)</span>
+    <span class="s1">base_version </span><span class="s3">= </span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">int</span><span class="s3">(</span><span class="s1">x</span><span class="s3">) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">base_version</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">))</span>
+    <span class="s1">base_version </span><span class="s3">= </span><span class="s1">base_version</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">]</span>
+    <span class="s2">if </span><span class="s1">base_version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &gt; </span><span class="s5">10</span><span class="s3">:</span>
+        <span class="s1">base_version </span><span class="s3">= (</span><span class="s1">base_version</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s5">0</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">base_version</span><span class="s3">) == </span><span class="s5">2</span>
+    <span class="s2">if </span><span class="s4">&quot;MACOSX_DEPLOYMENT_TARGET&quot; </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">:</span>
+        <span class="s1">deploy_target </span><span class="s3">= </span><span class="s1">tuple</span><span class="s3">(</span>
+            <span class="s1">int</span><span class="s3">(</span><span class="s1">x</span><span class="s3">) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">[</span><span class="s4">&quot;MACOSX_DEPLOYMENT_TARGET&quot;</span><span class="s3">].</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">)</span>
+        <span class="s3">)</span>
+        <span class="s1">deploy_target </span><span class="s3">= </span><span class="s1">deploy_target</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">deploy_target</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &gt; </span><span class="s5">10</span><span class="s3">:</span>
+            <span class="s1">deploy_target </span><span class="s3">= (</span><span class="s1">deploy_target</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s5">0</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">deploy_target </span><span class="s3">&lt; </span><span class="s1">base_version</span><span class="s3">:</span>
+            <span class="s1">sys</span><span class="s3">.</span><span class="s1">stderr</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span>
+                <span class="s4">&quot;[WARNING] MACOSX_DEPLOYMENT_TARGET is set to a lower value ({}) than &quot;</span>
+                <span class="s4">&quot;the version on which the Python interpreter was compiled ({}), and &quot;</span>
+                <span class="s4">&quot;will be ignored.</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                    <span class="s4">&quot;.&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">x</span><span class="s3">) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">deploy_target</span><span class="s3">),</span>
+                    <span class="s4">&quot;.&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">x</span><span class="s3">) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">base_version</span><span class="s3">),</span>
+                <span class="s3">)</span>
+            <span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">base_version </span><span class="s3">= </span><span class="s1">deploy_target</span>
+
+    <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">base_version</span><span class="s3">) == </span><span class="s5">2</span>
+    <span class="s1">start_version </span><span class="s3">= </span><span class="s1">base_version</span>
+    <span class="s1">versions_dict</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">]] = {}</span>
+    <span class="s2">for </span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">_dirnames</span><span class="s3">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">walk</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;.dylib&quot;</span><span class="s3">) </span><span class="s2">or </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;.so&quot;</span><span class="s3">):</span>
+                <span class="s1">lib_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">)</span>
+                <span class="s1">min_ver </span><span class="s3">= </span><span class="s1">extract_macosx_min_system_version</span><span class="s3">(</span><span class="s1">lib_path</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">min_ver </span><span class="s2">is not None</span><span class="s3">:</span>
+                    <span class="s1">min_ver </span><span class="s3">= </span><span class="s1">min_ver</span><span class="s3">[</span><span class="s5">0</span><span class="s3">:</span><span class="s5">2</span><span class="s3">]</span>
+                    <span class="s2">if </span><span class="s1">min_ver</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &gt; </span><span class="s5">10</span><span class="s3">:</span>
+                        <span class="s1">min_ver </span><span class="s3">= (</span><span class="s1">min_ver</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s5">0</span><span class="s3">)</span>
+                    <span class="s1">versions_dict</span><span class="s3">[</span><span class="s1">lib_path</span><span class="s3">] = </span><span class="s1">min_ver</span>
+
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">versions_dict</span><span class="s3">) &gt; </span><span class="s5">0</span><span class="s3">:</span>
+        <span class="s1">base_version </span><span class="s3">= </span><span class="s1">max</span><span class="s3">(</span><span class="s1">base_version</span><span class="s3">, </span><span class="s1">max</span><span class="s3">(</span><span class="s1">versions_dict</span><span class="s3">.</span><span class="s1">values</span><span class="s3">()))</span>
+
+    <span class="s6"># macosx platform tag do not support minor bugfix release</span>
+    <span class="s1">fin_base_version </span><span class="s3">= </span><span class="s4">&quot;_&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">([</span><span class="s1">str</span><span class="s3">(</span><span class="s1">x</span><span class="s3">) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">base_version</span><span class="s3">])</span>
+    <span class="s2">if </span><span class="s1">start_version </span><span class="s3">&lt; </span><span class="s1">base_version</span><span class="s3">:</span>
+        <span class="s1">problematic_files </span><span class="s3">= [</span><span class="s1">k </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">versions_dict</span><span class="s3">.</span><span class="s1">items</span><span class="s3">() </span><span class="s2">if </span><span class="s1">v </span><span class="s3">&gt; </span><span class="s1">start_version</span><span class="s3">]</span>
+        <span class="s1">problematic_files </span><span class="s3">= </span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">problematic_files</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">problematic_files</span><span class="s3">) == </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s1">files_form </span><span class="s3">= </span><span class="s4">&quot;this file&quot;</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">files_form </span><span class="s3">= </span><span class="s4">&quot;these files&quot;</span>
+        <span class="s1">error_message </span><span class="s3">= (</span>
+            <span class="s4">&quot;[WARNING] This wheel needs a higher macOS version than {}  &quot;</span>
+            <span class="s4">&quot;To silence this warning, set MACOSX_DEPLOYMENT_TARGET to at least &quot;</span>
+            <span class="s3">+ </span><span class="s1">fin_base_version</span>
+            <span class="s3">+ </span><span class="s4">&quot; or recreate &quot;</span>
+            <span class="s3">+ </span><span class="s1">files_form</span>
+            <span class="s3">+ </span><span class="s4">&quot; with lower &quot;</span>
+            <span class="s4">&quot;MACOSX_DEPLOYMENT_TARGET:  </span><span class="s2">\n</span><span class="s4">&quot; </span><span class="s3">+ </span><span class="s1">problematic_files</span>
+        <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s4">&quot;MACOSX_DEPLOYMENT_TARGET&quot; </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">:</span>
+            <span class="s1">error_message </span><span class="s3">= </span><span class="s1">error_message</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                <span class="s4">&quot;is set in MACOSX_DEPLOYMENT_TARGET variable.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">error_message </span><span class="s3">= </span><span class="s1">error_message</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                <span class="s4">&quot;the version your Python interpreter is compiled against.&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s1">sys</span><span class="s3">.</span><span class="s1">stderr</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">error_message</span><span class="s3">)</span>
+
+    <span class="s1">platform_tag </span><span class="s3">= </span><span class="s1">prefix </span><span class="s3">+ </span><span class="s4">&quot;_&quot; </span><span class="s3">+ </span><span class="s1">fin_base_version </span><span class="s3">+ </span><span class="s4">&quot;_&quot; </span><span class="s3">+ </span><span class="s1">suffix</span>
+    <span class="s2">return </span><span class="s1">platform_tag</span>
+</pre>
+</body>
+</html>

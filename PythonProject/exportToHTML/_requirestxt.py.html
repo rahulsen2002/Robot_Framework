@@ -1,0 +1,153 @@
+<html>
+<head>
+<title>_requirestxt.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_requirestxt.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Helper code used to generate ``requires.txt`` files in the egg-info directory. 
+ 
+The ``requires.txt`` file has an specific format: 
+    - Environment markers need to be part of the section headers and 
+      should not be part of the requirement spec itself. 
+ 
+See https://setuptools.pypa.io/en/latest/deprecated/python_eggs.html#requires-txt 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">io</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">defaultdict</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Mapping</span>
+<span class="s2">from </span><span class="s1">itertools </span><span class="s2">import </span><span class="s1">filterfalse</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TypeVar</span>
+
+<span class="s2">from </span><span class="s1">jaraco</span><span class="s3">.</span><span class="s1">text </span><span class="s2">import </span><span class="s1">yield_lines</span>
+<span class="s2">from </span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">requirements </span><span class="s2">import </span><span class="s1">Requirement</span>
+
+<span class="s2">from </span><span class="s3">.. </span><span class="s2">import </span><span class="s1">_reqs</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_reqs </span><span class="s2">import </span><span class="s1">_StrOrIter</span>
+
+<span class="s4"># dict can work as an ordered set</span>
+<span class="s1">_T </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s5">&quot;_T&quot;</span><span class="s3">)</span>
+<span class="s1">_Ordered </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">_T</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">_prepare</span><span class="s3">(</span>
+    <span class="s1">install_requires</span><span class="s3">: </span><span class="s1">_StrOrIter</span><span class="s3">, </span><span class="s1">extras_require</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">_StrOrIter</span><span class="s3">]</span>
+<span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]]:</span>
+    <span class="s0">&quot;&quot;&quot;Given values for ``install_requires`` and ``extras_require`` 
+    create modified versions in a way that can be written in ``requires.txt`` 
+    &quot;&quot;&quot;</span>
+    <span class="s1">extras </span><span class="s3">= </span><span class="s1">_convert_extras_requirements</span><span class="s3">(</span><span class="s1">extras_require</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">_move_install_requirements_markers</span><span class="s3">(</span><span class="s1">install_requires</span><span class="s3">, </span><span class="s1">extras</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_extras_requirements</span><span class="s3">(</span>
+    <span class="s1">extras_require</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">_StrOrIter</span><span class="s3">],</span>
+<span class="s3">) </span><span class="s1">-&gt; defaultdict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">_Ordered</span><span class="s3">[</span><span class="s1">Requirement</span><span class="s3">]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Convert requirements in `extras_require` of the form 
+    `&quot;extra&quot;: [&quot;barbazquux; {marker}&quot;]` to 
+    `&quot;extra:{marker}&quot;: [&quot;barbazquux&quot;]`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">output </span><span class="s3">= </span><span class="s1">defaultdict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">_Ordered</span><span class="s3">[</span><span class="s1">Requirement</span><span class="s3">]](</span><span class="s1">dict</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">section</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">extras_require</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+        <span class="s4"># Do not strip empty sections.</span>
+        <span class="s1">output</span><span class="s3">[</span><span class="s1">section</span><span class="s3">]</span>
+        <span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">_reqs</span><span class="s3">.</span><span class="s1">parse</span><span class="s3">(</span><span class="s1">v</span><span class="s3">):</span>
+            <span class="s1">output</span><span class="s3">[</span><span class="s1">section </span><span class="s3">+ </span><span class="s1">_suffix_for</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)].</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">output</span>
+
+
+<span class="s2">def </span><span class="s1">_move_install_requirements_markers</span><span class="s3">(</span>
+    <span class="s1">install_requires</span><span class="s3">: </span><span class="s1">_StrOrIter</span><span class="s3">, </span><span class="s1">extras_require</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">_Ordered</span><span class="s3">[</span><span class="s1">Requirement</span><span class="s3">]]</span>
+<span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    The ``requires.txt`` file has an specific format: 
+        - Environment markers need to be part of the section headers and 
+          should not be part of the requirement spec itself. 
+ 
+    Move requirements in ``install_requires`` that are using environment 
+    markers ``extras_require``. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4"># divide the install_requires into two sets, simple ones still</span>
+    <span class="s4"># handled by install_requires and more complex ones handled by extras_require.</span>
+
+    <span class="s1">inst_reqs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">_reqs</span><span class="s3">.</span><span class="s1">parse</span><span class="s3">(</span><span class="s1">install_requires</span><span class="s3">))</span>
+    <span class="s1">simple_reqs </span><span class="s3">= </span><span class="s1">filter</span><span class="s3">(</span><span class="s1">_no_marker</span><span class="s3">, </span><span class="s1">inst_reqs</span><span class="s3">)</span>
+    <span class="s1">complex_reqs </span><span class="s3">= </span><span class="s1">filterfalse</span><span class="s3">(</span><span class="s1">_no_marker</span><span class="s3">, </span><span class="s1">inst_reqs</span><span class="s3">)</span>
+    <span class="s1">simple_install_requires </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">str</span><span class="s3">, </span><span class="s1">simple_reqs</span><span class="s3">))</span>
+
+    <span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">complex_reqs</span><span class="s3">:</span>
+        <span class="s1">extras_require</span><span class="s3">[</span><span class="s5">':' </span><span class="s3">+ </span><span class="s1">str</span><span class="s3">(</span><span class="s1">r</span><span class="s3">.</span><span class="s1">marker</span><span class="s3">)].</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+    <span class="s1">expanded_extras </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span>
+        <span class="s4"># list(dict.fromkeys(...))  ensures a list of unique strings</span>
+        <span class="s3">(</span><span class="s1">k</span><span class="s3">, </span><span class="s1">list</span><span class="s3">(</span><span class="s1">dict</span><span class="s3">.</span><span class="s1">fromkeys</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">r</span><span class="s3">) </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">map</span><span class="s3">(</span><span class="s1">_clean_req</span><span class="s3">, </span><span class="s1">v</span><span class="s3">))))</span>
+        <span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">extras_require</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+    <span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">simple_install_requires</span><span class="s3">, </span><span class="s1">expanded_extras</span>
+
+
+<span class="s2">def </span><span class="s1">_suffix_for</span><span class="s3">(</span><span class="s1">req</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Return the 'extras_require' suffix for a given requirement.&quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s5">':' </span><span class="s3">+ </span><span class="s1">str</span><span class="s3">(</span><span class="s1">req</span><span class="s3">.</span><span class="s1">marker</span><span class="s3">) </span><span class="s2">if </span><span class="s1">req</span><span class="s3">.</span><span class="s1">marker </span><span class="s2">else </span><span class="s5">''</span>
+
+
+<span class="s2">def </span><span class="s1">_clean_req</span><span class="s3">(</span><span class="s1">req</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Given a Requirement, remove environment markers and return it&quot;&quot;&quot;</span>
+    <span class="s1">r </span><span class="s3">= </span><span class="s1">Requirement</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">req</span><span class="s3">))  </span><span class="s4"># create a copy before modifying</span>
+    <span class="s1">r</span><span class="s3">.</span><span class="s1">marker </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">return </span><span class="s1">r</span>
+
+
+<span class="s2">def </span><span class="s1">_no_marker</span><span class="s3">(</span><span class="s1">req</span><span class="s3">):</span>
+    <span class="s2">return not </span><span class="s1">req</span><span class="s3">.</span><span class="s1">marker</span>
+
+
+<span class="s2">def </span><span class="s1">_write_requirements</span><span class="s3">(</span><span class="s1">stream</span><span class="s3">, </span><span class="s1">reqs</span><span class="s3">):</span>
+    <span class="s1">lines </span><span class="s3">= </span><span class="s1">yield_lines</span><span class="s3">(</span><span class="s1">reqs </span><span class="s2">or </span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">append_cr</span><span class="s3">(</span><span class="s1">line</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">line </span><span class="s3">+ </span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span>
+
+    <span class="s1">lines </span><span class="s3">= </span><span class="s1">map</span><span class="s3">(</span><span class="s1">append_cr</span><span class="s3">, </span><span class="s1">lines</span><span class="s3">)</span>
+    <span class="s1">stream</span><span class="s3">.</span><span class="s1">writelines</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">write_requirements</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">basename</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">):</span>
+    <span class="s1">dist </span><span class="s3">= </span><span class="s1">cmd</span><span class="s3">.</span><span class="s1">distribution</span>
+    <span class="s1">data </span><span class="s3">= </span><span class="s1">io</span><span class="s3">.</span><span class="s1">StringIO</span><span class="s3">()</span>
+    <span class="s1">install_requires</span><span class="s3">, </span><span class="s1">extras_require </span><span class="s3">= </span><span class="s1">_prepare</span><span class="s3">(</span>
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">install_requires </span><span class="s2">or </span><span class="s3">(), </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">extras_require </span><span class="s2">or </span><span class="s3">{}</span>
+    <span class="s3">)</span>
+    <span class="s1">_write_requirements</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">install_requires</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">extra </span><span class="s2">in </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">extras_require</span><span class="s3">):</span>
+        <span class="s1">data</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s5">'</span><span class="s2">\n</span><span class="s5">[{extra}]</span><span class="s2">\n</span><span class="s5">'</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(**</span><span class="s1">vars</span><span class="s3">()))</span>
+        <span class="s1">_write_requirements</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">extras_require</span><span class="s3">[</span><span class="s1">extra</span><span class="s3">])</span>
+    <span class="s1">cmd</span><span class="s3">.</span><span class="s1">write_or_delete_file</span><span class="s3">(</span><span class="s5">&quot;requirements&quot;</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">, </span><span class="s1">data</span><span class="s3">.</span><span class="s1">getvalue</span><span class="s3">())</span>
+
+
+<span class="s2">def </span><span class="s1">write_setup_requirements</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">basename</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">):</span>
+    <span class="s1">data </span><span class="s3">= </span><span class="s1">io</span><span class="s3">.</span><span class="s1">StringIO</span><span class="s3">()</span>
+    <span class="s1">_write_requirements</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">cmd</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">setup_requires</span><span class="s3">)</span>
+    <span class="s1">cmd</span><span class="s3">.</span><span class="s1">write_or_delete_file</span><span class="s3">(</span><span class="s5">&quot;setup-requirements&quot;</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">, </span><span class="s1">data</span><span class="s3">.</span><span class="s1">getvalue</span><span class="s3">())</span>
+</pre>
+</body>
+</html>

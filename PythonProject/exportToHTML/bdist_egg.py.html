@@ -1,0 +1,502 @@
+<html>
+<head>
+<title>bdist_egg.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bdist_egg.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;setuptools.command.bdist_egg 
+ 
+Build .egg distributions&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">marshal</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">textwrap</span>
+<span class="s2">from </span><span class="s1">sysconfig </span><span class="s2">import </span><span class="s1">get_path</span><span class="s3">, </span><span class="s1">get_python_version</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">CodeType</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">Literal</span>
+
+<span class="s2">from </span><span class="s1">setuptools </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">extension </span><span class="s2">import </span><span class="s1">Library</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_path </span><span class="s2">import </span><span class="s1">StrPathT</span><span class="s3">, </span><span class="s1">ensure_directory</span>
+
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">dir_util </span><span class="s2">import </span><span class="s1">mkpath</span><span class="s3">, </span><span class="s1">remove_tree</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">TypeAlias</span>
+
+<span class="s4"># Same as zipfile._ZipFileMode from typeshed</span>
+<span class="s1">_ZipFileMode</span><span class="s3">: </span><span class="s1">TypeAlias </span><span class="s3">= </span><span class="s1">Literal</span><span class="s3">[</span><span class="s5">&quot;r&quot;</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s5">&quot;x&quot;</span><span class="s3">, </span><span class="s5">&quot;a&quot;</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">_get_purelib</span><span class="s3">():</span>
+    <span class="s2">return </span><span class="s1">get_path</span><span class="s3">(</span><span class="s5">&quot;purelib&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">strip_module</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">):</span>
+    <span class="s2">if </span><span class="s5">'.' </span><span class="s2">in </span><span class="s1">filename</span><span class="s3">:</span>
+        <span class="s1">filename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+    <span class="s2">if </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'module'</span><span class="s3">):</span>
+        <span class="s1">filename </span><span class="s3">= </span><span class="s1">filename</span><span class="s3">[:-</span><span class="s6">6</span><span class="s3">]</span>
+    <span class="s2">return </span><span class="s1">filename</span>
+
+
+<span class="s2">def </span><span class="s1">sorted_walk</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Do os.walk in a reproducible way, 
+    independent of indeterministic filesystem readdir order 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">walk</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">):</span>
+        <span class="s1">dirs</span><span class="s3">.</span><span class="s1">sort</span><span class="s3">()</span>
+        <span class="s1">files</span><span class="s3">.</span><span class="s1">sort</span><span class="s3">()</span>
+        <span class="s2">yield </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files</span>
+
+
+<span class="s2">def </span><span class="s1">write_stub</span><span class="s3">(</span><span class="s1">resource</span><span class="s3">, </span><span class="s1">pyfile</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s1">_stub_template </span><span class="s3">= </span><span class="s1">textwrap</span><span class="s3">.</span><span class="s1">dedent</span><span class="s3">(</span>
+        <span class="s5">&quot;&quot;&quot; 
+        def __bootstrap__(): 
+            global __bootstrap__, __loader__, __file__ 
+            import sys, pkg_resources, importlib.util 
+            __file__ = pkg_resources.resource_filename(__name__, %r) 
+            __loader__ = None; del __bootstrap__, __loader__ 
+            spec = importlib.util.spec_from_file_location(__name__,__file__) 
+            mod = importlib.util.module_from_spec(spec) 
+            spec.loader.exec_module(mod) 
+        __bootstrap__() 
+        &quot;&quot;&quot;</span>
+    <span class="s3">).</span><span class="s1">lstrip</span><span class="s3">()</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">pyfile</span><span class="s3">, </span><span class="s5">'w'</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+        <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">_stub_template </span><span class="s3">% </span><span class="s1">resource</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">bdist_egg</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s1">description </span><span class="s3">= </span><span class="s5">'create an &quot;egg&quot; distribution'</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s5">'bdist-dir='</span><span class="s3">, </span><span class="s5">'b'</span><span class="s3">, </span><span class="s5">&quot;temporary directory for creating the distribution&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">'plat-name='</span><span class="s3">,</span>
+            <span class="s5">'p'</span><span class="s3">,</span>
+            <span class="s5">&quot;platform name to embed in generated filenames &quot;</span>
+            <span class="s5">&quot;(by default uses `pkg_resources.get_build_platform()`)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'exclude-source-files'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s5">&quot;remove all .py files from the generated egg&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">'keep-temp'</span><span class="s3">,</span>
+            <span class="s5">'k'</span><span class="s3">,</span>
+            <span class="s5">&quot;keep the pseudo-installation tree around after &quot;</span>
+            <span class="s5">&quot;creating the distribution archive&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'dist-dir='</span><span class="s3">, </span><span class="s5">'d'</span><span class="s3">, </span><span class="s5">&quot;directory to put final built distributions in&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'skip-build'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s5">&quot;skip rebuilding everything (for testing/debugging)&quot;</span><span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">boolean_options </span><span class="s3">= [</span><span class="s5">'keep-temp'</span><span class="s3">, </span><span class="s5">'skip-build'</span><span class="s3">, </span><span class="s5">'exclude-source-files'</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">egg_output </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">exclude_source_files </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">ei_cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ei_cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">&quot;egg_info&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">egg_info </span><span class="s3">= </span><span class="s1">ei_cmd</span><span class="s3">.</span><span class="s1">egg_info</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">bdist_base </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'bdist'</span><span class="s3">).</span><span class="s1">bdist_base</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">bdist_base</span><span class="s3">, </span><span class="s5">'egg'</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">from </span><span class="s1">pkg_resources </span><span class="s2">import </span><span class="s1">get_build_platform</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s3">= </span><span class="s1">get_build_platform</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_undefined_options</span><span class="s3">(</span><span class="s5">'bdist'</span><span class="s3">, (</span><span class="s5">'dist_dir'</span><span class="s3">, </span><span class="s5">'dist_dir'</span><span class="s3">))</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">egg_output </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s4"># Compute filename of the output egg</span>
+            <span class="s1">basename </span><span class="s3">= </span><span class="s1">ei_cmd</span><span class="s3">.</span><span class="s1">_get_egg_basename</span><span class="s3">(</span>
+                <span class="s1">py_version</span><span class="s3">=</span><span class="s1">get_python_version</span><span class="s3">(),</span>
+                <span class="s1">platform</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">() </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span><span class="s3">,</span>
+            <span class="s3">)</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">egg_output </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">basename </span><span class="s3">+ </span><span class="s5">'.egg'</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">do_install_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># Hack for packages that install data to install's --install-lib</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'install'</span><span class="s3">).</span><span class="s1">install_lib </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span>
+
+        <span class="s1">site_packages </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normcase</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">realpath</span><span class="s3">(</span><span class="s1">_get_purelib</span><span class="s3">()))</span>
+        <span class="s1">old</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">data_files </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">, []</span>
+
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">old</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">item</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">) </span><span class="s2">and </span><span class="s1">len</span><span class="s3">(</span><span class="s1">item</span><span class="s3">) == </span><span class="s6">2</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isabs</span><span class="s3">(</span><span class="s1">item</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]):</span>
+                    <span class="s1">realpath </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">realpath</span><span class="s3">(</span><span class="s1">item</span><span class="s3">[</span><span class="s6">0</span><span class="s3">])</span>
+                    <span class="s1">normalized </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normcase</span><span class="s3">(</span><span class="s1">realpath</span><span class="s3">)</span>
+                    <span class="s2">if </span><span class="s1">normalized </span><span class="s3">== </span><span class="s1">site_packages </span><span class="s2">or </span><span class="s1">normalized</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span>
+                        <span class="s1">site_packages </span><span class="s3">+ </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span>
+                    <span class="s3">):</span>
+                        <span class="s1">item </span><span class="s3">= </span><span class="s1">realpath</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">site_packages</span><span class="s3">) + </span><span class="s6">1 </span><span class="s3">:], </span><span class="s1">item</span><span class="s3">[</span><span class="s6">1</span><span class="s3">]</span>
+                        <span class="s4"># XXX else: raise ???</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;installing package data to %s&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">call_command</span><span class="s3">(</span><span class="s5">'install_data'</span><span class="s3">, </span><span class="s1">force</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">root</span><span class="s3">=</span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">data_files </span><span class="s3">= </span><span class="s1">old</span>
+
+    <span class="s2">def </span><span class="s1">get_outputs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">egg_output</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">call_command</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">cmdname</span><span class="s3">, **</span><span class="s1">kw</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Invoke reinitialized command `cmdname` with keyword args&quot;&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">dirname </span><span class="s2">in </span><span class="s1">INSTALL_DIRECTORY_ATTRS</span><span class="s3">:</span>
+            <span class="s1">kw</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">)</span>
+        <span class="s1">kw</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">'skip_build'</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build</span><span class="s3">)</span>
+        <span class="s1">kw</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">'dry_run'</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+        <span class="s1">cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s1">cmdname</span><span class="s3">, **</span><span class="s1">kw</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s1">cmdname</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">cmd</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):  </span><span class="s4"># noqa: C901  # is too complex (14)  # FIXME</span>
+        <span class="s4"># Generate metadata first</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s5">&quot;egg_info&quot;</span><span class="s3">)</span>
+        <span class="s4"># We run install_lib before install_data, because some data hacks</span>
+        <span class="s4"># pull their data path from the install_lib command.</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;installing library code to %s&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">)</span>
+        <span class="s1">instcmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'install'</span><span class="s3">)</span>
+        <span class="s1">old_root </span><span class="s3">= </span><span class="s1">instcmd</span><span class="s3">.</span><span class="s1">root</span>
+        <span class="s1">instcmd</span><span class="s3">.</span><span class="s1">root </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_c_libraries</span><span class="s3">() </span><span class="s2">and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s5">'build_clib'</span><span class="s3">)</span>
+        <span class="s1">cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">call_command</span><span class="s3">(</span><span class="s5">'install_lib'</span><span class="s3">, </span><span class="s1">warn_dir</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+        <span class="s1">instcmd</span><span class="s3">.</span><span class="s1">root </span><span class="s3">= </span><span class="s1">old_root</span>
+
+        <span class="s1">all_outputs</span><span class="s3">, </span><span class="s1">ext_outputs </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_ext_outputs</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">stubs </span><span class="s3">= []</span>
+        <span class="s1">to_compile </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">p</span><span class="s3">, </span><span class="s1">ext_name </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">ext_outputs</span><span class="s3">):</span>
+            <span class="s1">filename</span><span class="s3">, </span><span class="s1">_ext </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">ext_name</span><span class="s3">)</span>
+            <span class="s1">pyfile </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">, </span><span class="s1">strip_module</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">) + </span><span class="s5">'.py'</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">stubs</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">pyfile</span><span class="s3">)</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;creating stub loader for %s&quot;</span><span class="s3">, </span><span class="s1">ext_name</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s1">write_stub</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">ext_name</span><span class="s3">), </span><span class="s1">pyfile</span><span class="s3">)</span>
+            <span class="s1">to_compile</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">pyfile</span><span class="s3">)</span>
+            <span class="s1">ext_outputs</span><span class="s3">[</span><span class="s1">p</span><span class="s3">] = </span><span class="s1">ext_name</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">, </span><span class="s5">'/'</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">to_compile</span><span class="s3">:</span>
+            <span class="s1">cmd</span><span class="s3">.</span><span class="s1">byte_compile</span><span class="s3">(</span><span class="s1">to_compile</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">data_files</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">do_install_data</span><span class="s3">()</span>
+
+        <span class="s4"># Make the EGG-INFO directory</span>
+        <span class="s1">archive_root </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span>
+        <span class="s1">egg_info </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">, </span><span class="s5">'EGG-INFO'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">scripts</span><span class="s3">:</span>
+            <span class="s1">script_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s5">'scripts'</span><span class="s3">)</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;installing scripts to %s&quot;</span><span class="s3">, </span><span class="s1">script_dir</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">call_command</span><span class="s3">(</span><span class="s5">'install_scripts'</span><span class="s3">, </span><span class="s1">install_dir</span><span class="s3">=</span><span class="s1">script_dir</span><span class="s3">, </span><span class="s1">no_ep</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">copy_metadata_to</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">)</span>
+        <span class="s1">native_libs </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s5">&quot;native_libs.txt&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">all_outputs</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;writing %s&quot;</span><span class="s3">, </span><span class="s1">native_libs</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s1">ensure_directory</span><span class="s3">(</span><span class="s1">native_libs</span><span class="s3">)</span>
+                <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">native_libs</span><span class="s3">, </span><span class="s5">'wt'</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">libs_file</span><span class="s3">:</span>
+                    <span class="s1">libs_file</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">all_outputs</span><span class="s3">))</span>
+                    <span class="s1">libs_file</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">native_libs</span><span class="s3">):</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;removing %s&quot;</span><span class="s3">, </span><span class="s1">native_libs</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">native_libs</span><span class="s3">)</span>
+
+        <span class="s1">write_safety_flag</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">, </span><span class="s5">'EGG-INFO'</span><span class="s3">), </span><span class="s1">self</span><span class="s3">.</span><span class="s1">zip_safe</span><span class="s3">())</span>
+
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s5">'depends.txt'</span><span class="s3">)):</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s5">&quot;WARNING: 'depends.txt' will not be used by setuptools 0.6!</span><span class="s2">\n</span><span class="s5">&quot;</span>
+                <span class="s5">&quot;Use the install_requires/extras_require setup() args instead.&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">exclude_source_files</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">zap_pyfiles</span><span class="s3">()</span>
+
+        <span class="s4"># Make the archive</span>
+        <span class="s1">make_zipfile</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">egg_output</span><span class="s3">,</span>
+            <span class="s1">archive_root</span><span class="s3">,</span>
+            <span class="s1">verbose</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">verbose</span><span class="s3">,</span>
+            <span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">,</span>
+            <span class="s1">mode</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">gen_header</span><span class="s3">(),</span>
+        <span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp</span><span class="s3">:</span>
+            <span class="s1">remove_tree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+        <span class="s4"># Add to 'Distribution.dist_files' so that the &quot;upload&quot; command works</span>
+        <span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s5">'dist_files'</span><span class="s3">, []).</span><span class="s1">append</span><span class="s3">((</span>
+            <span class="s5">'bdist_egg'</span><span class="s3">,</span>
+            <span class="s1">get_python_version</span><span class="s3">(),</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">egg_output</span><span class="s3">,</span>
+        <span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">zap_pyfiles</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;Removing .py files from temporary directory&quot;</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">walk_egg</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">):</span>
+            <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">files</span><span class="s3">:</span>
+                <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+
+                <span class="s2">if </span><span class="s1">name</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'.py'</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;Deleting %s&quot;</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+                    <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+
+                <span class="s2">if </span><span class="s1">base</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'__pycache__'</span><span class="s3">):</span>
+                    <span class="s1">path_old </span><span class="s3">= </span><span class="s1">path</span>
+
+                    <span class="s1">pattern </span><span class="s3">= </span><span class="s5">r'(?P&lt;name&gt;.+)\.(?P&lt;magic&gt;[^.]+)\.pyc'</span>
+                    <span class="s1">m </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+                    <span class="s1">path_new </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">pardir</span><span class="s3">, </span><span class="s1">m</span><span class="s3">.</span><span class="s1">group</span><span class="s3">(</span><span class="s5">'name'</span><span class="s3">) + </span><span class="s5">'.pyc'</span><span class="s3">)</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">f&quot;Renaming file from [</span><span class="s2">{</span><span class="s1">path_old</span><span class="s2">}</span><span class="s5">] to [</span><span class="s2">{</span><span class="s1">path_new</span><span class="s2">}</span><span class="s5">]&quot;</span><span class="s3">)</span>
+                    <span class="s2">try</span><span class="s3">:</span>
+                        <span class="s1">os</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">path_new</span><span class="s3">)</span>
+                    <span class="s2">except </span><span class="s1">OSError</span><span class="s3">:</span>
+                        <span class="s2">pass</span>
+                    <span class="s1">os</span><span class="s3">.</span><span class="s1">rename</span><span class="s3">(</span><span class="s1">path_old</span><span class="s3">, </span><span class="s1">path_new</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">zip_safe</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">safe </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s5">'zip_safe'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">safe </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">safe</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s5">&quot;zip_safe flag not set; analyzing archive contents...&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">analyze_egg</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">stubs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">gen_header</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Literal</span><span class="s3">[</span><span class="s5">&quot;w&quot;</span><span class="s3">]:</span>
+        <span class="s2">return </span><span class="s5">'w'</span>
+
+    <span class="s2">def </span><span class="s1">copy_metadata_to</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">target_dir</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;Copy metadata (egg info) to the target_dir&quot;</span>
+        <span class="s4"># normalize the path (so that a forward-slash in egg_info will</span>
+        <span class="s4"># match using startswith below)</span>
+        <span class="s1">norm_egg_info </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">egg_info</span><span class="s3">)</span>
+        <span class="s1">prefix </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">norm_egg_info</span><span class="s3">, </span><span class="s5">''</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ei_cmd</span><span class="s3">.</span><span class="s1">filelist</span><span class="s3">.</span><span class="s1">files</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">path</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">):</span>
+                <span class="s1">target </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">target_dir</span><span class="s3">, </span><span class="s1">path</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">) :])</span>
+                <span class="s1">ensure_directory</span><span class="s3">(</span><span class="s1">target</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">copy_file</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">target</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">get_ext_outputs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Get a list of relative paths to C extensions in the output distro&quot;&quot;&quot;</span>
+
+        <span class="s1">all_outputs </span><span class="s3">= []</span>
+        <span class="s1">ext_outputs </span><span class="s3">= []</span>
+
+        <span class="s1">paths </span><span class="s3">= {</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">: </span><span class="s5">''</span><span class="s3">}</span>
+        <span class="s2">for </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">sorted_walk</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">):</span>
+            <span class="s1">all_outputs</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span>
+                <span class="s1">paths</span><span class="s3">[</span><span class="s1">base</span><span class="s3">] + </span><span class="s1">filename</span>
+                <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">files</span>
+                <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)[</span><span class="s6">1</span><span class="s3">].</span><span class="s1">lower</span><span class="s3">() </span><span class="s2">in </span><span class="s1">NATIVE_EXTENSIONS</span>
+            <span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">dirs</span><span class="s3">:</span>
+                <span class="s1">paths</span><span class="s3">[</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">)] = </span><span class="s1">paths</span><span class="s3">[</span><span class="s1">base</span><span class="s3">] + </span><span class="s1">filename </span><span class="s3">+ </span><span class="s5">'/'</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+            <span class="s1">build_cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'build_ext'</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">build_cmd</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">ext</span><span class="s3">, </span><span class="s1">Library</span><span class="s3">):</span>
+                    <span class="s2">continue</span>
+                <span class="s1">fullname </span><span class="s3">= </span><span class="s1">build_cmd</span><span class="s3">.</span><span class="s1">get_ext_fullname</span><span class="s3">(</span><span class="s1">ext</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+                <span class="s1">filename </span><span class="s3">= </span><span class="s1">build_cmd</span><span class="s3">.</span><span class="s1">get_ext_filename</span><span class="s3">(</span><span class="s1">fullname</span><span class="s3">)</span>
+                <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">).</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">'dl-'</span><span class="s3">):</span>
+                    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">)):</span>
+                        <span class="s1">ext_outputs</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">all_outputs</span><span class="s3">, </span><span class="s1">ext_outputs</span>
+
+
+<span class="s1">NATIVE_EXTENSIONS</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s2">None</span><span class="s3">] = </span><span class="s1">dict</span><span class="s3">.</span><span class="s1">fromkeys</span><span class="s3">(</span><span class="s5">'.dll .so .dylib .pyd'</span><span class="s3">.</span><span class="s1">split</span><span class="s3">())</span>
+
+
+<span class="s2">def </span><span class="s1">walk_egg</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Walk an unpacked egg's contents, skipping the metadata directory&quot;&quot;&quot;</span>
+    <span class="s1">walker </span><span class="s3">= </span><span class="s1">sorted_walk</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">)</span>
+    <span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s3">= </span><span class="s1">next</span><span class="s3">(</span><span class="s1">walker</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s5">'EGG-INFO' </span><span class="s2">in </span><span class="s1">dirs</span><span class="s3">:</span>
+        <span class="s1">dirs</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s5">'EGG-INFO'</span><span class="s3">)</span>
+    <span class="s2">yield </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files</span>
+    <span class="s2">yield from </span><span class="s1">walker</span>
+
+
+<span class="s2">def </span><span class="s1">analyze_egg</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">, </span><span class="s1">stubs</span><span class="s3">):</span>
+    <span class="s4"># check for existing flag in EGG-INFO</span>
+    <span class="s2">for </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">safety_flags</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">, </span><span class="s5">'EGG-INFO'</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">)):</span>
+            <span class="s2">return </span><span class="s1">flag</span>
+    <span class="s2">if not </span><span class="s1">can_scan</span><span class="s3">():</span>
+        <span class="s2">return False</span>
+    <span class="s1">safe </span><span class="s3">= </span><span class="s2">True</span>
+    <span class="s2">for </span><span class="s1">base</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">walk_egg</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">files</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">name</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'.py'</span><span class="s3">) </span><span class="s2">or </span><span class="s1">name</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'.pyw'</span><span class="s3">):</span>
+                <span class="s2">continue</span>
+            <span class="s2">elif </span><span class="s1">name</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'.pyc'</span><span class="s3">) </span><span class="s2">or </span><span class="s1">name</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">'.pyo'</span><span class="s3">):</span>
+                <span class="s4"># always scan, even if we already know we're not safe</span>
+                <span class="s1">safe </span><span class="s3">= </span><span class="s1">scan_module</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">, </span><span class="s1">base</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">stubs</span><span class="s3">) </span><span class="s2">and </span><span class="s1">safe</span>
+    <span class="s2">return </span><span class="s1">safe</span>
+
+
+<span class="s2">def </span><span class="s1">write_safety_flag</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">, </span><span class="s1">safe</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s4"># Write or remove zip safety flag file(s)</span>
+    <span class="s2">for </span><span class="s1">flag</span><span class="s3">, </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">safety_flags</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+        <span class="s1">fn </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">safe </span><span class="s2">is None or </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">safe</span><span class="s3">) != </span><span class="s1">flag</span><span class="s3">:</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">safe </span><span class="s2">is not None and </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">safe</span><span class="s3">) == </span><span class="s1">flag</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">, </span><span class="s5">'wt'</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+                <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s5">'</span><span class="s2">\n</span><span class="s5">'</span><span class="s3">)</span>
+
+
+<span class="s1">safety_flags </span><span class="s3">= {</span>
+    <span class="s2">True</span><span class="s3">: </span><span class="s5">'zip-safe'</span><span class="s3">,</span>
+    <span class="s2">False</span><span class="s3">: </span><span class="s5">'not-zip-safe'</span><span class="s3">,</span>
+<span class="s3">}</span>
+
+
+<span class="s2">def </span><span class="s1">scan_module</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">, </span><span class="s1">base</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">stubs</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Check whether module possibly uses unsafe-for-zipfile stuff&quot;&quot;&quot;</span>
+
+    <span class="s1">filename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">filename</span><span class="s3">[:-</span><span class="s6">1</span><span class="s3">] </span><span class="s2">in </span><span class="s1">stubs</span><span class="s3">:</span>
+        <span class="s2">return True  </span><span class="s4"># Extension module</span>
+    <span class="s1">pkg </span><span class="s3">= </span><span class="s1">base</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">egg_dir</span><span class="s3">) + </span><span class="s6">1 </span><span class="s3">:].</span><span class="s1">replace</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">, </span><span class="s5">'.'</span><span class="s3">)</span>
+    <span class="s1">module </span><span class="s3">= </span><span class="s1">pkg </span><span class="s3">+ (</span><span class="s1">pkg </span><span class="s2">and </span><span class="s5">'.' </span><span class="s2">or </span><span class="s5">''</span><span class="s3">) + </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+    <span class="s1">skip </span><span class="s3">= </span><span class="s6">16  </span><span class="s4"># skip magic &amp; reserved? &amp; date &amp; file size</span>
+    <span class="s1">f </span><span class="s3">= </span><span class="s1">open</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s5">'rb'</span><span class="s3">)</span>
+    <span class="s1">f</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">skip</span><span class="s3">)</span>
+    <span class="s1">code </span><span class="s3">= </span><span class="s1">marshal</span><span class="s3">.</span><span class="s1">load</span><span class="s3">(</span><span class="s1">f</span><span class="s3">)</span>
+    <span class="s1">f</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+    <span class="s1">safe </span><span class="s3">= </span><span class="s2">True</span>
+    <span class="s1">symbols </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">.</span><span class="s1">fromkeys</span><span class="s3">(</span><span class="s1">iter_symbols</span><span class="s3">(</span><span class="s1">code</span><span class="s3">))</span>
+    <span class="s2">for </span><span class="s1">bad </span><span class="s2">in </span><span class="s3">[</span><span class="s5">'__file__'</span><span class="s3">, </span><span class="s5">'__path__'</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">bad </span><span class="s2">in </span><span class="s1">symbols</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s5">&quot;%s: module references %s&quot;</span><span class="s3">, </span><span class="s1">module</span><span class="s3">, </span><span class="s1">bad</span><span class="s3">)</span>
+            <span class="s1">safe </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s2">if </span><span class="s5">'inspect' </span><span class="s2">in </span><span class="s1">symbols</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">bad </span><span class="s2">in </span><span class="s3">[</span>
+            <span class="s5">'getsource'</span><span class="s3">,</span>
+            <span class="s5">'getabsfile'</span><span class="s3">,</span>
+            <span class="s5">'getfile'</span><span class="s3">,</span>
+            <span class="s5">'getsourcefile'</span><span class="s3">,</span>
+            <span class="s5">'getsourcelines'</span><span class="s3">,</span>
+            <span class="s5">'findsource'</span><span class="s3">,</span>
+            <span class="s5">'getcomments'</span><span class="s3">,</span>
+            <span class="s5">'getframeinfo'</span><span class="s3">,</span>
+            <span class="s5">'getinnerframes'</span><span class="s3">,</span>
+            <span class="s5">'getouterframes'</span><span class="s3">,</span>
+            <span class="s5">'stack'</span><span class="s3">,</span>
+            <span class="s5">'trace'</span><span class="s3">,</span>
+        <span class="s3">]:</span>
+            <span class="s2">if </span><span class="s1">bad </span><span class="s2">in </span><span class="s1">symbols</span><span class="s3">:</span>
+                <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s5">&quot;%s: module MAY be using inspect.%s&quot;</span><span class="s3">, </span><span class="s1">module</span><span class="s3">, </span><span class="s1">bad</span><span class="s3">)</span>
+                <span class="s1">safe </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s2">return </span><span class="s1">safe</span>
+
+
+<span class="s2">def </span><span class="s1">iter_symbols</span><span class="s3">(</span><span class="s1">code</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Yield names and strings used by `code` and its nested code objects&quot;&quot;&quot;</span>
+    <span class="s2">yield from </span><span class="s1">code</span><span class="s3">.</span><span class="s1">co_names</span>
+    <span class="s2">for </span><span class="s1">const </span><span class="s2">in </span><span class="s1">code</span><span class="s3">.</span><span class="s1">co_consts</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">const</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">yield </span><span class="s1">const</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">const</span><span class="s3">, </span><span class="s1">CodeType</span><span class="s3">):</span>
+            <span class="s2">yield from </span><span class="s1">iter_symbols</span><span class="s3">(</span><span class="s1">const</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">can_scan</span><span class="s3">() </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s2">if not </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">'java'</span><span class="s3">) </span><span class="s2">and </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform </span><span class="s3">!= </span><span class="s5">'cli'</span><span class="s3">:</span>
+        <span class="s4"># CPython, PyPy, etc.</span>
+        <span class="s2">return True</span>
+    <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s5">&quot;Unable to analyze compiled code on this platform.&quot;</span><span class="s3">)</span>
+    <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+        <span class="s5">&quot;Please ask the author to include a 'zip_safe'&quot;</span>
+        <span class="s5">&quot; setting (either True or False) in the package's setup.py&quot;</span>
+    <span class="s3">)</span>
+    <span class="s2">return False</span>
+
+
+<span class="s4"># Attribute names of options for commands that might need to be convinced to</span>
+<span class="s4"># install to the egg build directory</span>
+
+<span class="s1">INSTALL_DIRECTORY_ATTRS </span><span class="s3">= [</span><span class="s5">'install_lib'</span><span class="s3">, </span><span class="s5">'install_dir'</span><span class="s3">, </span><span class="s5">'install_data'</span><span class="s3">, </span><span class="s5">'install_base'</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">make_zipfile</span><span class="s3">(</span>
+    <span class="s1">zip_filename</span><span class="s3">: </span><span class="s1">StrPathT</span><span class="s3">,</span>
+    <span class="s1">base_dir</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">compress</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s1">mode</span><span class="s3">: </span><span class="s1">_ZipFileMode </span><span class="s3">= </span><span class="s5">'w'</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; StrPathT</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create a zip file from all the files under 'base_dir'.  The output 
+    zip file will be named 'base_dir' + &quot;.zip&quot;.  Uses either the &quot;zipfile&quot; 
+    Python module (if available) or the InfoZIP &quot;zip&quot; utility (if installed 
+    and found on the default search path).  If neither tool is available, 
+    raises DistutilsExecError.  Returns the name of the output zip file. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">import </span><span class="s1">zipfile</span>
+
+    <span class="s1">mkpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">zip_filename</span><span class="s3">), </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">)  </span><span class="s4"># type: ignore[arg-type] # python/mypy#18075</span>
+    <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">&quot;creating '%s' and adding '%s' to it&quot;</span><span class="s3">, </span><span class="s1">zip_filename</span><span class="s3">, </span><span class="s1">base_dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">visit</span><span class="s3">(</span><span class="s1">z</span><span class="s3">, </span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">names</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">names</span><span class="s3">:</span>
+            <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">name</span><span class="s3">))</span>
+            <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+                <span class="s1">p </span><span class="s3">= </span><span class="s1">path</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">) + </span><span class="s6">1 </span><span class="s3">:]</span>
+                <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+                    <span class="s1">z</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">p</span><span class="s3">)</span>
+                <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;adding '%s'&quot;</span><span class="s3">, </span><span class="s1">p</span><span class="s3">)</span>
+
+    <span class="s1">compression </span><span class="s3">= </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZIP_DEFLATED </span><span class="s2">if </span><span class="s1">compress </span><span class="s2">else </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZIP_STORED</span>
+    <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+        <span class="s1">z </span><span class="s3">= </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">zip_filename</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">, </span><span class="s1">compression</span><span class="s3">=</span><span class="s1">compression</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">sorted_walk</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">):</span>
+            <span class="s1">visit</span><span class="s3">(</span><span class="s1">z</span><span class="s3">, </span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">files</span><span class="s3">)</span>
+        <span class="s1">z</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">sorted_walk</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">):</span>
+            <span class="s1">visit</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">dirname</span><span class="s3">, </span><span class="s1">files</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">zip_filename</span>
+</pre>
+</body>
+</html>

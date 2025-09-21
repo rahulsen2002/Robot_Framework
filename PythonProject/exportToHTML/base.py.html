@@ -1,0 +1,1417 @@
+<html>
+<head>
+<title>base.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+base.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.ccompiler 
+ 
+Contains Compiler, an abstract base class that defines the interface 
+for the Distutils compiler abstraction model.&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Iterable</span><span class="s3">, </span><span class="s1">MutableSequence</span><span class="s3">, </span><span class="s1">Sequence</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s3">,</span>
+    <span class="s1">ClassVar</span><span class="s3">,</span>
+    <span class="s1">Literal</span><span class="s3">,</span>
+    <span class="s1">TypeVar</span><span class="s3">,</span>
+    <span class="s1">Union</span><span class="s3">,</span>
+    <span class="s1">overload</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">from </span><span class="s1">more_itertools </span><span class="s2">import </span><span class="s1">always_iterable</span>
+
+<span class="s2">from </span><span class="s3">...</span><span class="s1">_log </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">_modified </span><span class="s2">import </span><span class="s1">newer_group</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">dir_util </span><span class="s2">import </span><span class="s1">mkpath</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">errors </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">DistutilsModuleError</span><span class="s3">,</span>
+    <span class="s1">DistutilsPlatformError</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">file_util </span><span class="s2">import </span><span class="s1">move_file</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">spawn </span><span class="s2">import </span><span class="s1">spawn</span>
+<span class="s2">from </span><span class="s3">...</span><span class="s1">util </span><span class="s2">import </span><span class="s1">execute</span><span class="s3">, </span><span class="s1">is_mingw</span><span class="s3">, </span><span class="s1">split_quoted</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">CompileError</span><span class="s3">,</span>
+    <span class="s1">LinkError</span><span class="s3">,</span>
+    <span class="s1">UnknownFileType</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">TypeAlias</span><span class="s3">, </span><span class="s1">TypeVarTuple</span><span class="s3">, </span><span class="s1">Unpack</span>
+
+    <span class="s1">_Ts </span><span class="s3">= </span><span class="s1">TypeVarTuple</span><span class="s3">(</span><span class="s4">&quot;_Ts&quot;</span><span class="s3">)</span>
+
+<span class="s1">_Macro</span><span class="s3">: </span><span class="s1">TypeAlias </span><span class="s3">= </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]]]</span>
+<span class="s1">_StrPathT </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;_StrPathT&quot;</span><span class="s3">, </span><span class="s1">bound</span><span class="s3">=</span><span class="s4">&quot;str | os.PathLike[str]&quot;</span><span class="s3">)</span>
+<span class="s1">_BytesPathT </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;_BytesPathT&quot;</span><span class="s3">, </span><span class="s1">bound</span><span class="s3">=</span><span class="s4">&quot;bytes | os.PathLike[bytes]&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Compiler</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Abstract base class to define the interface that must be implemented 
+    by real compiler classes.  Also has some utility methods used by 
+    several compiler classes. 
+ 
+    The basic idea behind a compiler abstraction class is that each 
+    instance can be used for all the compile/link steps in building a 
+    single project.  Thus, attributes common to all of those compile and 
+    link steps -- include directories, macros to define, libraries to link 
+    against, etc. -- are attributes of the compiler instance.  To allow for 
+    variability in how individual files are treated, most of those 
+    attributes may be varied on a per-compilation or per-link basis. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s5"># 'compiler_type' is a class attribute that identifies this class.  It</span>
+    <span class="s5"># keeps code that wants to know what kind of compiler it's dealing with</span>
+    <span class="s5"># from having to import all possible compiler classes just to do an</span>
+    <span class="s5"># 'isinstance'.  In concrete CCompiler subclasses, 'compiler_type'</span>
+    <span class="s5"># should really, really be one of the keys of the 'compiler_class'</span>
+    <span class="s5"># dictionary (see below -- used by the 'new_compiler()' factory</span>
+    <span class="s5"># function) -- authors of new compiler interface classes are</span>
+    <span class="s5"># responsible for updating 'compiler_class'!</span>
+    <span class="s1">compiler_type</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None  </span><span class="s5"># type: ignore[assignment]</span>
+
+    <span class="s5"># XXX things not handled by this compiler abstraction model:</span>
+    <span class="s5">#   * client can't provide additional options for a compiler,</span>
+    <span class="s5">#     e.g. warning, optimization, debugging flags.  Perhaps this</span>
+    <span class="s5">#     should be the domain of concrete compiler abstraction classes</span>
+    <span class="s5">#     (UnixCCompiler, MSVCCompiler, etc.) -- or perhaps the base</span>
+    <span class="s5">#     class should have methods for the common ones.</span>
+    <span class="s5">#   * can't completely override the include or library searchg</span>
+    <span class="s5">#     path, ie. no &quot;cc -I -Idir1 -Idir2&quot; or &quot;cc -L -Ldir1 -Ldir2&quot;.</span>
+    <span class="s5">#     I'm not sure how widely supported this is even by Unix</span>
+    <span class="s5">#     compilers, much less on other platforms.  And I'm even less</span>
+    <span class="s5">#     sure how useful it is; maybe for cross-compiling, but</span>
+    <span class="s5">#     support for that is a ways off.  (And anyways, cross</span>
+    <span class="s5">#     compilers probably have a dedicated binary with the</span>
+    <span class="s5">#     right paths compiled in.  I hope.)</span>
+    <span class="s5">#   * can't do really freaky things with the library list/library</span>
+    <span class="s5">#     dirs, e.g. &quot;-Ldir1 -lfoo -Ldir2 -lfoo&quot; to link against</span>
+    <span class="s5">#     different versions of libfoo.a in different locations.  I</span>
+    <span class="s5">#     think this is useless without the ability to null out the</span>
+    <span class="s5">#     library search path anyways.</span>
+
+    <span class="s1">executables</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">]</span>
+
+    <span class="s5"># Subclasses that rely on the standard filename generation methods</span>
+    <span class="s5"># implemented below should override these; see the comment near</span>
+    <span class="s5"># those methods ('object_filenames()' et. al.) for details:</span>
+    <span class="s1">src_extensions</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None</span>
+    <span class="s1">obj_extension</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None</span>
+    <span class="s1">static_lib_extension</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None</span>
+    <span class="s1">shared_lib_extension</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None</span>
+    <span class="s1">static_lib_format</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None  </span><span class="s5"># format string</span>
+    <span class="s1">shared_lib_format</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None  </span><span class="s5"># prob. same as static_lib_format</span>
+    <span class="s1">exe_extension</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None</span>
+
+    <span class="s5"># Default language settings. language_map is used to detect a source</span>
+    <span class="s5"># file or Extension target language, checking source filenames.</span>
+    <span class="s5"># language_order is used to detect the language precedence, when deciding</span>
+    <span class="s5"># what language to use when mixing source types. For example, if some</span>
+    <span class="s5"># extension has two files with &quot;.c&quot; extension, and one with &quot;.cpp&quot;, it</span>
+    <span class="s5"># is still linked as c++.</span>
+    <span class="s1">language_map</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]] = {</span>
+        <span class="s4">&quot;.c&quot;</span><span class="s3">: </span><span class="s4">&quot;c&quot;</span><span class="s3">,</span>
+        <span class="s4">&quot;.cc&quot;</span><span class="s3">: </span><span class="s4">&quot;c++&quot;</span><span class="s3">,</span>
+        <span class="s4">&quot;.cpp&quot;</span><span class="s3">: </span><span class="s4">&quot;c++&quot;</span><span class="s3">,</span>
+        <span class="s4">&quot;.cxx&quot;</span><span class="s3">: </span><span class="s4">&quot;c++&quot;</span><span class="s3">,</span>
+        <span class="s4">&quot;.m&quot;</span><span class="s3">: </span><span class="s4">&quot;objc&quot;</span><span class="s3">,</span>
+    <span class="s3">}</span>
+    <span class="s1">language_order</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = [</span><span class="s4">&quot;c++&quot;</span><span class="s3">, </span><span class="s4">&quot;objc&quot;</span><span class="s3">, </span><span class="s4">&quot;c&quot;</span><span class="s3">]</span>
+
+    <span class="s1">include_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+    <span class="s4">&quot;&quot;&quot; 
+    include dirs specific to this compiler class 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+    <span class="s4">&quot;&quot;&quot; 
+    library dirs specific to this compiler class 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">, </span><span class="s1">force</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run </span><span class="s3">= </span><span class="s1">dry_run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">force </span><span class="s3">= </span><span class="s1">force</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">verbose </span><span class="s3">= </span><span class="s1">verbose</span>
+
+        <span class="s5"># 'output_dir': a common output directory for object, library,</span>
+        <span class="s5"># shared object, and shared library files</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s5"># 'macros': a list of macro definitions (or undefinitions).  A</span>
+        <span class="s5"># macro definition is a 2-tuple (name, value), where the value is</span>
+        <span class="s5"># either a string or None (no explicit value).  A macro</span>
+        <span class="s5"># undefinition is a 1-tuple (name,).</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">] = []</span>
+
+        <span class="s5"># 'include_dirs': a list of directories to search for include files</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">include_dirs </span><span class="s3">= []</span>
+
+        <span class="s5"># 'libraries': a list of libraries to include in any link</span>
+        <span class="s5"># (library names, not filenames: eg. &quot;foo&quot; not &quot;libfoo.a&quot;)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+
+        <span class="s5"># 'library_dirs': a list of directories to search for libraries</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">library_dirs </span><span class="s3">= []</span>
+
+        <span class="s5"># 'runtime_library_dirs': a list of directories to search for</span>
+        <span class="s5"># shared libraries/objects at runtime</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+
+        <span class="s5"># 'objects': a list of object files (or similar, such as explicitly</span>
+        <span class="s5"># named library files) to include on any link</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+
+        <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">executables</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">set_executable</span><span class="s3">(</span><span class="s1">key</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">executables</span><span class="s3">[</span><span class="s1">key</span><span class="s3">])</span>
+
+    <span class="s2">def </span><span class="s1">set_executables</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Define the executables (and options for them) that will be run 
+        to perform the various stages of compilation.  The exact set of 
+        executables that may be specified here depends on the compiler 
+        class (via the 'executables' class attribute), but most will have: 
+          compiler      the C/C++ compiler 
+          linker_so     linker used to create shared objects and libraries 
+          linker_exe    linker used to create binary executables 
+          archiver      static library creator 
+ 
+        On platforms with a command-line (Unix, DOS/Windows), each of these 
+        is a string that will be split into executable name and (optional) 
+        list of arguments.  (Splitting the string is done similarly to how 
+        Unix shells operate: words are delimited by spaces, but quotes and 
+        backslashes can override this.  See 
+        'distutils.util.split_quoted()'.) 
+        &quot;&quot;&quot;</span>
+
+        <span class="s5"># Note that some CCompiler implementation classes will define class</span>
+        <span class="s5"># attributes 'cpp', 'cc', etc. with hard-coded executable names;</span>
+        <span class="s5"># this is appropriate when a compiler class is for exactly one</span>
+        <span class="s5"># compiler/OS combination (eg. MSVCCompiler).  Other compiler</span>
+        <span class="s5"># classes (UnixCCompiler, in particular) are driven by information</span>
+        <span class="s5"># discovered at run-time, since there are many different ways to do</span>
+        <span class="s5"># basically the same things with Unix C compilers.</span>
+
+        <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">kwargs</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">executables</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span>
+                    <span class="s4">f&quot;unknown executable '</span><span class="s2">{</span><span class="s1">key</span><span class="s2">}</span><span class="s4">' for class </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">__name__</span><span class="s2">}</span><span class="s4">&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">set_executable</span><span class="s3">(</span><span class="s1">key</span><span class="s3">, </span><span class="s1">kwargs</span><span class="s3">[</span><span class="s1">key</span><span class="s3">])</span>
+
+    <span class="s2">def </span><span class="s1">set_executable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">value</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s1">setattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">, </span><span class="s1">split_quoted</span><span class="s3">(</span><span class="s1">value</span><span class="s3">))</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">setattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">key</span><span class="s3">, </span><span class="s1">value</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_find_macro</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">):</span>
+        <span class="s1">i </span><span class="s3">= </span><span class="s6">0</span>
+        <span class="s2">for </span><span class="s1">defn </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">defn</span><span class="s3">[</span><span class="s6">0</span><span class="s3">] == </span><span class="s1">name</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">i</span>
+            <span class="s1">i </span><span class="s3">+= </span><span class="s6">1</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_check_macro_definitions</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">definitions</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Ensure that every element of 'definitions' is valid.&quot;&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">defn </span><span class="s2">in </span><span class="s1">definitions</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_check_macro_definition</span><span class="s3">(*</span><span class="s1">defn</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_check_macro_definition</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">defn</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Raise a TypeError if defn is not valid. 
+ 
+        A valid definition is either a (name, value) 2-tuple or a (name,) tuple. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">defn</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">) </span><span class="s2">or not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_valid_macro</span><span class="s3">(*</span><span class="s1">defn</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span>
+                <span class="s4">f&quot;invalid macro definition '</span><span class="s2">{</span><span class="s1">defn</span><span class="s2">}</span><span class="s4">': &quot;</span>
+                <span class="s4">&quot;must be tuple (string,), (string, string), or (string, None)&quot;</span>
+            <span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">_is_valid_macro</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        A valid macro is a ``name : str`` and a ``value : str | None``. 
+ 
+        &gt;&gt;&gt; Compiler._is_valid_macro('foo', None) 
+        True 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">str</span><span class="s3">) </span><span class="s2">and </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">value</span><span class="s3">, (</span><span class="s1">str</span><span class="s3">, </span><span class="s1">type</span><span class="s3">(</span><span class="s2">None</span><span class="s3">)))</span>
+
+    <span class="s5"># -- Bookkeeping methods -------------------------------------------</span>
+
+    <span class="s2">def </span><span class="s1">define_macro</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Define a preprocessor macro for all compilations driven by this 
+        compiler object.  The optional parameter 'value' should be a 
+        string; if it is not supplied, then the macro will be defined 
+        without an explicit value and the exact outcome depends on the 
+        compiler used (XXX true? does ANSI say anything about this?) 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># Delete from the list of macro definitions/undefinitions if</span>
+        <span class="s5"># already there (so that this one will take precedence).</span>
+        <span class="s1">i </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_find_macro</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">i </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">del </span><span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">undefine_macro</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Undefine a preprocessor macro for all compilations driven by 
+        this compiler object.  If the same macro is defined by 
+        'define_macro()' and undefined by 'undefine_macro()' the last call 
+        takes precedence (including multiple redefinitions or 
+        undefinitions).  If the macro is redefined/undefined on a 
+        per-compilation basis (ie. in the call to 'compile()'), then that 
+        takes precedence. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># Delete from the list of macro definitions/undefinitions if</span>
+        <span class="s5"># already there (so that this one will take precedence).</span>
+        <span class="s1">i </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_find_macro</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">i </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">del </span><span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+
+        <span class="s1">undefn </span><span class="s3">= (</span><span class="s1">name</span><span class="s3">,)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">undefn</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">add_include_dir</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Add 'dir' to the list of directories that will be searched for 
+        header files.  The compiler is instructed to search directories in 
+        the order in which they are supplied by successive calls to 
+        'add_include_dir()'. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">include_dirs</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_include_dirs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Set the list of directories that will be searched to 'dirs' (a 
+        list of strings).  Overrides any preceding calls to 
+        'add_include_dir()'; subsequence calls to 'add_include_dir()' add 
+        to the list passed to 'set_include_dirs()'.  This does not affect 
+        any list of standard include directories that the compiler may 
+        search by default. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">include_dirs </span><span class="s3">= </span><span class="s1">dirs</span><span class="s3">[:]</span>
+
+    <span class="s2">def </span><span class="s1">add_library</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">libname</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Add 'libname' to the list of libraries that will be included in 
+        all links driven by this compiler object.  Note that 'libname' 
+        should *not* be the name of a file containing a library, but the 
+        name of the library itself: the actual filename will be inferred by 
+        the linker, the compiler, or the compiler class (depending on the 
+        platform). 
+ 
+        The linker will be instructed to link against libraries in the 
+        order they were supplied to 'add_library()' and/or 
+        'set_libraries()'.  It is perfectly valid to duplicate library 
+        names; the linker will be instructed to link against libraries as 
+        many times as they are mentioned. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">libraries</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">libname</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_libraries</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">libnames</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Set the list of libraries to be included in all links driven by 
+        this compiler object to 'libnames' (a list of strings).  This does 
+        not affect any standard system libraries that the linker may 
+        include by default. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">libraries </span><span class="s3">= </span><span class="s1">libnames</span><span class="s3">[:]</span>
+
+    <span class="s2">def </span><span class="s1">add_library_dir</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Add 'dir' to the list of directories that will be searched for 
+        libraries specified to 'add_library()' and 'set_libraries()'.  The 
+        linker will be instructed to search for libraries in the order they 
+        are supplied to 'add_library_dir()' and/or 'set_library_dirs()'. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">library_dirs</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_library_dirs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Set the list of library search directories to 'dirs' (a list of 
+        strings).  This does not affect any standard library search path 
+        that the linker may search by default. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">library_dirs </span><span class="s3">= </span><span class="s1">dirs</span><span class="s3">[:]</span>
+
+    <span class="s2">def </span><span class="s1">add_runtime_library_dir</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Add 'dir' to the list of directories that will be searched for 
+        shared libraries at runtime. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">runtime_library_dirs</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_runtime_library_dirs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Set the list of directories to search for shared libraries at 
+        runtime to 'dirs' (a list of strings).  This does not affect any 
+        standard search path that the runtime linker may search by 
+        default. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">runtime_library_dirs </span><span class="s3">= </span><span class="s1">dirs</span><span class="s3">[:]</span>
+
+    <span class="s2">def </span><span class="s1">add_link_object</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">object</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Add 'object' to the list of object files (or analogues, such as 
+        explicitly named library files or the output of &quot;resource 
+        compilers&quot;) to be included in every link driven by this compiler 
+        object. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">objects</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">object</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_link_objects</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Set the list of object files (or analogues) to be included in 
+        every link to 'objects'.  This does not affect any standard object 
+        files that the linker may include by default (such as system 
+        libraries). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">objects </span><span class="s3">= </span><span class="s1">objects</span><span class="s3">[:]</span>
+
+    <span class="s5"># -- Private utility methods --------------------------------------</span>
+    <span class="s5"># (here for the convenience of subclasses)</span>
+
+    <span class="s5"># Helper method to prep compiler in subclass compile() methods</span>
+
+    <span class="s2">def </span><span class="s1">_setup_compile</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">outdir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">macros</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">incdirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">sources</span><span class="s3">,</span>
+        <span class="s1">depends</span><span class="s3">,</span>
+        <span class="s1">extra</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Process arguments and decide which source files to compile.&quot;&quot;&quot;</span>
+        <span class="s1">outdir</span><span class="s3">, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">incdirs </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fix_compile_args</span><span class="s3">(</span><span class="s1">outdir</span><span class="s3">, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">incdirs</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">extra </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">extra </span><span class="s3">= []</span>
+
+        <span class="s5"># Get the list of expected output (object) files</span>
+        <span class="s1">objects </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">object_filenames</span><span class="s3">(</span><span class="s1">sources</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">=</span><span class="s1">outdir</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">) == </span><span class="s1">len</span><span class="s3">(</span><span class="s1">sources</span><span class="s3">)</span>
+
+        <span class="s1">pp_opts </span><span class="s3">= </span><span class="s1">gen_preprocess_options</span><span class="s3">(</span><span class="s1">macros</span><span class="s3">, </span><span class="s1">incdirs</span><span class="s3">)</span>
+
+        <span class="s1">build </span><span class="s3">= {}</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">sources</span><span class="s3">)):</span>
+            <span class="s1">src </span><span class="s3">= </span><span class="s1">sources</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+            <span class="s1">obj </span><span class="s3">= </span><span class="s1">objects</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+            <span class="s1">ext </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">src</span><span class="s3">)[</span><span class="s6">1</span><span class="s3">]</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">obj</span><span class="s3">))</span>
+            <span class="s1">build</span><span class="s3">[</span><span class="s1">obj</span><span class="s3">] = (</span><span class="s1">src</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">extra</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">, </span><span class="s1">build</span>
+
+    <span class="s2">def </span><span class="s1">_get_cc_args</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">, </span><span class="s1">debug</span><span class="s3">, </span><span class="s1">before</span><span class="s3">):</span>
+        <span class="s5"># works for unixccompiler, cygwinccompiler</span>
+        <span class="s1">cc_args </span><span class="s3">= </span><span class="s1">pp_opts </span><span class="s3">+ [</span><span class="s4">'-c'</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">debug</span><span class="s3">:</span>
+            <span class="s1">cc_args</span><span class="s3">[:</span><span class="s6">0</span><span class="s3">] = [</span><span class="s4">'-g'</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">before</span><span class="s3">:</span>
+            <span class="s1">cc_args</span><span class="s3">[:</span><span class="s6">0</span><span class="s3">] = </span><span class="s1">before</span>
+        <span class="s2">return </span><span class="s1">cc_args</span>
+
+    <span class="s2">def </span><span class="s1">_fix_compile_args</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">macros</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">include_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">], </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]:</span>
+        <span class="s0">&quot;&quot;&quot;Typecheck and fix-up some of the arguments to the 'compile()' 
+        method, and return fixed-up values.  Specifically: if 'output_dir' 
+        is None, replaces it with 'self.output_dir'; ensures that 'macros' 
+        is a list, and augments it with 'self.macros'; ensures that 
+        'include_dirs' is a list, and augments it with 'self.include_dirs'. 
+        Guarantees that the returned values are of the correct type, 
+        i.e. for 'output_dir' either string or None, and for 'macros' and 
+        'include_dirs' either list or None. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">output_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">output_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">output_dir</span>
+        <span class="s2">elif not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'output_dir' must be a string or None&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">macros </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">macros </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">macros</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">macros</span><span class="s3">, </span><span class="s1">list</span><span class="s3">):</span>
+            <span class="s1">macros </span><span class="s3">= </span><span class="s1">macros </span><span class="s3">+ (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">macros </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'macros' (if supplied) must be a list of tuples&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">include_dirs </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">include_dirs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">include_dirs</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">include_dirs</span><span class="s3">, (</span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)):</span>
+            <span class="s1">include_dirs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">include_dirs</span><span class="s3">) + (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">include_dirs </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'include_dirs' (if supplied) must be a list of strings&quot;</span><span class="s3">)</span>
+
+        <span class="s5"># add include dirs for class</span>
+        <span class="s1">include_dirs </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">include_dirs</span>
+
+        <span class="s2">return </span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">include_dirs</span>
+
+    <span class="s2">def </span><span class="s1">_prep_compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">sources</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">depends</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Decide which source files must be recompiled. 
+ 
+        Determine the list of object files corresponding to 'sources', 
+        and figure out which ones really need to be recompiled. 
+        Return a list of all object files and a dictionary telling 
+        which source files can be skipped. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># Get the list of expected output (object) files</span>
+        <span class="s1">objects </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">object_filenames</span><span class="s3">(</span><span class="s1">sources</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">=</span><span class="s1">output_dir</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">) == </span><span class="s1">len</span><span class="s3">(</span><span class="s1">sources</span><span class="s3">)</span>
+
+        <span class="s5"># Return an empty dict for the &quot;which source files can be skipped&quot;</span>
+        <span class="s5"># return value to preserve API compatibility.</span>
+        <span class="s2">return </span><span class="s1">objects</span><span class="s3">, {}</span>
+
+    <span class="s2">def </span><span class="s1">_fix_object_args</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...], </span><span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span>
+    <span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Typecheck and fix up some arguments supplied to various methods. 
+        Specifically: ensure that 'objects' is a list; if output_dir is 
+        None, replace with self.output_dir.  Return fixed versions of 
+        'objects' and 'output_dir'. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">, (</span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'objects' must be a list or tuple of strings&quot;</span><span class="s3">)</span>
+        <span class="s1">objects </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">output_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">output_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">output_dir</span>
+        <span class="s2">elif not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'output_dir' must be a string or None&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s3">(</span><span class="s1">objects</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_fix_lib_args</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]:</span>
+        <span class="s0">&quot;&quot;&quot;Typecheck and fix up some of the arguments supplied to the 
+        'link_*' methods.  Specifically: ensure that all arguments are 
+        lists, and augment them with their permanent versions 
+        (eg. 'self.libraries' augments 'libraries').  Return a tuple with 
+        fixed versions of all arguments. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">libraries </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">libraries </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">libraries</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">libraries</span><span class="s3">, (</span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)):</span>
+            <span class="s1">libraries </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">libraries</span><span class="s3">) + (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">libraries </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'libraries' (if supplied) must be a list of strings&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">library_dirs </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">library_dirs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">library_dirs</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">library_dirs</span><span class="s3">, (</span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)):</span>
+            <span class="s1">library_dirs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">library_dirs</span><span class="s3">) + (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">library_dirs </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;'library_dirs' (if supplied) must be a list of strings&quot;</span><span class="s3">)</span>
+
+        <span class="s5"># add library dirs for class</span>
+        <span class="s1">library_dirs </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">library_dirs</span>
+
+        <span class="s2">if </span><span class="s1">runtime_library_dirs </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">runtime_library_dirs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">runtime_library_dirs</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">runtime_library_dirs</span><span class="s3">, (</span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)):</span>
+            <span class="s1">runtime_library_dirs </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">runtime_library_dirs</span><span class="s3">) + (</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">runtime_library_dirs </span><span class="s2">or </span><span class="s3">[]</span>
+            <span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span>
+                <span class="s4">&quot;'runtime_library_dirs' (if supplied) must be a list of strings&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s3">(</span><span class="s1">libraries</span><span class="s3">, </span><span class="s1">library_dirs</span><span class="s3">, </span><span class="s1">runtime_library_dirs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_need_link</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">output_file</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Return true if we need to relink the files listed in 'objects' 
+        to recreate 'output_file'. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">force</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s1">newer </span><span class="s3">= </span><span class="s1">newer_group</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">, </span><span class="s1">output_file</span><span class="s3">, </span><span class="s1">missing</span><span class="s3">=</span><span class="s4">'newer'</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">newer </span><span class="s3">= </span><span class="s1">newer_group</span><span class="s3">(</span><span class="s1">objects</span><span class="s3">, </span><span class="s1">output_file</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">newer</span>
+
+    <span class="s2">def </span><span class="s1">detect_language</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">sources</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Detect the language of a given file, or list of files. Uses 
+        language_map, and language_order to do the job. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">sources</span><span class="s3">, </span><span class="s1">list</span><span class="s3">):</span>
+            <span class="s1">sources </span><span class="s3">= [</span><span class="s1">sources</span><span class="s3">]</span>
+        <span class="s1">lang </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">index </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">language_order</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">source </span><span class="s2">in </span><span class="s1">sources</span><span class="s3">:</span>
+            <span class="s1">base</span><span class="s3">, </span><span class="s1">ext </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">source</span><span class="s3">)</span>
+            <span class="s1">extlang </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">language_map</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">ext</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">extindex </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">language_order</span><span class="s3">.</span><span class="s1">index</span><span class="s3">(</span><span class="s1">extlang</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">extindex </span><span class="s3">&lt; </span><span class="s1">index</span><span class="s3">:</span>
+                    <span class="s1">lang </span><span class="s3">= </span><span class="s1">extlang</span>
+                    <span class="s1">index </span><span class="s3">= </span><span class="s1">extindex</span>
+            <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+        <span class="s2">return </span><span class="s1">lang</span>
+
+    <span class="s5"># -- Worker methods ------------------------------------------------</span>
+    <span class="s5"># (must be implemented by subclasses)</span>
+
+    <span class="s2">def </span><span class="s1">preprocess</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">source</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">output_file</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">macros</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">include_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Preprocess a single C/C++ source file, named in 'source'. 
+        Output will be written to file named 'output_file', or stdout if 
+        'output_file' not supplied.  'macros' is a list of macro 
+        definitions as for 'compile()', which will augment the macros set 
+        with 'define_macro()' and 'undefine_macro()'.  'include_dirs' is a 
+        list of directory names that will be added to the default list. 
+ 
+        Raises PreprocessError on failure. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">compile</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">sources</span><span class="s3">: </span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]],</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">macros</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">include_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">depends</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Compile one or more source files. 
+ 
+        'sources' must be a list of filenames, most likely C/C++ 
+        files, but in reality anything that can be handled by a 
+        particular compiler and compiler class (eg. MSVCCompiler can 
+        handle resource files in 'sources').  Return a list of object 
+        filenames, one per source filename in 'sources'.  Depending on 
+        the implementation, not all source files will necessarily be 
+        compiled, but all corresponding object filenames will be 
+        returned. 
+ 
+        If 'output_dir' is given, object files will be put under it, while 
+        retaining their original path component.  That is, &quot;foo/bar.c&quot; 
+        normally compiles to &quot;foo/bar.o&quot; (for a Unix implementation); if 
+        'output_dir' is &quot;build&quot;, then it would compile to 
+        &quot;build/foo/bar.o&quot;. 
+ 
+        'macros', if given, must be a list of macro definitions.  A macro 
+        definition is either a (name, value) 2-tuple or a (name,) 1-tuple. 
+        The former defines a macro; if the value is None, the macro is 
+        defined without an explicit value.  The 1-tuple case undefines a 
+        macro.  Later definitions/redefinitions/ undefinitions take 
+        precedence. 
+ 
+        'include_dirs', if given, must be a list of strings, the 
+        directories to add to the default include file search path for this 
+        compilation only. 
+ 
+        'debug' is a boolean; if true, the compiler will be instructed to 
+        output debug symbols in (or alongside) the object file(s). 
+ 
+        'extra_preargs' and 'extra_postargs' are implementation- dependent. 
+        On platforms that have the notion of a command-line (e.g. Unix, 
+        DOS/Windows), they are most likely lists of strings: extra 
+        command-line arguments to prepend/append to the compiler command 
+        line.  On other platforms, consult the implementation class 
+        documentation.  In any event, they are intended as an escape hatch 
+        for those occasions when the abstract compiler framework doesn't 
+        cut the mustard. 
+ 
+        'depends', if given, is a list of filenames that all targets 
+        depend on.  If a source file is older than any file in 
+        depends, then the source file will be recompiled.  This 
+        supports dependency tracking, but only at a coarse 
+        granularity. 
+ 
+        Raises CompileError on failure. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># A concrete compiler class can either override this method</span>
+        <span class="s5"># entirely or implement _compile().</span>
+        <span class="s1">macros</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">, </span><span class="s1">build </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_setup_compile</span><span class="s3">(</span>
+            <span class="s1">output_dir</span><span class="s3">, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">include_dirs</span><span class="s3">, </span><span class="s1">sources</span><span class="s3">, </span><span class="s1">depends</span><span class="s3">, </span><span class="s1">extra_postargs</span>
+        <span class="s3">)</span>
+        <span class="s1">cc_args </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_cc_args</span><span class="s3">(</span><span class="s1">pp_opts</span><span class="s3">, </span><span class="s1">debug</span><span class="s3">, </span><span class="s1">extra_preargs</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">obj </span><span class="s2">in </span><span class="s1">objects</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">src</span><span class="s3">, </span><span class="s1">ext </span><span class="s3">= </span><span class="s1">build</span><span class="s3">[</span><span class="s1">obj</span><span class="s3">]</span>
+            <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+                <span class="s2">continue</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_compile</span><span class="s3">(</span><span class="s1">obj</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">, </span><span class="s1">cc_args</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">)</span>
+
+        <span class="s5"># Return *all* object filenames, not just the ones we just built.</span>
+        <span class="s2">return </span><span class="s1">objects</span>
+
+    <span class="s2">def </span><span class="s1">_compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">, </span><span class="s1">cc_args</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Compile 'src' to product 'obj'.&quot;&quot;&quot;</span>
+        <span class="s5"># A concrete compiler class that does not override compile()</span>
+        <span class="s5"># should implement _compile().</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">create_static_lib</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...],</span>
+        <span class="s1">output_libname</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">target_lang</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Link a bunch of stuff together to create a static library file. 
+        The &quot;bunch of stuff&quot; consists of the list of object files supplied 
+        as 'objects', the extra object files supplied to 
+        'add_link_object()' and/or 'set_link_objects()', the libraries 
+        supplied to 'add_library()' and/or 'set_libraries()', and the 
+        libraries supplied as 'libraries' (if any). 
+ 
+        'output_libname' should be a library name, not a filename; the 
+        filename will be inferred from the library name.  'output_dir' is 
+        the directory where the library file will be put. 
+ 
+        'debug' is a boolean; if true, debugging information will be 
+        included in the library (note that on most platforms, it is the 
+        compile step where this matters: the 'debug' flag is included here 
+        just for consistency). 
+ 
+        'target_lang' is the target language for which the given objects 
+        are being compiled. This allows specific linkage time treatment of 
+        certain languages. 
+ 
+        Raises LibError on failure. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">pass</span>
+
+    <span class="s5"># values for target_desc parameter in link()</span>
+    <span class="s1">SHARED_OBJECT </span><span class="s3">= </span><span class="s4">&quot;shared_object&quot;</span>
+    <span class="s1">SHARED_LIBRARY </span><span class="s3">= </span><span class="s4">&quot;shared_library&quot;</span>
+    <span class="s1">EXECUTABLE </span><span class="s3">= </span><span class="s4">&quot;executable&quot;</span>
+
+    <span class="s2">def </span><span class="s1">link</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">target_desc</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...],</span>
+        <span class="s1">output_filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">export_symbols</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">build_temp</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">target_lang</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Link a bunch of stuff together to create an executable or 
+        shared library file. 
+ 
+        The &quot;bunch of stuff&quot; consists of the list of object files supplied 
+        as 'objects'.  'output_filename' should be a filename.  If 
+        'output_dir' is supplied, 'output_filename' is relative to it 
+        (i.e. 'output_filename' can provide directory components if 
+        needed). 
+ 
+        'libraries' is a list of libraries to link against.  These are 
+        library names, not filenames, since they're translated into 
+        filenames in a platform-specific way (eg. &quot;foo&quot; becomes &quot;libfoo.a&quot; 
+        on Unix and &quot;foo.lib&quot; on DOS/Windows).  However, they can include a 
+        directory component, which means the linker will look in that 
+        specific directory rather than searching all the normal locations. 
+ 
+        'library_dirs', if supplied, should be a list of directories to 
+        search for libraries that were specified as bare library names 
+        (ie. no directory component).  These are on top of the system 
+        default and those supplied to 'add_library_dir()' and/or 
+        'set_library_dirs()'.  'runtime_library_dirs' is a list of 
+        directories that will be embedded into the shared library and used 
+        to search for other shared libraries that *it* depends on at 
+        run-time.  (This may only be relevant on Unix.) 
+ 
+        'export_symbols' is a list of symbols that the shared library will 
+        export.  (This appears to be relevant only on Windows.) 
+ 
+        'debug' is as for 'compile()' and 'create_static_lib()', with the 
+        slight distinction that it actually matters on most platforms (as 
+        opposed to 'create_static_lib()', which includes a 'debug' flag 
+        mostly for form's sake). 
+ 
+        'extra_preargs' and 'extra_postargs' are as for 'compile()' (except 
+        of course that they supply command-line arguments for the 
+        particular linker being used). 
+ 
+        'target_lang' is the target language for which the given objects 
+        are being compiled. This allows specific linkage time treatment of 
+        certain languages. 
+ 
+        Raises LinkError on failure. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s5"># Old 'link_*()' methods, rewritten to use the new 'link()' method.</span>
+
+    <span class="s2">def </span><span class="s1">link_shared_lib</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...],</span>
+        <span class="s1">output_libname</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">export_symbols</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">build_temp</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">target_lang</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">link</span><span class="s3">(</span>
+            <span class="s1">Compiler</span><span class="s3">.</span><span class="s1">SHARED_LIBRARY</span><span class="s3">,</span>
+            <span class="s1">objects</span><span class="s3">,</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">library_filename</span><span class="s3">(</span><span class="s1">output_libname</span><span class="s3">, </span><span class="s1">lib_type</span><span class="s3">=</span><span class="s4">'shared'</span><span class="s3">),</span>
+            <span class="s1">output_dir</span><span class="s3">,</span>
+            <span class="s1">libraries</span><span class="s3">,</span>
+            <span class="s1">library_dirs</span><span class="s3">,</span>
+            <span class="s1">runtime_library_dirs</span><span class="s3">,</span>
+            <span class="s1">export_symbols</span><span class="s3">,</span>
+            <span class="s1">debug</span><span class="s3">,</span>
+            <span class="s1">extra_preargs</span><span class="s3">,</span>
+            <span class="s1">extra_postargs</span><span class="s3">,</span>
+            <span class="s1">build_temp</span><span class="s3">,</span>
+            <span class="s1">target_lang</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">link_shared_object</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...],</span>
+        <span class="s1">output_filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">export_symbols</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">build_temp</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">target_lang</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">link</span><span class="s3">(</span>
+            <span class="s1">Compiler</span><span class="s3">.</span><span class="s1">SHARED_OBJECT</span><span class="s3">,</span>
+            <span class="s1">objects</span><span class="s3">,</span>
+            <span class="s1">output_filename</span><span class="s3">,</span>
+            <span class="s1">output_dir</span><span class="s3">,</span>
+            <span class="s1">libraries</span><span class="s3">,</span>
+            <span class="s1">library_dirs</span><span class="s3">,</span>
+            <span class="s1">runtime_library_dirs</span><span class="s3">,</span>
+            <span class="s1">export_symbols</span><span class="s3">,</span>
+            <span class="s1">debug</span><span class="s3">,</span>
+            <span class="s1">extra_preargs</span><span class="s3">,</span>
+            <span class="s1">extra_postargs</span><span class="s3">,</span>
+            <span class="s1">build_temp</span><span class="s3">,</span>
+            <span class="s1">target_lang</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">link_executable</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">objects</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...],</span>
+        <span class="s1">output_progname</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">extra_preargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">extra_postargs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">target_lang</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">link</span><span class="s3">(</span>
+            <span class="s1">Compiler</span><span class="s3">.</span><span class="s1">EXECUTABLE</span><span class="s3">,</span>
+            <span class="s1">objects</span><span class="s3">,</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">executable_filename</span><span class="s3">(</span><span class="s1">output_progname</span><span class="s3">),</span>
+            <span class="s1">output_dir</span><span class="s3">,</span>
+            <span class="s1">libraries</span><span class="s3">,</span>
+            <span class="s1">library_dirs</span><span class="s3">,</span>
+            <span class="s1">runtime_library_dirs</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s1">debug</span><span class="s3">,</span>
+            <span class="s1">extra_preargs</span><span class="s3">,</span>
+            <span class="s1">extra_postargs</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s1">target_lang</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s5"># -- Miscellaneous methods -----------------------------------------</span>
+    <span class="s5"># These are all used by the 'gen_lib_options() function; there is</span>
+    <span class="s5"># no appropriate default implementation so subclasses should</span>
+    <span class="s5"># implement all of these.</span>
+
+    <span class="s2">def </span><span class="s1">library_dir_option</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return the compiler option to add 'dir' to the list of 
+        directories searched for libraries. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">runtime_library_dir_option</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return the compiler option to add 'dir' to the list of 
+        directories searched for runtime libraries. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">library_option</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return the compiler option to add 'lib' to the list of libraries 
+        linked into the shared library or executable. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">has_function</span><span class="s3">(  </span><span class="s5"># noqa: C901</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">funcname</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">includes</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">include_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">libraries</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return a boolean indicating whether funcname is provided as 
+        a symbol on the current platform.  The optional arguments can 
+        be used to augment the compilation environment. 
+ 
+        The libraries argument is a list of flags to be passed to the 
+        linker to make additional symbol definitions available for 
+        linking. 
+ 
+        The includes and include_dirs arguments are deprecated. 
+        Usually, supplying include files with function declarations 
+        will cause function detection to fail even in cases where the 
+        symbol is available for linking. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># this can't be included at module scope because it tries to</span>
+        <span class="s5"># import math which might not be available at that point - maybe</span>
+        <span class="s5"># the necessary logic should just be inlined?</span>
+        <span class="s2">import </span><span class="s1">tempfile</span>
+
+        <span class="s2">if </span><span class="s1">includes </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">includes </span><span class="s3">= []</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s4">&quot;includes is deprecated&quot;</span><span class="s3">, </span><span class="s1">DeprecationWarning</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">include_dirs </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">include_dirs </span><span class="s3">= []</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s4">&quot;include_dirs is deprecated&quot;</span><span class="s3">, </span><span class="s1">DeprecationWarning</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">libraries </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">libraries </span><span class="s3">= []</span>
+        <span class="s2">if </span><span class="s1">library_dirs </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">library_dirs </span><span class="s3">= []</span>
+        <span class="s1">fd</span><span class="s3">, </span><span class="s1">fname </span><span class="s3">= </span><span class="s1">tempfile</span><span class="s3">.</span><span class="s1">mkstemp</span><span class="s3">(</span><span class="s4">&quot;.c&quot;</span><span class="s3">, </span><span class="s1">funcname</span><span class="s3">, </span><span class="s1">text</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">os</span><span class="s3">.</span><span class="s1">fdopen</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">, </span><span class="s4">&quot;w&quot;</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">'utf-8'</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">incl </span><span class="s2">in </span><span class="s1">includes</span><span class="s3">:</span>
+                <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s4">f&quot;&quot;&quot;#include &quot;</span><span class="s2">{</span><span class="s1">incl</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;&quot;&quot;</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">includes</span><span class="s3">:</span>
+                <span class="s5"># Use &quot;char func(void);&quot; as the prototype to follow</span>
+                <span class="s5"># what autoconf does.  This prototype does not match</span>
+                <span class="s5"># any well-known function the compiler might recognize</span>
+                <span class="s5"># as a builtin, so this ends up as a true link test.</span>
+                <span class="s5"># Without a fake prototype, the test would need to</span>
+                <span class="s5"># know the exact argument types, and the has_function</span>
+                <span class="s5"># interface does not provide that level of information.</span>
+                <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span>
+                    <span class="s4">f&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">#ifdef __cplusplus</span>
+<span class="s4">extern &quot;C&quot;</span>
+<span class="s4">#endif</span>
+<span class="s4">char </span><span class="s2">{</span><span class="s1">funcname</span><span class="s2">}</span><span class="s4">(void);</span>
+<span class="s4">&quot;&quot;&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span>
+                <span class="s4">f&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">int main (int argc, char **argv) </span><span class="s2">{{</span>
+    <span class="s2">{</span><span class="s1">funcname</span><span class="s2">}</span><span class="s4">();</span>
+    <span class="s4">return 0;</span>
+<span class="s2">}}</span>
+<span class="s4">&quot;&quot;&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">objects </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">([</span><span class="s1">fname</span><span class="s3">], </span><span class="s1">include_dirs</span><span class="s3">=</span><span class="s1">include_dirs</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">CompileError</span><span class="s3">:</span>
+            <span class="s2">return False</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">fname</span><span class="s3">)</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">link_executable</span><span class="s3">(</span>
+                <span class="s1">objects</span><span class="s3">, </span><span class="s4">&quot;a.out&quot;</span><span class="s3">, </span><span class="s1">libraries</span><span class="s3">=</span><span class="s1">libraries</span><span class="s3">, </span><span class="s1">library_dirs</span><span class="s3">=</span><span class="s1">library_dirs</span>
+            <span class="s3">)</span>
+        <span class="s2">except </span><span class="s3">(</span><span class="s1">LinkError</span><span class="s3">, </span><span class="s1">TypeError</span><span class="s3">):</span>
+            <span class="s2">return False</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">executable_filename</span><span class="s3">(</span><span class="s4">&quot;a.out&quot;</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">output_dir </span><span class="s2">or </span><span class="s4">''</span><span class="s3">)</span>
+            <span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">objects</span><span class="s3">:</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">find_library_file</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">lib</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">debug</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Search the specified list of directories for a static or shared 
+        library file 'lib' and return the full path to that file.  If 
+        'debug' true, look for a debugging version (if that makes sense on 
+        the current platform).  Return None if 'lib' wasn't found in any of 
+        the specified directories. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s5"># -- Filename generation methods -----------------------------------</span>
+
+    <span class="s5"># The default implementation of the filename generating methods are</span>
+    <span class="s5"># prejudiced towards the Unix/DOS/Windows view of the world:</span>
+    <span class="s5">#   * object files are named by replacing the source file extension</span>
+    <span class="s5">#     (eg. .c/.cpp -&gt; .o/.obj)</span>
+    <span class="s5">#   * library files (shared or static) are named by plugging the</span>
+    <span class="s5">#     library name and extension into a format string, eg.</span>
+    <span class="s5">#     &quot;lib%s.%s&quot; % (lib_name, &quot;.a&quot;) for Unix static libraries</span>
+    <span class="s5">#   * executables are named by appending an extension (possibly</span>
+    <span class="s5">#     empty) to the program name: eg. progname + &quot;.exe&quot; for</span>
+    <span class="s5">#     Windows</span>
+    <span class="s5">#</span>
+    <span class="s5"># To reduce redundant code, these methods expect to find</span>
+    <span class="s5"># several attributes in the current object (presumably defined</span>
+    <span class="s5"># as class attributes):</span>
+    <span class="s5">#   * src_extensions -</span>
+    <span class="s5">#     list of C/C++ source file extensions, eg. ['.c', '.cpp']</span>
+    <span class="s5">#   * obj_extension -</span>
+    <span class="s5">#     object file extension, eg. '.o' or '.obj'</span>
+    <span class="s5">#   * static_lib_extension -</span>
+    <span class="s5">#     extension for static library files, eg. '.a' or '.lib'</span>
+    <span class="s5">#   * shared_lib_extension -</span>
+    <span class="s5">#     extension for shared library/object files, eg. '.so', '.dll'</span>
+    <span class="s5">#   * static_lib_format -</span>
+    <span class="s5">#     format string for generating static library filenames,</span>
+    <span class="s5">#     eg. 'lib%s.%s' or '%s.%s'</span>
+    <span class="s5">#   * shared_lib_format</span>
+    <span class="s5">#     format string for generating shared library filenames</span>
+    <span class="s5">#     (probably same as static_lib_format, since the extension</span>
+    <span class="s5">#     is one of the intended parameters to the format string)</span>
+    <span class="s5">#   * exe_extension -</span>
+    <span class="s5">#     extension for executable files, eg. '' or '.exe'</span>
+
+    <span class="s2">def </span><span class="s1">object_filenames</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">source_filenames</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]],</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s4">''</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">output_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">output_dir </span><span class="s3">= </span><span class="s4">''</span>
+        <span class="s2">return </span><span class="s1">list</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_make_out_path</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">, </span><span class="s1">src_name</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">src_name </span><span class="s2">in </span><span class="s1">source_filenames</span>
+        <span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">out_extensions</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">dict</span><span class="s3">.</span><span class="s1">fromkeys</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">src_extensions</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">obj_extension</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_make_out_path</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">, </span><span class="s1">src_name</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_make_out_path_exts</span><span class="s3">(</span>
+            <span class="s1">output_dir</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">, </span><span class="s1">src_name</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">out_extensions</span>
+        <span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_make_out_path_exts</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">strip_dir</span><span class="s3">, </span><span class="s1">src_name</span><span class="s3">, </span><span class="s1">extensions</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot; 
+        &gt;&gt;&gt; exts = {'.c': '.o'} 
+        &gt;&gt;&gt; Compiler._make_out_path_exts('.', False, '/foo/bar.c', exts).replace('\\', '/') 
+        './foo/bar.o' 
+        &gt;&gt;&gt; Compiler._make_out_path_exts('.', True, '/foo/bar.c', exts).replace('\\', '/') 
+        './bar.o' 
+        &quot;&quot;&quot;</span>
+        <span class="s1">src </span><span class="s3">= </span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">PurePath</span><span class="s3">(</span><span class="s1">src_name</span><span class="s3">)</span>
+        <span class="s5"># Ensure base is relative to honor output_dir (python/cpython#37775).</span>
+        <span class="s1">base </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">_make_relative</span><span class="s3">(</span><span class="s1">src</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">new_ext </span><span class="s3">= </span><span class="s1">extensions</span><span class="s3">[</span><span class="s1">src</span><span class="s3">.</span><span class="s1">suffix</span><span class="s3">]</span>
+        <span class="s2">except </span><span class="s1">LookupError</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">UnknownFileType</span><span class="s3">(</span><span class="s4">f&quot;unknown file type '</span><span class="s2">{</span><span class="s1">src</span><span class="s3">.</span><span class="s1">suffix</span><span class="s2">}</span><span class="s4">' (from '</span><span class="s2">{</span><span class="s1">src</span><span class="s2">}</span><span class="s4">')&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">strip_dir</span><span class="s3">:</span>
+            <span class="s1">base </span><span class="s3">= </span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">PurePath</span><span class="s3">(</span><span class="s1">base</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">base</span><span class="s3">.</span><span class="s1">with_suffix</span><span class="s3">(</span><span class="s1">new_ext</span><span class="s3">))</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">_make_relative</span><span class="s3">(</span><span class="s1">base</span><span class="s3">: </span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">base</span><span class="s3">.</span><span class="s1">relative_to</span><span class="s3">(</span><span class="s1">base</span><span class="s3">.</span><span class="s1">anchor</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">shared_object_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">basename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">False</span><span class="s3">] = </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">shared_object_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">basename</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">True</span><span class="s3">],</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">shared_object_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">basename</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">''</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">assert </span><span class="s1">output_dir </span><span class="s2">is not None</span>
+        <span class="s2">if </span><span class="s1">strip_dir</span><span class="s3">:</span>
+            <span class="s1">basename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">basename</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">basename </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">shared_lib_extension</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">executable_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">basename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">False</span><span class="s3">] = </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">executable_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">basename</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">True</span><span class="s3">],</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">&quot;&quot;</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">executable_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">basename</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">''</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">assert </span><span class="s1">output_dir </span><span class="s2">is not None</span>
+        <span class="s2">if </span><span class="s1">strip_dir</span><span class="s3">:</span>
+            <span class="s1">basename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">basename</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">basename </span><span class="s3">+ (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">exe_extension </span><span class="s2">or </span><span class="s4">''</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">library_filename</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">libname</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">lib_type</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot;static&quot;</span><span class="s3">,</span>
+        <span class="s1">strip_dir</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">output_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s4">&quot;&quot;</span><span class="s3">,  </span><span class="s5"># or 'shared'</span>
+    <span class="s3">):</span>
+        <span class="s2">assert </span><span class="s1">output_dir </span><span class="s2">is not None</span>
+        <span class="s1">expected </span><span class="s3">= </span><span class="s4">'&quot;static&quot;, &quot;shared&quot;, &quot;dylib&quot;, &quot;xcode_stub&quot;'</span>
+        <span class="s2">if </span><span class="s1">lib_type </span><span class="s2">not in </span><span class="s1">eval</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">f&quot;'lib_type' must be </span><span class="s2">{</span><span class="s1">expected</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s1">fmt </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">lib_type </span><span class="s3">+ </span><span class="s4">&quot;_lib_format&quot;</span><span class="s3">)</span>
+        <span class="s1">ext </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">lib_type </span><span class="s3">+ </span><span class="s4">&quot;_lib_extension&quot;</span><span class="s3">)</span>
+
+        <span class="s1">dir</span><span class="s3">, </span><span class="s1">base </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">libname</span><span class="s3">)</span>
+        <span class="s1">filename </span><span class="s3">= </span><span class="s1">fmt </span><span class="s3">% (</span><span class="s1">base</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">strip_dir</span><span class="s3">:</span>
+            <span class="s1">dir </span><span class="s3">= </span><span class="s4">''</span>
+
+        <span class="s2">return </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">dir</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">)</span>
+
+    <span class="s5"># -- Utility methods -----------------------------------------------</span>
+
+    <span class="s2">def </span><span class="s1">announce</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">: </span><span class="s1">object</span><span class="s3">, </span><span class="s1">level</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s6">1</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">debug_print</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">: </span><span class="s1">object</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">debug </span><span class="s2">import </span><span class="s1">DEBUG</span>
+
+        <span class="s2">if </span><span class="s1">DEBUG</span><span class="s3">:</span>
+            <span class="s1">print</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">warn</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">: </span><span class="s1">object</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">sys</span><span class="s3">.</span><span class="s1">stderr</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s4">f&quot;warning: </span><span class="s2">{</span><span class="s1">msg</span><span class="s2">}\n</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">execute</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">func</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">[[</span><span class="s1">Unpack</span><span class="s3">[</span><span class="s1">_Ts</span><span class="s3">]], </span><span class="s1">object</span><span class="s3">],</span>
+        <span class="s1">args</span><span class="s3">: </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">Unpack</span><span class="s3">[</span><span class="s1">_Ts</span><span class="s3">]],</span>
+        <span class="s1">msg</span><span class="s3">: </span><span class="s1">object </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">level</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s6">1</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">execute</span><span class="s3">(</span><span class="s1">func</span><span class="s3">, </span><span class="s1">args</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">spawn</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">cmd</span><span class="s3">: </span><span class="s1">MutableSequence</span><span class="s3">[</span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]], **</span><span class="s1">kwargs</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">spawn</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">move_file</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">src</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">dst</span><span class="s3">: </span><span class="s1">_StrPathT</span>
+    <span class="s3">) </span><span class="s1">-&gt; _StrPathT </span><span class="s3">| </span><span class="s1">str</span><span class="s3">: ...</span>
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">move_file</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">src</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">], </span><span class="s1">dst</span><span class="s3">: </span><span class="s1">_BytesPathT</span>
+    <span class="s3">) </span><span class="s1">-&gt; _BytesPathT </span><span class="s3">| </span><span class="s1">bytes</span><span class="s3">: ...</span>
+    <span class="s2">def </span><span class="s1">move_file</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">src</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">],</span>
+        <span class="s1">dst</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">],</span>
+    <span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">os</span><span class="s3">.</span><span class="s1">PathLike</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]:</span>
+        <span class="s2">return </span><span class="s1">move_file</span><span class="s3">(</span><span class="s1">src</span><span class="s3">, </span><span class="s1">dst</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">=</span><span class="s6">0o777</span><span class="s3">):</span>
+        <span class="s1">mkpath</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+
+<span class="s5"># Map a sys.platform/os.name ('posix', 'nt') to the default compiler</span>
+<span class="s5"># type for that platform. Keys are interpreted as re match</span>
+<span class="s5"># patterns. Order is important; platform mappings are preferred over</span>
+<span class="s5"># OS names.</span>
+<span class="s1">_default_compilers </span><span class="s3">= (</span>
+    <span class="s5"># Platform string mappings</span>
+    <span class="s5"># on a cygwin built python we can use gcc like an ordinary UNIXish</span>
+    <span class="s5"># compiler</span>
+    <span class="s3">(</span><span class="s4">'cygwin.*'</span><span class="s3">, </span><span class="s4">'unix'</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">'zos'</span><span class="s3">, </span><span class="s4">'zos'</span><span class="s3">),</span>
+    <span class="s5"># OS name mappings</span>
+    <span class="s3">(</span><span class="s4">'posix'</span><span class="s3">, </span><span class="s4">'unix'</span><span class="s3">),</span>
+    <span class="s3">(</span><span class="s4">'nt'</span><span class="s3">, </span><span class="s4">'msvc'</span><span class="s3">),</span>
+<span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_default_compiler</span><span class="s3">(</span><span class="s1">osname</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">, </span><span class="s1">platform</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Determine the default compiler to use for the given platform. 
+ 
+    osname should be one of the standard Python OS names (i.e. the 
+    ones returned by os.name) and platform the common value 
+    returned by sys.platform for the platform in question. 
+ 
+    The default values are os.name and sys.platform in case the 
+    parameters are not given. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">osname </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">osname </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">name</span>
+    <span class="s2">if </span><span class="s1">platform </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">platform </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform</span>
+    <span class="s5"># Mingw is a special case where sys.platform is 'win32' but we</span>
+    <span class="s5"># want to use the 'mingw32' compiler, so check it first</span>
+    <span class="s2">if </span><span class="s1">is_mingw</span><span class="s3">():</span>
+        <span class="s2">return </span><span class="s4">'mingw32'</span>
+    <span class="s2">for </span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">compiler </span><span class="s2">in </span><span class="s1">_default_compilers</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s3">(</span>
+            <span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">platform</span><span class="s3">) </span><span class="s2">is not None</span>
+            <span class="s2">or </span><span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">osname</span><span class="s3">) </span><span class="s2">is not None</span>
+        <span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">compiler</span>
+    <span class="s5"># Default to Unix compiler</span>
+    <span class="s2">return </span><span class="s4">'unix'</span>
+
+
+<span class="s5"># Map compiler types to (module_name, class_name) pairs -- ie. where to</span>
+<span class="s5"># find the code that implements an interface to this compiler.  (The module</span>
+<span class="s5"># is assumed to be in the 'distutils' package.)</span>
+<span class="s1">compiler_class </span><span class="s3">= {</span>
+    <span class="s4">'unix'</span><span class="s3">: (</span><span class="s4">'unixccompiler'</span><span class="s3">, </span><span class="s4">'UnixCCompiler'</span><span class="s3">, </span><span class="s4">&quot;standard UNIX-style compiler&quot;</span><span class="s3">),</span>
+    <span class="s4">'msvc'</span><span class="s3">: (</span><span class="s4">'_msvccompiler'</span><span class="s3">, </span><span class="s4">'MSVCCompiler'</span><span class="s3">, </span><span class="s4">&quot;Microsoft Visual C++&quot;</span><span class="s3">),</span>
+    <span class="s4">'cygwin'</span><span class="s3">: (</span>
+        <span class="s4">'cygwinccompiler'</span><span class="s3">,</span>
+        <span class="s4">'CygwinCCompiler'</span><span class="s3">,</span>
+        <span class="s4">&quot;Cygwin port of GNU C Compiler for Win32&quot;</span><span class="s3">,</span>
+    <span class="s3">),</span>
+    <span class="s4">'mingw32'</span><span class="s3">: (</span>
+        <span class="s4">'cygwinccompiler'</span><span class="s3">,</span>
+        <span class="s4">'Mingw32CCompiler'</span><span class="s3">,</span>
+        <span class="s4">&quot;Mingw32 port of GNU C Compiler for Win32&quot;</span><span class="s3">,</span>
+    <span class="s3">),</span>
+    <span class="s4">'bcpp'</span><span class="s3">: (</span><span class="s4">'bcppcompiler'</span><span class="s3">, </span><span class="s4">'BCPPCompiler'</span><span class="s3">, </span><span class="s4">&quot;Borland C++ Compiler&quot;</span><span class="s3">),</span>
+    <span class="s4">'zos'</span><span class="s3">: (</span><span class="s4">'zosccompiler'</span><span class="s3">, </span><span class="s4">'zOSCCompiler'</span><span class="s3">, </span><span class="s4">'IBM XL C/C++ Compilers'</span><span class="s3">),</span>
+<span class="s3">}</span>
+
+
+<span class="s2">def </span><span class="s1">show_compilers</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Print list of available compilers (used by the &quot;--help-compiler&quot; 
+    options to &quot;build&quot;, &quot;build_ext&quot;, &quot;build_clib&quot;). 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># XXX this &quot;knows&quot; that the compiler option it's describing is</span>
+    <span class="s5"># &quot;--compiler&quot;, which just happens to be the case for the three</span>
+    <span class="s5"># commands that use it.</span>
+    <span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">fancy_getopt </span><span class="s2">import </span><span class="s1">FancyGetopt</span>
+
+    <span class="s1">compilers </span><span class="s3">= </span><span class="s1">sorted</span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s4">&quot;compiler=&quot; </span><span class="s3">+ </span><span class="s1">compiler</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">compiler_class</span><span class="s3">[</span><span class="s1">compiler</span><span class="s3">][</span><span class="s6">2</span><span class="s3">])</span>
+        <span class="s2">for </span><span class="s1">compiler </span><span class="s2">in </span><span class="s1">compiler_class</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">()</span>
+    <span class="s3">)</span>
+    <span class="s1">pretty_printer </span><span class="s3">= </span><span class="s1">FancyGetopt</span><span class="s3">(</span><span class="s1">compilers</span><span class="s3">)</span>
+    <span class="s1">pretty_printer</span><span class="s3">.</span><span class="s1">print_help</span><span class="s3">(</span><span class="s4">&quot;List of available compilers:&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">new_compiler</span><span class="s3">(</span>
+    <span class="s1">plat</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">compiler</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">force</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Compiler</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Generate an instance of some CCompiler subclass for the supplied 
+    platform/compiler combination.  'plat' defaults to 'os.name' 
+    (eg. 'posix', 'nt'), and 'compiler' defaults to the default compiler 
+    for that platform.  Currently only 'posix' and 'nt' are supported, and 
+    the default compilers are &quot;traditional Unix interface&quot; (UnixCCompiler 
+    class) and Visual C++ (MSVCCompiler class).  Note that it's perfectly 
+    possible to ask for a Unix compiler object under Windows, and a 
+    Microsoft compiler object under Unix -- if you supply a value for 
+    'compiler', 'plat' is ignored. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">plat </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">plat </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">compiler </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">compiler </span><span class="s3">= </span><span class="s1">get_default_compiler</span><span class="s3">(</span><span class="s1">plat</span><span class="s3">)</span>
+
+        <span class="s3">(</span><span class="s1">module_name</span><span class="s3">, </span><span class="s1">class_name</span><span class="s3">, </span><span class="s1">long_description</span><span class="s3">) = </span><span class="s1">compiler_class</span><span class="s3">[</span><span class="s1">compiler</span><span class="s3">]</span>
+    <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s4">f&quot;don't know how to compile C/C++ code on platform '</span><span class="s2">{</span><span class="s1">plat</span><span class="s2">}</span><span class="s4">'&quot;</span>
+        <span class="s2">if </span><span class="s1">compiler </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s1">msg </span><span class="s3">+ </span><span class="s4">f&quot; with '</span><span class="s2">{</span><span class="s1">compiler</span><span class="s2">}</span><span class="s4">' compiler&quot;</span>
+        <span class="s2">raise </span><span class="s1">DistutilsPlatformError</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">module_name </span><span class="s3">= </span><span class="s4">&quot;distutils.&quot; </span><span class="s3">+ </span><span class="s1">module_name</span>
+        <span class="s1">__import__</span><span class="s3">(</span><span class="s1">module_name</span><span class="s3">)</span>
+        <span class="s1">module </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">modules</span><span class="s3">[</span><span class="s1">module_name</span><span class="s3">]</span>
+        <span class="s1">klass </span><span class="s3">= </span><span class="s1">vars</span><span class="s3">(</span><span class="s1">module</span><span class="s3">)[</span><span class="s1">class_name</span><span class="s3">]</span>
+    <span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">DistutilsModuleError</span><span class="s3">(</span>
+            <span class="s4">f&quot;can't compile C/C++ code: unable to load module '</span><span class="s2">{</span><span class="s1">module_name</span><span class="s2">}</span><span class="s4">'&quot;</span>
+        <span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">DistutilsModuleError</span><span class="s3">(</span>
+            <span class="s4">f&quot;can't compile C/C++ code: unable to find class '</span><span class="s2">{</span><span class="s1">class_name</span><span class="s2">}</span><span class="s4">' &quot;</span>
+            <span class="s4">f&quot;in module '</span><span class="s2">{</span><span class="s1">module_name</span><span class="s2">}</span><span class="s4">'&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s5"># XXX The None is necessary to preserve backwards compatibility</span>
+    <span class="s5"># with classes that expect verbose to be the first positional</span>
+    <span class="s5"># argument.</span>
+    <span class="s2">return </span><span class="s1">klass</span><span class="s3">(</span><span class="s2">None</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">, </span><span class="s1">force</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">gen_preprocess_options</span><span class="s3">(</span>
+    <span class="s1">macros</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">_Macro</span><span class="s3">], </span><span class="s1">include_dirs</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]</span>
+<span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s0">&quot;&quot;&quot;Generate C pre-processor options (-D, -U, -I) as used by at least 
+    two types of compilers: the typical Unix compiler and Visual C++. 
+    'macros' is the usual thing, a list of 1- or 2-tuples, where (name,) 
+    means undefine (-U) macro 'name', and (name,value) means define (-D) 
+    macro 'name' to 'value'.  'include_dirs' is just a list of directory 
+    names to be added to the header file search path (-I).  Returns a list 
+    of command-line options suitable for either Unix compilers or Visual 
+    C++. 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># XXX it would be nice (mainly aesthetic, and so we don't generate</span>
+    <span class="s5"># stupid-looking command lines) to go over 'macros' and eliminate</span>
+    <span class="s5"># redundant definitions/undefinitions (ie. ensure that only the</span>
+    <span class="s5"># latest mention of a particular macro winds up on the command</span>
+    <span class="s5"># line).  I don't think it's essential, though, since most (all?)</span>
+    <span class="s5"># Unix C compilers only pay attention to the latest -D or -U</span>
+    <span class="s5"># mention of a macro on their command line.  Similar situation for</span>
+    <span class="s5"># 'include_dirs'.  I'm punting on both for now.  Anyways, weeding out</span>
+    <span class="s5"># redundancies like this should probably be the province of</span>
+    <span class="s5"># CCompiler, since the data structures used are inherited from it</span>
+    <span class="s5"># and therefore common to all CCompiler classes.</span>
+    <span class="s1">pp_opts </span><span class="s3">= []</span>
+    <span class="s2">for </span><span class="s1">macro </span><span class="s2">in </span><span class="s1">macros</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s3">(</span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">macro</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">) </span><span class="s2">and </span><span class="s6">1 </span><span class="s3">&lt;= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">macro</span><span class="s3">) &lt;= </span><span class="s6">2</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span>
+                <span class="s4">f&quot;bad macro definition '</span><span class="s2">{</span><span class="s1">macro</span><span class="s2">}</span><span class="s4">': &quot;</span>
+                <span class="s4">&quot;each element of 'macros' list must be a 1- or 2-tuple&quot;</span>
+            <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">macro</span><span class="s3">) == </span><span class="s6">1</span><span class="s3">:  </span><span class="s5"># undefine this macro</span>
+            <span class="s1">pp_opts</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">f&quot;-U</span><span class="s2">{</span><span class="s1">macro</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">len</span><span class="s3">(</span><span class="s1">macro</span><span class="s3">) == </span><span class="s6">2</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">macro</span><span class="s3">[</span><span class="s6">1</span><span class="s3">] </span><span class="s2">is None</span><span class="s3">:  </span><span class="s5"># define with no explicit value</span>
+                <span class="s1">pp_opts</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">f&quot;-D</span><span class="s2">{</span><span class="s1">macro</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s5"># XXX *don't* need to be clever about quoting the</span>
+                <span class="s5"># macro value here, because we're going to avoid the</span>
+                <span class="s5"># shell at all costs when we spawn the command!</span>
+                <span class="s1">pp_opts</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;-D{}={}&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(*</span><span class="s1">macro</span><span class="s3">))</span>
+
+    <span class="s1">pp_opts</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s4">f&quot;-I</span><span class="s2">{</span><span class="s1">dir</span><span class="s2">}</span><span class="s4">&quot; </span><span class="s2">for </span><span class="s1">dir </span><span class="s2">in </span><span class="s1">include_dirs</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">pp_opts</span>
+
+
+<span class="s2">def </span><span class="s1">gen_lib_options</span><span class="s3">(</span>
+    <span class="s1">compiler</span><span class="s3">: </span><span class="s1">Compiler</span><span class="s3">,</span>
+    <span class="s1">library_dirs</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">runtime_library_dirs</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+    <span class="s1">libraries</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+<span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s0">&quot;&quot;&quot;Generate linker options for searching library directories and 
+    linking with specific libraries.  'libraries' and 'library_dirs' are, 
+    respectively, lists of library names (not filenames!) and search 
+    directories.  Returns a list of command-line options suitable for use 
+    with some compiler (depending on the two format strings passed in). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">lib_opts </span><span class="s3">= [</span><span class="s1">compiler</span><span class="s3">.</span><span class="s1">library_dir_option</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">) </span><span class="s2">for </span><span class="s1">dir </span><span class="s2">in </span><span class="s1">library_dirs</span><span class="s3">]</span>
+
+    <span class="s2">for </span><span class="s1">dir </span><span class="s2">in </span><span class="s1">runtime_library_dirs</span><span class="s3">:</span>
+        <span class="s1">lib_opts</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">always_iterable</span><span class="s3">(</span><span class="s1">compiler</span><span class="s3">.</span><span class="s1">runtime_library_dir_option</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)))</span>
+
+    <span class="s5"># XXX it's important that we *not* remove redundant library mentions!</span>
+    <span class="s5"># sometimes you really do have to say &quot;-lfoo -lbar -lfoo&quot; in order to</span>
+    <span class="s5"># resolve all symbols.  I just hope we never have to say &quot;-lfoo obj.o</span>
+    <span class="s5"># -lbar&quot; to get things to work -- that's certainly a possibility, but a</span>
+    <span class="s5"># pretty nasty way to arrange your C code.</span>
+
+    <span class="s2">for </span><span class="s1">lib </span><span class="s2">in </span><span class="s1">libraries</span><span class="s3">:</span>
+        <span class="s3">(</span><span class="s1">lib_dir</span><span class="s3">, </span><span class="s1">lib_name</span><span class="s3">) = </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">lib</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">lib_dir</span><span class="s3">:</span>
+            <span class="s1">lib_file </span><span class="s3">= </span><span class="s1">compiler</span><span class="s3">.</span><span class="s1">find_library_file</span><span class="s3">([</span><span class="s1">lib_dir</span><span class="s3">], </span><span class="s1">lib_name</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">lib_file</span><span class="s3">:</span>
+                <span class="s1">lib_opts</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">lib_file</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">compiler</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                    <span class="s4">f&quot;no library file corresponding to '</span><span class="s2">{</span><span class="s1">lib</span><span class="s2">}</span><span class="s4">' found (skipping)&quot;</span>
+                <span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">lib_opts</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">compiler</span><span class="s3">.</span><span class="s1">library_option</span><span class="s3">(</span><span class="s1">lib</span><span class="s3">))</span>
+    <span class="s2">return </span><span class="s1">lib_opts</span>
+</pre>
+</body>
+</html>

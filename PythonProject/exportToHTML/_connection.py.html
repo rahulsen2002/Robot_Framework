@@ -1,0 +1,683 @@
+<html>
+<head>
+<title>_connection.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #a5c261;}
+.s7 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_connection.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># This contains the main Connection class. Everything in h11 revolves around</span>
+<span class="s0"># this.</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">Any</span><span class="s3">,</span>
+    <span class="s1">Callable</span><span class="s3">,</span>
+    <span class="s1">cast</span><span class="s3">,</span>
+    <span class="s1">Dict</span><span class="s3">,</span>
+    <span class="s1">List</span><span class="s3">,</span>
+    <span class="s1">Optional</span><span class="s3">,</span>
+    <span class="s1">overload</span><span class="s3">,</span>
+    <span class="s1">Tuple</span><span class="s3">,</span>
+    <span class="s1">Type</span><span class="s3">,</span>
+    <span class="s1">Union</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_events </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">ConnectionClosed</span><span class="s3">,</span>
+    <span class="s1">Data</span><span class="s3">,</span>
+    <span class="s1">EndOfMessage</span><span class="s3">,</span>
+    <span class="s1">Event</span><span class="s3">,</span>
+    <span class="s1">InformationalResponse</span><span class="s3">,</span>
+    <span class="s1">Request</span><span class="s3">,</span>
+    <span class="s1">Response</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_headers </span><span class="s2">import </span><span class="s1">get_comma_header</span><span class="s3">, </span><span class="s1">has_expect_100_continue</span><span class="s3">, </span><span class="s1">set_comma_header</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_readers </span><span class="s2">import </span><span class="s1">READERS</span><span class="s3">, </span><span class="s1">ReadersType</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_receivebuffer </span><span class="s2">import </span><span class="s1">ReceiveBuffer</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_state </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">_SWITCH_CONNECT</span><span class="s3">,</span>
+    <span class="s1">_SWITCH_UPGRADE</span><span class="s3">,</span>
+    <span class="s1">CLIENT</span><span class="s3">,</span>
+    <span class="s1">ConnectionState</span><span class="s3">,</span>
+    <span class="s1">DONE</span><span class="s3">,</span>
+    <span class="s1">ERROR</span><span class="s3">,</span>
+    <span class="s1">MIGHT_SWITCH_PROTOCOL</span><span class="s3">,</span>
+    <span class="s1">SEND_BODY</span><span class="s3">,</span>
+    <span class="s1">SERVER</span><span class="s3">,</span>
+    <span class="s1">SWITCHED_PROTOCOL</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_util </span><span class="s2">import </span><span class="s3">(  </span><span class="s0"># Import the internal things we need</span>
+    <span class="s1">LocalProtocolError</span><span class="s3">,</span>
+    <span class="s1">RemoteProtocolError</span><span class="s3">,</span>
+    <span class="s1">Sentinel</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_writers </span><span class="s2">import </span><span class="s1">WRITERS</span><span class="s3">, </span><span class="s1">WritersType</span>
+
+<span class="s0"># Everything in __all__ gets re-exported as part of the h11 public API.</span>
+<span class="s1">__all__ </span><span class="s3">= [</span><span class="s4">&quot;Connection&quot;</span><span class="s3">, </span><span class="s4">&quot;NEED_DATA&quot;</span><span class="s3">, </span><span class="s4">&quot;PAUSED&quot;</span><span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">NEED_DATA</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">PAUSED</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s0"># If we ever have this much buffered without it making a complete parseable</span>
+<span class="s0"># event, we error out. The only time we really buffer is when reading the</span>
+<span class="s0"># request/response line + headers together, so this is effectively the limit on</span>
+<span class="s0"># the size of that.</span>
+<span class="s0">#</span>
+<span class="s0"># Some precedents for defaults:</span>
+<span class="s0"># - node.js: 80 * 1024</span>
+<span class="s0"># - tomcat: 8 * 1024</span>
+<span class="s0"># - IIS: 16 * 1024</span>
+<span class="s0"># - Apache: &lt;8 KiB per line&gt;</span>
+<span class="s1">DEFAULT_MAX_INCOMPLETE_EVENT_SIZE </span><span class="s3">= </span><span class="s5">16 </span><span class="s3">* </span><span class="s5">1024</span>
+
+
+<span class="s0"># RFC 7230's rules for connection lifecycles:</span>
+<span class="s0"># - If either side says they want to close the connection, then the connection</span>
+<span class="s0">#   must close.</span>
+<span class="s0"># - HTTP/1.1 defaults to keep-alive unless someone says Connection: close</span>
+<span class="s0"># - HTTP/1.0 defaults to close unless both sides say Connection: keep-alive</span>
+<span class="s0">#   (and even this is a mess -- e.g. if you're implementing a proxy then</span>
+<span class="s0">#   sending Connection: keep-alive is forbidden).</span>
+<span class="s0">#</span>
+<span class="s0"># We simplify life by simply not supporting keep-alive with HTTP/1.0 peers. So</span>
+<span class="s0"># our rule is:</span>
+<span class="s0"># - If someone says Connection: close, we will close</span>
+<span class="s0"># - If someone uses HTTP/1.0, we will close.</span>
+<span class="s2">def </span><span class="s1">_keep_alive</span><span class="s3">(</span><span class="s1">event</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">]) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s1">connection </span><span class="s3">= </span><span class="s1">get_comma_header</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;connection&quot;</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s6">b&quot;close&quot; </span><span class="s2">in </span><span class="s1">connection</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s2">if </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">, </span><span class="s6">b&quot;1.1&quot;</span><span class="s3">) &lt; </span><span class="s6">b&quot;1.1&quot;</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_body_framing</span><span class="s3">(</span>
+    <span class="s1">request_method</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">]</span>
+<span class="s3">) </span><span class="s1">-&gt; Tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[()], </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">]]]:</span>
+    <span class="s0"># Called when we enter SEND_BODY to figure out framing information for</span>
+    <span class="s0"># this body.</span>
+    <span class="s0">#</span>
+    <span class="s0"># These are the only two events that can trigger a SEND_BODY state:</span>
+    <span class="s2">assert </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">in </span><span class="s3">(</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">)</span>
+    <span class="s0"># Returns one of:</span>
+    <span class="s0">#</span>
+    <span class="s0">#    (&quot;content-length&quot;, count)</span>
+    <span class="s0">#    (&quot;chunked&quot;, ())</span>
+    <span class="s0">#    (&quot;http/1.0&quot;, ())</span>
+    <span class="s0">#</span>
+    <span class="s0"># which are (lookup key, *args) for constructing body reader/writer</span>
+    <span class="s0"># objects.</span>
+    <span class="s0">#</span>
+    <span class="s0"># Reference: https://tools.ietf.org/html/rfc7230#section-3.3.3</span>
+    <span class="s0">#</span>
+    <span class="s0"># Step 1: some responses always have an empty body, regardless of what the</span>
+    <span class="s0"># headers say.</span>
+    <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Response</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s3">(</span>
+            <span class="s1">event</span><span class="s3">.</span><span class="s1">status_code </span><span class="s2">in </span><span class="s3">(</span><span class="s5">204</span><span class="s3">, </span><span class="s5">304</span><span class="s3">)</span>
+            <span class="s2">or </span><span class="s1">request_method </span><span class="s3">== </span><span class="s6">b&quot;HEAD&quot;</span>
+            <span class="s2">or </span><span class="s3">(</span><span class="s1">request_method </span><span class="s3">== </span><span class="s6">b&quot;CONNECT&quot; </span><span class="s2">and </span><span class="s5">200 </span><span class="s3">&lt;= </span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">&lt; </span><span class="s5">300</span><span class="s3">)</span>
+        <span class="s3">):</span>
+            <span class="s2">return </span><span class="s3">(</span><span class="s4">&quot;content-length&quot;</span><span class="s3">, (</span><span class="s5">0</span><span class="s3">,))</span>
+        <span class="s0"># Section 3.3.3 also lists another case -- responses with status_code</span>
+        <span class="s0"># &lt; 200. For us these are InformationalResponses, not Responses, so</span>
+        <span class="s0"># they can't get into this function in the first place.</span>
+        <span class="s2">assert </span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">&gt;= </span><span class="s5">200</span>
+
+    <span class="s0"># Step 2: check for Transfer-Encoding (T-E beats C-L):</span>
+    <span class="s1">transfer_encodings </span><span class="s3">= </span><span class="s1">get_comma_header</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;transfer-encoding&quot;</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">transfer_encodings</span><span class="s3">:</span>
+        <span class="s2">assert </span><span class="s1">transfer_encodings </span><span class="s3">== [</span><span class="s6">b&quot;chunked&quot;</span><span class="s3">]</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s4">&quot;chunked&quot;</span><span class="s3">, ())</span>
+
+    <span class="s0"># Step 3: check for Content-Length</span>
+    <span class="s1">content_lengths </span><span class="s3">= </span><span class="s1">get_comma_header</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;content-length&quot;</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">content_lengths</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s4">&quot;content-length&quot;</span><span class="s3">, (</span><span class="s1">int</span><span class="s3">(</span><span class="s1">content_lengths</span><span class="s3">[</span><span class="s5">0</span><span class="s3">]),))</span>
+
+    <span class="s0"># Step 4: no applicable headers; fallback/default depends on type</span>
+    <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Request</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s4">&quot;content-length&quot;</span><span class="s3">, (</span><span class="s5">0</span><span class="s3">,))</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s4">&quot;http/1.0&quot;</span><span class="s3">, ())</span>
+
+
+<span class="s0">################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># The main Connection class</span>
+<span class="s0">#</span>
+<span class="s0">################################################################</span>
+
+
+<span class="s2">class </span><span class="s1">Connection</span><span class="s3">:</span>
+    <span class="s7">&quot;&quot;&quot;An object encapsulating the state of an HTTP connection. 
+ 
+    Args: 
+        our_role: If you're implementing a client, pass :data:`h11.CLIENT`. If 
+            you're implementing a server, pass :data:`h11.SERVER`. 
+ 
+        max_incomplete_event_size (int): 
+            The maximum number of bytes we're willing to buffer of an 
+            incomplete event. In practice this mostly sets a limit on the 
+            maximum size of the request/response line + headers. If this is 
+            exceeded, then :meth:`next_event` will raise 
+            :exc:`RemoteProtocolError`. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">our_role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">],</span>
+        <span class="s1">max_incomplete_event_size</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">DEFAULT_MAX_INCOMPLETE_EVENT_SIZE</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_max_incomplete_event_size </span><span class="s3">= </span><span class="s1">max_incomplete_event_size</span>
+        <span class="s0"># State and role tracking</span>
+        <span class="s2">if </span><span class="s1">our_role </span><span class="s2">not in </span><span class="s3">(</span><span class="s1">CLIENT</span><span class="s3">, </span><span class="s1">SERVER</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">f&quot;expected CLIENT or SERVER, not </span><span class="s2">{</span><span class="s1">our_role</span><span class="s2">!r}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">our_role </span><span class="s3">= </span><span class="s1">our_role</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">our_role </span><span class="s2">is </span><span class="s1">CLIENT</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">their_role </span><span class="s3">= </span><span class="s1">SERVER</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">their_role </span><span class="s3">= </span><span class="s1">CLIENT</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">()</span>
+
+        <span class="s0"># Callables for converting data-&gt;events or vice-versa given the</span>
+        <span class="s0"># current state</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_writer </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_io_object</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">WRITERS</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_reader </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_io_object</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">READERS</span><span class="s3">)</span>
+
+        <span class="s0"># Holds any unprocessed received data</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer </span><span class="s3">= </span><span class="s1">ReceiveBuffer</span><span class="s3">()</span>
+        <span class="s0"># If this is true, then it indicates that the incoming connection was</span>
+        <span class="s0"># closed *after* the end of whatever's in self._receive_buffer:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer_closed </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s0"># Extra bits of state that don't fit into the state machine.</span>
+        <span class="s0">#</span>
+        <span class="s0"># These two are only used to interpret framing headers for figuring</span>
+        <span class="s0"># out how to read/write response bodies. their_http_version is also</span>
+        <span class="s0"># made available as a convenient public API.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">their_http_version</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_request_method</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s0"># This is pure flow-control and doesn't at all affect the set of legal</span>
+        <span class="s0"># transitions, so no need to bother ConnectionState with it:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">client_is_waiting_for_100_continue </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">states</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Dict</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]:</span>
+        <span class="s7">&quot;&quot;&quot;A dictionary like:: 
+ 
+           {CLIENT: &lt;client state&gt;, SERVER: &lt;server state&gt;} 
+ 
+        See :ref:`state-machine` for details. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">our_state</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]:</span>
+        <span class="s7">&quot;&quot;&quot;The current state of whichever role we are playing. See 
+        :ref:`state-machine` for details. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">]</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">their_state</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]:</span>
+        <span class="s7">&quot;&quot;&quot;The current state of whichever role we are NOT playing. See 
+        :ref:`state-machine` for details. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">]</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">they_are_waiting_for_100_continue</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role </span><span class="s2">is </span><span class="s1">CLIENT </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client_is_waiting_for_100_continue</span>
+
+    <span class="s2">def </span><span class="s1">start_next_cycle</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s7">&quot;&quot;&quot;Attempt to reset our connection state for a new request/response 
+        cycle. 
+ 
+        If both client and server are in :data:`DONE` state, then resets them 
+        both to :data:`IDLE` state in preparation for a new request/response 
+        cycle on this same connection. Otherwise, raises a 
+        :exc:`LocalProtocolError`. 
+ 
+        See :ref:`keepalive-and-pipelining`. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">old_states </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">start_next_cycle</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_request_method </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s0"># self.their_http_version gets left alone, since it presumably lasts</span>
+        <span class="s0"># beyond a single request/response cycle</span>
+        <span class="s2">assert not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client_is_waiting_for_100_continue</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_respond_to_state_changes</span><span class="s3">(</span><span class="s1">old_states</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_process_error</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">old_states </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">process_error</span><span class="s3">(</span><span class="s1">role</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_respond_to_state_changes</span><span class="s3">(</span><span class="s1">old_states</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_server_switch_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]:</span>
+        <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">InformationalResponse </span><span class="s2">and </span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">== </span><span class="s5">101</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">_SWITCH_UPGRADE</span>
+        <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Response</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s3">(</span>
+                <span class="s1">_SWITCH_CONNECT </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span>
+                <span class="s2">and </span><span class="s5">200 </span><span class="s3">&lt;= </span><span class="s1">event</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">&lt; </span><span class="s5">300</span>
+            <span class="s3">):</span>
+                <span class="s2">return </span><span class="s1">_SWITCH_CONNECT</span>
+        <span class="s2">return None</span>
+
+    <span class="s0"># All events go through here</span>
+    <span class="s2">def </span><span class="s1">_process_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0"># First, pass the event through the state machine to make sure it</span>
+        <span class="s0"># succeeds.</span>
+        <span class="s1">old_states </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">role </span><span class="s2">is </span><span class="s1">CLIENT </span><span class="s2">and </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Request</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">event</span><span class="s3">.</span><span class="s1">method </span><span class="s3">== </span><span class="s6">b&quot;CONNECT&quot;</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">process_client_switch_proposal</span><span class="s3">(</span><span class="s1">_SWITCH_CONNECT</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">get_comma_header</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;upgrade&quot;</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">process_client_switch_proposal</span><span class="s3">(</span><span class="s1">_SWITCH_UPGRADE</span><span class="s3">)</span>
+        <span class="s1">server_switch_event </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">role </span><span class="s2">is </span><span class="s1">SERVER</span><span class="s3">:</span>
+            <span class="s1">server_switch_event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_server_switch_event</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">process_event</span><span class="s3">(</span><span class="s1">role</span><span class="s3">, </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">), </span><span class="s1">server_switch_event</span><span class="s3">)</span>
+
+        <span class="s0"># Then perform the updates triggered by it.</span>
+
+        <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Request</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_request_method </span><span class="s3">= </span><span class="s1">event</span><span class="s3">.</span><span class="s1">method</span>
+
+        <span class="s2">if </span><span class="s1">role </span><span class="s2">is </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role </span><span class="s2">and </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">in </span><span class="s3">(</span>
+            <span class="s1">Request</span><span class="s3">,</span>
+            <span class="s1">Response</span><span class="s3">,</span>
+            <span class="s1">InformationalResponse</span><span class="s3">,</span>
+        <span class="s3">):</span>
+            <span class="s1">event </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">, </span><span class="s1">InformationalResponse</span><span class="s3">], </span><span class="s1">event</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">their_http_version </span><span class="s3">= </span><span class="s1">event</span><span class="s3">.</span><span class="s1">http_version</span>
+
+        <span class="s0"># Keep alive handling</span>
+        <span class="s0">#</span>
+        <span class="s0"># RFC 7230 doesn't really say what one should do if Connection: close</span>
+        <span class="s0"># shows up on a 1xx InformationalResponse. I think the idea is that</span>
+        <span class="s0"># this is not supposed to happen. In any case, if it does happen, we</span>
+        <span class="s0"># ignore it.</span>
+        <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">in </span><span class="s3">(</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">) </span><span class="s2">and not </span><span class="s1">_keep_alive</span><span class="s3">(</span>
+            <span class="s1">cast</span><span class="s3">(</span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">], </span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">process_keep_alive_disabled</span><span class="s3">()</span>
+
+        <span class="s0"># 100-continue</span>
+        <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Request </span><span class="s2">and </span><span class="s1">has_expect_100_continue</span><span class="s3">(</span><span class="s1">event</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">client_is_waiting_for_100_continue </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">in </span><span class="s3">(</span><span class="s1">InformationalResponse</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">client_is_waiting_for_100_continue </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">role </span><span class="s2">is </span><span class="s1">CLIENT </span><span class="s2">and </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">in </span><span class="s3">(</span><span class="s1">Data</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">client_is_waiting_for_100_continue </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_respond_to_state_changes</span><span class="s3">(</span><span class="s1">old_states</span><span class="s3">, </span><span class="s1">event</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_io_object</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">],</span>
+        <span class="s1">event</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">],</span>
+        <span class="s1">io_dict</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">ReadersType</span><span class="s3">, </span><span class="s1">WritersType</span><span class="s3">],</span>
+    <span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">Callable</span><span class="s3">[..., </span><span class="s1">Any</span><span class="s3">]]:</span>
+        <span class="s0"># event may be None; it's only used when entering SEND_BODY</span>
+        <span class="s1">state </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">state </span><span class="s2">is </span><span class="s1">SEND_BODY</span><span class="s3">:</span>
+            <span class="s0"># Special case: the io_dict has a dict of reader/writer factories</span>
+            <span class="s0"># that depend on the request/response framing.</span>
+            <span class="s1">framing_type</span><span class="s3">, </span><span class="s1">args </span><span class="s3">= </span><span class="s1">_body_framing</span><span class="s3">(</span>
+                <span class="s1">cast</span><span class="s3">(</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_request_method</span><span class="s3">), </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">], </span><span class="s1">event</span><span class="s3">)</span>
+            <span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">io_dict</span><span class="s3">[</span><span class="s1">SEND_BODY</span><span class="s3">][</span><span class="s1">framing_type</span><span class="s3">](*</span><span class="s1">args</span><span class="s3">)  </span><span class="s0"># type: ignore[index]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s0"># General case: the io_dict just has the appropriate reader/writer</span>
+            <span class="s0"># for this state</span>
+            <span class="s2">return </span><span class="s1">io_dict</span><span class="s3">.</span><span class="s1">get</span><span class="s3">((</span><span class="s1">role</span><span class="s3">, </span><span class="s1">state</span><span class="s3">))  </span><span class="s0"># type: ignore[return-value]</span>
+
+    <span class="s0"># This must be called after any action that might have caused</span>
+    <span class="s0"># self._cstate.states to change.</span>
+    <span class="s2">def </span><span class="s1">_respond_to_state_changes</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">old_states</span><span class="s3">: </span><span class="s1">Dict</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]],</span>
+        <span class="s1">event</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0"># Update reader/writer</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_state </span><span class="s3">!= </span><span class="s1">old_states</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">]:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_writer </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_io_object</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">WRITERS</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_state </span><span class="s3">!= </span><span class="s1">old_states</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">]:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_reader </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_io_object</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">, </span><span class="s1">event</span><span class="s3">, </span><span class="s1">READERS</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">trailing_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Tuple</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bool</span><span class="s3">]:</span>
+        <span class="s7">&quot;&quot;&quot;Data that has been received, but not yet processed, represented as 
+        a tuple with two elements, where the first is a byte-string containing 
+        the unprocessed data itself, and the second is a bool that is True if 
+        the receive connection was closed. 
+ 
+        See :ref:`switching-protocols` for discussion of why you'd want this. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s1">bytes</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer</span><span class="s3">), </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer_closed</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">receive_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s7">&quot;&quot;&quot;Add data to our internal receive buffer. 
+ 
+        This does not actually do any processing on the data, just stores 
+        it. To trigger processing, you have to call :meth:`next_event`. 
+ 
+        Args: 
+            data (:term:`bytes-like object`): 
+                The new data that was just received. 
+ 
+                Special case: If *data* is an empty byte-string like ``b&quot;&quot;``, 
+                then this indicates that the remote side has closed the 
+                connection (end of file). Normally this is convenient, because 
+                standard Python APIs like :meth:`file.read` or 
+                :meth:`socket.recv` use ``b&quot;&quot;`` to indicate end-of-file, while 
+                other failures to read are indicated using other mechanisms 
+                like raising :exc:`TimeoutError`. When using such an API you 
+                can just blindly pass through whatever you get from ``read`` 
+                to :meth:`receive_data`, and everything will work. 
+ 
+                But, if you have an API where reading an empty string is a 
+                valid non-EOF condition, then you need to be aware of this and 
+                make sure to check for such strings and avoid passing them to 
+                :meth:`receive_data`. 
+ 
+        Returns: 
+            Nothing, but after calling this you should call :meth:`next_event` 
+            to parse the newly received data. 
+ 
+        Raises: 
+            RuntimeError: 
+                Raised if you pass an empty *data*, indicating EOF, and then 
+                pass a non-empty *data*, indicating more data that somehow 
+                arrived after the EOF. 
+ 
+                (Calling ``receive_data(b&quot;&quot;)`` multiple times is fine, 
+                and equivalent to calling it once.) 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer_closed</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s4">&quot;received close, then received more data?&quot;</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer </span><span class="s3">+= </span><span class="s1">data</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer_closed </span><span class="s3">= </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">_extract_next_receive_event</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; Union</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">, </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">NEED_DATA</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">PAUSED</span><span class="s3">]]:</span>
+        <span class="s1">state </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_state</span>
+        <span class="s0"># We don't pause immediately when they enter DONE, because even in</span>
+        <span class="s0"># DONE state we can still process a ConnectionClosed() event. But</span>
+        <span class="s0"># if we have data in our buffer, then we definitely aren't getting</span>
+        <span class="s0"># a ConnectionClosed() immediately and we need to pause.</span>
+        <span class="s2">if </span><span class="s1">state </span><span class="s2">is </span><span class="s1">DONE </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">PAUSED</span>
+        <span class="s2">if </span><span class="s1">state </span><span class="s2">is </span><span class="s1">MIGHT_SWITCH_PROTOCOL </span><span class="s2">or </span><span class="s1">state </span><span class="s2">is </span><span class="s1">SWITCHED_PROTOCOL</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">PAUSED</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_reader </span><span class="s2">is not None</span>
+        <span class="s1">event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_reader</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">event </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer_closed</span><span class="s3">:</span>
+                <span class="s0"># In some unusual cases (basically just HTTP/1.0 bodies), EOF</span>
+                <span class="s0"># triggers an actual protocol event; in that case, we want to</span>
+                <span class="s0"># return that event, and then the state will change and we'll</span>
+                <span class="s0"># get called again to generate the actual ConnectionClosed().</span>
+                <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_reader</span><span class="s3">, </span><span class="s4">&quot;read_eof&quot;</span><span class="s3">):</span>
+                    <span class="s1">event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_reader</span><span class="s3">.</span><span class="s1">read_eof</span><span class="s3">()</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">event </span><span class="s3">= </span><span class="s1">ConnectionClosed</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">event </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">event </span><span class="s3">= </span><span class="s1">NEED_DATA</span>
+        <span class="s2">return </span><span class="s1">event  </span><span class="s0"># type: ignore[no-any-return]</span>
+
+    <span class="s2">def </span><span class="s1">next_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Union</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">, </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">NEED_DATA</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">PAUSED</span><span class="s3">]]:</span>
+        <span class="s7">&quot;&quot;&quot;Parse the next event out of our receive buffer, update our internal 
+        state, and return it. 
+ 
+        This is a mutating operation -- think of it like calling :func:`next` 
+        on an iterator. 
+ 
+        Returns: 
+            : One of three things: 
+ 
+            1) An event object -- see :ref:`events`. 
+ 
+            2) The special constant :data:`NEED_DATA`, which indicates that 
+               you need to read more data from your socket and pass it to 
+               :meth:`receive_data` before this method will be able to return 
+               any more events. 
+ 
+            3) The special constant :data:`PAUSED`, which indicates that we 
+               are not in a state where we can process incoming data (usually 
+               because the peer has finished their part of the current 
+               request/response cycle, and you have not yet called 
+               :meth:`start_next_cycle`). See :ref:`flow-control` for details. 
+ 
+        Raises: 
+            RemoteProtocolError: 
+                The peer has misbehaved. You should close the connection 
+                (possibly after sending some kind of 4xx response). 
+ 
+        Once this method returns :class:`ConnectionClosed` once, then all 
+        subsequent calls will also return :class:`ConnectionClosed`. 
+ 
+        If this method raises any exception besides :exc:`RemoteProtocolError` 
+        then that's a bug -- if it happens please file a bug report! 
+ 
+        If this method raises any exception then it also sets 
+        :attr:`Connection.their_state` to :data:`ERROR` -- see 
+        :ref:`error-handling` for discussion. 
+ 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_state </span><span class="s2">is </span><span class="s1">ERROR</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span><span class="s4">&quot;Can't receive data when peer state is ERROR&quot;</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_extract_next_receive_event</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">event </span><span class="s2">not in </span><span class="s3">[</span><span class="s1">NEED_DATA</span><span class="s3">, </span><span class="s1">PAUSED</span><span class="s3">]:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">, </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Event</span><span class="s3">, </span><span class="s1">event</span><span class="s3">))</span>
+            <span class="s2">if </span><span class="s1">event </span><span class="s2">is </span><span class="s1">NEED_DATA</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer</span><span class="s3">) &gt; </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_max_incomplete_event_size</span><span class="s3">:</span>
+                    <span class="s0"># 431 is &quot;Request header fields too large&quot; which is pretty</span>
+                    <span class="s0"># much the only situation where we can get here</span>
+                    <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+                        <span class="s4">&quot;Receive buffer too long&quot;</span><span class="s3">, </span><span class="s1">error_status_hint</span><span class="s3">=</span><span class="s5">431</span>
+                    <span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_receive_buffer_closed</span><span class="s3">:</span>
+                    <span class="s0"># We're still trying to complete some event, but that's</span>
+                    <span class="s0"># never going to happen because no more data is coming</span>
+                    <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span><span class="s4">&quot;peer unexpectedly closed connection&quot;</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">event</span>
+        <span class="s2">except </span><span class="s1">BaseException </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_error</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_role</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">, </span><span class="s1">LocalProtocolError</span><span class="s3">):</span>
+                <span class="s1">exc</span><span class="s3">.</span><span class="s1">_reraise_as_remote_protocol_error</span><span class="s3">()</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">raise</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">ConnectionClosed</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s3">...</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">InformationalResponse</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">, </span><span class="s1">Data</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">]</span>
+    <span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s3">...</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]:</span>
+        <span class="s3">...</span>
+
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]:</span>
+        <span class="s7">&quot;&quot;&quot;Convert a high-level event into bytes that can be sent to the peer, 
+        while updating our internal state machine. 
+ 
+        Args: 
+            event: The :ref:`event &lt;events&gt;` to send. 
+ 
+        Returns: 
+            If ``type(event) is ConnectionClosed``, then returns 
+            ``None``. Otherwise, returns a :term:`bytes-like object`. 
+ 
+        Raises: 
+            LocalProtocolError: 
+                Sending this event at this time would violate our 
+                understanding of the HTTP/1.1 protocol. 
+ 
+        If this method raises any exception then it also sets 
+        :attr:`Connection.our_state` to :data:`ERROR` -- see 
+        :ref:`error-handling` for discussion. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">data_list </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">send_with_data_passthrough</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">data_list </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s6">b&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">data_list</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">send_with_data_passthrough</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">List</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]]:</span>
+        <span class="s7">&quot;&quot;&quot;Identical to :meth:`send`, except that in situations where 
+        :meth:`send` returns a single :term:`bytes-like object`, this instead 
+        returns a list of them -- and when sending a :class:`Data` event, this 
+        list is guaranteed to contain the exact object you passed in as 
+        :attr:`Data.data`. See :ref:`sendfile` for discussion. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_state </span><span class="s2">is </span><span class="s1">ERROR</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;Can't send data when our state is ERROR&quot;</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Response</span><span class="s3">:</span>
+                <span class="s1">event </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_clean_up_response_headers_for_sending</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+            <span class="s0"># We want to call _process_event before calling the writer,</span>
+            <span class="s0"># because if someone tries to do something invalid then this will</span>
+            <span class="s0"># give a sensible error message, while our writers all just assume</span>
+            <span class="s0"># they will only receive valid events. But, _process_event might</span>
+            <span class="s0"># change self._writer. So we have to do a little dance:</span>
+            <span class="s1">writer </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_writer</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">, </span><span class="s1">event</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">type</span><span class="s3">(</span><span class="s1">event</span><span class="s3">) </span><span class="s2">is </span><span class="s1">ConnectionClosed</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s0"># In any situation where writer is None, process_event should</span>
+                <span class="s0"># have raised ProtocolError</span>
+                <span class="s2">assert </span><span class="s1">writer </span><span class="s2">is not None</span>
+                <span class="s1">data_list</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = []</span>
+                <span class="s1">writer</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">data_list</span><span class="s3">.</span><span class="s1">append</span><span class="s3">)</span>
+                <span class="s2">return </span><span class="s1">data_list</span>
+        <span class="s2">except</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_error</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">)</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">def </span><span class="s1">send_failed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s7">&quot;&quot;&quot;Notify the state machine that we failed to send the data it gave 
+        us. 
+ 
+        This causes :attr:`Connection.our_state` to immediately become 
+        :data:`ERROR` -- see :ref:`error-handling` for discussion. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_error</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">our_role</span><span class="s3">)</span>
+
+    <span class="s0"># When sending a Response, we take responsibility for a few things:</span>
+    <span class="s0">#</span>
+    <span class="s0"># - Sometimes you MUST set Connection: close. We take care of those</span>
+    <span class="s0">#   times. (You can also set it yourself if you want, and if you do then</span>
+    <span class="s0">#   we'll respect that and close the connection at the right time. But you</span>
+    <span class="s0">#   don't have to worry about that unless you want to.)</span>
+    <span class="s0">#</span>
+    <span class="s0"># - The user has to set Content-Length if they want it. Otherwise, for</span>
+    <span class="s0">#   responses that have bodies (e.g. not HEAD), then we will automatically</span>
+    <span class="s0">#   select the right mechanism for streaming a body of unknown length,</span>
+    <span class="s0">#   which depends on depending on the peer's HTTP version.</span>
+    <span class="s0">#</span>
+    <span class="s0"># This function's *only* responsibility is making sure headers are set up</span>
+    <span class="s0"># right -- everything downstream just looks at the headers. There are no</span>
+    <span class="s0"># side channels.</span>
+    <span class="s2">def </span><span class="s1">_clean_up_response_headers_for_sending</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">response</span><span class="s3">: </span><span class="s1">Response</span><span class="s3">) </span><span class="s1">-&gt; Response</span><span class="s3">:</span>
+        <span class="s2">assert </span><span class="s1">type</span><span class="s3">(</span><span class="s1">response</span><span class="s3">) </span><span class="s2">is </span><span class="s1">Response</span>
+
+        <span class="s1">headers </span><span class="s3">= </span><span class="s1">response</span><span class="s3">.</span><span class="s1">headers</span>
+        <span class="s1">need_close </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s0"># HEAD requests need some special handling: they always act like they</span>
+        <span class="s0"># have Content-Length: 0, and that's how _body_framing treats</span>
+        <span class="s0"># them. But their headers are supposed to match what we would send if</span>
+        <span class="s0"># the request was a GET. (Technically there is one deviation allowed:</span>
+        <span class="s0"># we're allowed to leave out the framing headers -- see</span>
+        <span class="s0"># https://tools.ietf.org/html/rfc7231#section-4.3.2 . But it's just as</span>
+        <span class="s0"># easy to get them right.)</span>
+        <span class="s1">method_for_choosing_headers </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_request_method</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">method_for_choosing_headers </span><span class="s3">== </span><span class="s6">b&quot;HEAD&quot;</span><span class="s3">:</span>
+            <span class="s1">method_for_choosing_headers </span><span class="s3">= </span><span class="s6">b&quot;GET&quot;</span>
+        <span class="s1">framing_type</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">= </span><span class="s1">_body_framing</span><span class="s3">(</span><span class="s1">method_for_choosing_headers</span><span class="s3">, </span><span class="s1">response</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">framing_type </span><span class="s2">in </span><span class="s3">(</span><span class="s4">&quot;chunked&quot;</span><span class="s3">, </span><span class="s4">&quot;http/1.0&quot;</span><span class="s3">):</span>
+            <span class="s0"># This response has a body of unknown length.</span>
+            <span class="s0"># If our peer is HTTP/1.1, we use Transfer-Encoding: chunked</span>
+            <span class="s0"># If our peer is HTTP/1.0, we use no framing headers, and close the</span>
+            <span class="s0"># connection afterwards.</span>
+            <span class="s0">#</span>
+            <span class="s0"># Make sure to clear Content-Length (in principle user could have</span>
+            <span class="s0"># set both and then we ignored Content-Length b/c</span>
+            <span class="s0"># Transfer-Encoding overwrote it -- this would be naughty of them,</span>
+            <span class="s0"># but the HTTP spec says that if our peer does this then we have</span>
+            <span class="s0"># to fix it instead of erroring out, so we'll accord the user the</span>
+            <span class="s0"># same respect).</span>
+            <span class="s1">headers </span><span class="s3">= </span><span class="s1">set_comma_header</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;content-length&quot;</span><span class="s3">, [])</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_http_version </span><span class="s2">is None or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">their_http_version </span><span class="s3">&lt; </span><span class="s6">b&quot;1.1&quot;</span><span class="s3">:</span>
+                <span class="s0"># Either we never got a valid request and are sending back an</span>
+                <span class="s0"># error (their_http_version is None), so we assume the worst;</span>
+                <span class="s0"># or else we did get a valid HTTP/1.0 request, so we know that</span>
+                <span class="s0"># they don't understand chunked encoding.</span>
+                <span class="s1">headers </span><span class="s3">= </span><span class="s1">set_comma_header</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;transfer-encoding&quot;</span><span class="s3">, [])</span>
+                <span class="s0"># This is actually redundant ATM, since currently we</span>
+                <span class="s0"># unconditionally disable keep-alive when talking to HTTP/1.0</span>
+                <span class="s0"># peers. But let's be defensive just in case we add</span>
+                <span class="s0"># Connection: keep-alive support later:</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_request_method </span><span class="s3">!= </span><span class="s6">b&quot;HEAD&quot;</span><span class="s3">:</span>
+                    <span class="s1">need_close </span><span class="s3">= </span><span class="s2">True</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">headers </span><span class="s3">= </span><span class="s1">set_comma_header</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;transfer-encoding&quot;</span><span class="s3">, [</span><span class="s6">b&quot;chunked&quot;</span><span class="s3">])</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cstate</span><span class="s3">.</span><span class="s1">keep_alive </span><span class="s2">or </span><span class="s1">need_close</span><span class="s3">:</span>
+            <span class="s0"># Make sure Connection: close is set</span>
+            <span class="s1">connection </span><span class="s3">= </span><span class="s1">set</span><span class="s3">(</span><span class="s1">get_comma_header</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;connection&quot;</span><span class="s3">))</span>
+            <span class="s1">connection</span><span class="s3">.</span><span class="s1">discard</span><span class="s3">(</span><span class="s6">b&quot;keep-alive&quot;</span><span class="s3">)</span>
+            <span class="s1">connection</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s6">b&quot;close&quot;</span><span class="s3">)</span>
+            <span class="s1">headers </span><span class="s3">= </span><span class="s1">set_comma_header</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s6">b&quot;connection&quot;</span><span class="s3">, </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">connection</span><span class="s3">))</span>
+
+        <span class="s2">return </span><span class="s1">Response</span><span class="s3">(</span>
+            <span class="s1">headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">,</span>
+            <span class="s1">status_code</span><span class="s3">=</span><span class="s1">response</span><span class="s3">.</span><span class="s1">status_code</span><span class="s3">,</span>
+            <span class="s1">http_version</span><span class="s3">=</span><span class="s1">response</span><span class="s3">.</span><span class="s1">http_version</span><span class="s3">,</span>
+            <span class="s1">reason</span><span class="s3">=</span><span class="s1">response</span><span class="s3">.</span><span class="s1">reason</span><span class="s3">,</span>
+        <span class="s3">)</span>
+</pre>
+</body>
+</html>

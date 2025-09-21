@@ -1,0 +1,437 @@
+<html>
+<head>
+<title>_highlevel_socket.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_highlevel_socket.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># &quot;High-level&quot; networking interface</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">errno</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span><span class="s3">, </span><span class="s1">suppress</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">overload</span>
+
+<span class="s2">import </span><span class="s1">trio</span>
+
+<span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">socket </span><span class="s2">as </span><span class="s1">tsocket</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_util </span><span class="s2">import </span><span class="s1">ConflictDetector</span><span class="s3">, </span><span class="s1">final</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">HalfCloseableStream</span><span class="s3">, </span><span class="s1">Listener</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Generator</span>
+
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">Buffer</span>
+
+    <span class="s2">from </span><span class="s3">.</span><span class="s1">_socket </span><span class="s2">import </span><span class="s1">SocketType</span>
+
+<span class="s0"># XX TODO: this number was picked arbitrarily. We should do experiments to</span>
+<span class="s0"># tune it. (Or make it dynamic -- one idea is to start small and increase it</span>
+<span class="s0"># if we observe single reads filling up the whole buffer, at least within some</span>
+<span class="s0"># limits.)</span>
+<span class="s1">DEFAULT_RECEIVE_SIZE </span><span class="s3">= </span><span class="s4">65536</span>
+
+<span class="s1">_closed_stream_errnos </span><span class="s3">= {</span>
+    <span class="s0"># Unix</span>
+    <span class="s1">errno</span><span class="s3">.</span><span class="s1">EBADF</span><span class="s3">,</span>
+    <span class="s0"># Windows</span>
+    <span class="s1">errno</span><span class="s3">.</span><span class="s1">ENOTSOCK</span><span class="s3">,</span>
+<span class="s3">}</span>
+
+
+<span class="s3">@</span><span class="s1">contextmanager</span>
+<span class="s2">def </span><span class="s1">_translate_socket_errors_to_stream_errors</span><span class="s3">() </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+    <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">exc</span><span class="s3">.</span><span class="s1">errno </span><span class="s2">in </span><span class="s1">_closed_stream_errnos</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">(</span><span class="s5">&quot;this socket was already closed&quot;</span><span class="s3">) </span><span class="s2">from None</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">(</span><span class="s5">f&quot;socket connection broken: </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">) </span><span class="s2">from </span><span class="s1">exc</span>
+
+
+<span class="s3">@</span><span class="s1">final</span>
+<span class="s2">class </span><span class="s1">SocketStream</span><span class="s3">(</span><span class="s1">HalfCloseableStream</span><span class="s3">):</span>
+    <span class="s6">&quot;&quot;&quot;An implementation of the :class:`trio.abc.HalfCloseableStream` 
+    interface based on a raw network socket. 
+ 
+    Args: 
+      socket: The Trio socket object to wrap. Must have type ``SOCK_STREAM``, 
+          and be connected. 
+ 
+    By default for TCP sockets, :class:`SocketStream` enables ``TCP_NODELAY``, 
+    and (on platforms where it's supported) enables ``TCP_NOTSENT_LOWAT`` with 
+    a reasonable buffer size (currently 16 KiB) – see `issue #72 
+    &lt;https://github.com/python-trio/trio/issues/72&gt;`__ for discussion. You can 
+    of course override these defaults by calling :meth:`setsockopt`. 
+ 
+    Once a :class:`SocketStream` object is constructed, it implements the full 
+    :class:`trio.abc.HalfCloseableStream` interface. In addition, it provides 
+    a few extra features: 
+ 
+    .. attribute:: socket 
+ 
+       The Trio socket object that this stream wraps. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">socket</span><span class="s3">: </span><span class="s1">SocketType</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">socket</span><span class="s3">, </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SocketType</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s5">&quot;SocketStream requires a Trio socket object&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">socket</span><span class="s3">.</span><span class="s1">type </span><span class="s3">!= </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SOCK_STREAM</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;SocketStream requires a SOCK_STREAM socket&quot;</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">socket </span><span class="s3">= </span><span class="s1">socket</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_send_conflict_detector </span><span class="s3">= </span><span class="s1">ConflictDetector</span><span class="s3">(</span>
+            <span class="s5">&quot;another task is currently sending data on this SocketStream&quot;</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+        <span class="s0"># Socket defaults:</span>
+
+        <span class="s0"># Not supported on e.g. unix domain sockets</span>
+        <span class="s2">with </span><span class="s1">suppress</span><span class="s3">(</span><span class="s1">OSError</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">setsockopt</span><span class="s3">(</span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">IPPROTO_TCP</span><span class="s3">, </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">TCP_NODELAY</span><span class="s3">, </span><span class="s2">True</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">tsocket</span><span class="s3">, </span><span class="s5">&quot;TCP_NOTSENT_LOWAT&quot;</span><span class="s3">):</span>
+            <span class="s0"># 16 KiB is pretty arbitrary and could probably do with some</span>
+            <span class="s0"># tuning. (Apple is also setting this by default in CFNetwork</span>
+            <span class="s0"># apparently -- I'm curious what value they're using, though I</span>
+            <span class="s0"># couldn't find it online trivially. CFNetwork-129.20 source</span>
+            <span class="s0"># has no mentions of TCP_NOTSENT_LOWAT. This presentation says</span>
+            <span class="s0"># &quot;typically 8 kilobytes&quot;:</span>
+            <span class="s0"># http://devstreaming.apple.com/videos/wwdc/2015/719ui2k57m/719/719_your_app_and_next_generation_networks.pdf?dl=1</span>
+            <span class="s0"># ). The theory is that you want it to be bandwidth *</span>
+            <span class="s0"># rescheduling interval.</span>
+            <span class="s2">with </span><span class="s1">suppress</span><span class="s3">(</span><span class="s1">OSError</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">setsockopt</span><span class="s3">(</span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">IPPROTO_TCP</span><span class="s3">, </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">TCP_NOTSENT_LOWAT</span><span class="s3">, </span><span class="s4">2</span><span class="s3">**</span><span class="s4">14</span><span class="s3">)</span>
+
+    <span class="s2">async def </span><span class="s1">send_all</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">bytearray </span><span class="s3">| </span><span class="s1">memoryview</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">did_shutdown_SHUT_WR</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">(</span><span class="s5">&quot;can't send data after sending EOF&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_send_conflict_detector</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">_translate_socket_errors_to_stream_errors</span><span class="s3">():</span>
+                <span class="s2">with </span><span class="s1">memoryview</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) </span><span class="s2">as </span><span class="s1">data</span><span class="s3">:</span>
+                    <span class="s2">if not </span><span class="s1">data</span><span class="s3">:</span>
+                        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">fileno</span><span class="s3">() == -</span><span class="s4">1</span><span class="s3">:</span>
+                            <span class="s2">raise </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">(</span><span class="s5">&quot;socket was already closed&quot;</span><span class="s3">)</span>
+                        <span class="s2">await </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">lowlevel</span><span class="s3">.</span><span class="s1">checkpoint</span><span class="s3">()</span>
+                        <span class="s2">return</span>
+                    <span class="s1">total_sent </span><span class="s3">= </span><span class="s4">0</span>
+                    <span class="s2">while </span><span class="s1">total_sent </span><span class="s3">&lt; </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">):</span>
+                        <span class="s2">with </span><span class="s1">data</span><span class="s3">[</span><span class="s1">total_sent</span><span class="s3">:] </span><span class="s2">as </span><span class="s1">remaining</span><span class="s3">:</span>
+                            <span class="s1">sent </span><span class="s3">= </span><span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">remaining</span><span class="s3">)</span>
+                        <span class="s1">total_sent </span><span class="s3">+= </span><span class="s1">sent</span>
+
+    <span class="s2">async def </span><span class="s1">wait_send_all_might_not_block</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_send_conflict_detector</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">fileno</span><span class="s3">() == -</span><span class="s4">1</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">ClosedResourceError</span>
+            <span class="s2">with </span><span class="s1">_translate_socket_errors_to_stream_errors</span><span class="s3">():</span>
+                <span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">wait_writable</span><span class="s3">()</span>
+
+    <span class="s2">async def </span><span class="s1">send_eof</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_send_conflict_detector</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">lowlevel</span><span class="s3">.</span><span class="s1">checkpoint</span><span class="s3">()</span>
+            <span class="s0"># On macOS, calling shutdown a second time raises ENOTCONN, but</span>
+            <span class="s0"># send_eof needs to be idempotent.</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">did_shutdown_SHUT_WR</span><span class="s3">:</span>
+                <span class="s2">return</span>
+            <span class="s2">with </span><span class="s1">_translate_socket_errors_to_stream_errors</span><span class="s3">():</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">shutdown</span><span class="s3">(</span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SHUT_WR</span><span class="s3">)</span>
+
+    <span class="s2">async def </span><span class="s1">receive_some</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">max_bytes</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">max_bytes </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">max_bytes </span><span class="s3">= </span><span class="s1">DEFAULT_RECEIVE_SIZE</span>
+        <span class="s2">if </span><span class="s1">max_bytes </span><span class="s3">&lt; </span><span class="s4">1</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;max_bytes must be &gt;= 1&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">_translate_socket_errors_to_stream_errors</span><span class="s3">():</span>
+            <span class="s2">return await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">recv</span><span class="s3">(</span><span class="s1">max_bytes</span><span class="s3">)</span>
+
+    <span class="s2">async def </span><span class="s1">aclose</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s2">await </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">lowlevel</span><span class="s3">.</span><span class="s1">checkpoint</span><span class="s3">()</span>
+
+    <span class="s0"># __aenter__, __aexit__ inherited from HalfCloseableStream are OK</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">setsockopt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">option</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s1">Buffer</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">: ...</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">setsockopt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">option</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">value</span><span class="s3">: </span><span class="s2">None</span><span class="s3">, </span><span class="s1">length</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">: ...</span>
+
+    <span class="s2">def </span><span class="s1">setsockopt</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">level</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s1">option</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s1">value</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s1">Buffer </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">length</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s6">&quot;&quot;&quot;Set an option on the underlying socket. 
+ 
+        See :meth:`socket.socket.setsockopt` for details. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">length </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">value </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span>
+                    <span class="s5">&quot;invalid value for argument 'value', must not be None when specifying length&quot;</span><span class="s3">,</span>
+                <span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">setsockopt</span><span class="s3">(</span><span class="s1">level</span><span class="s3">, </span><span class="s1">option</span><span class="s3">, </span><span class="s1">value</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">value </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span>
+                <span class="s5">f&quot;invalid value for argument 'value': </span><span class="s2">{</span><span class="s1">value</span><span class="s2">!r}</span><span class="s5">, must be None when specifying optlen&quot;</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">setsockopt</span><span class="s3">(</span><span class="s1">level</span><span class="s3">, </span><span class="s1">option</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">length</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">getsockopt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">option</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">: ...</span>
+
+    <span class="s3">@</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">getsockopt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">option</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">buffersize</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">: ...</span>
+
+    <span class="s2">def </span><span class="s1">getsockopt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">option</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">buffersize</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s4">0</span><span class="s3">) </span><span class="s1">-&gt; int </span><span class="s3">| </span><span class="s1">bytes</span><span class="s3">:</span>
+        <span class="s6">&quot;&quot;&quot;Check the current value of an option on the underlying socket. 
+ 
+        See :meth:`socket.socket.getsockopt` for details. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># This is to work around</span>
+        <span class="s0">#   https://bitbucket.org/pypy/pypy/issues/2561</span>
+        <span class="s0"># We should be able to drop it when the next PyPy3 beta is released.</span>
+        <span class="s2">if </span><span class="s1">buffersize </span><span class="s3">== </span><span class="s4">0</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">getsockopt</span><span class="s3">(</span><span class="s1">level</span><span class="s3">, </span><span class="s1">option</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">getsockopt</span><span class="s3">(</span><span class="s1">level</span><span class="s3">, </span><span class="s1">option</span><span class="s3">, </span><span class="s1">buffersize</span><span class="s3">)</span>
+
+
+<span class="s0">################################################################</span>
+<span class="s0"># SocketListener</span>
+<span class="s0">################################################################</span>
+
+<span class="s0"># Accept error handling</span>
+<span class="s0"># =====================</span>
+<span class="s0">#</span>
+<span class="s0"># Literature review</span>
+<span class="s0"># -----------------</span>
+<span class="s0">#</span>
+<span class="s0"># Here's a list of all the possible errors that accept() can return, according</span>
+<span class="s0"># to the POSIX spec or the Linux, FreeBSD, macOS, and Windows docs:</span>
+<span class="s0">#</span>
+<span class="s0"># Can't happen with a Trio socket:</span>
+<span class="s0"># - EAGAIN/(WSA)EWOULDBLOCK</span>
+<span class="s0"># - EINTR</span>
+<span class="s0"># - WSANOTINITIALISED</span>
+<span class="s0"># - WSAEINPROGRESS: a blocking call is already in progress</span>
+<span class="s0"># - WSAEINTR: someone called WSACancelBlockingCall, but we don't make blocking</span>
+<span class="s0">#   calls in the first place</span>
+<span class="s0">#</span>
+<span class="s0"># Something is wrong with our call:</span>
+<span class="s0"># - EBADF: not a file descriptor</span>
+<span class="s0"># - (WSA)EINVAL: socket isn't listening, or (Linux, BSD) bad flags</span>
+<span class="s0"># - (WSA)ENOTSOCK: not a socket</span>
+<span class="s0"># - (WSA)EOPNOTSUPP: this kind of socket doesn't support accept</span>
+<span class="s0"># - (Linux, FreeBSD, Windows) EFAULT: the sockaddr pointer points to readonly</span>
+<span class="s0">#   memory</span>
+<span class="s0">#</span>
+<span class="s0"># Something is wrong with the environment:</span>
+<span class="s0"># - (WSA)EMFILE: this process hit its fd limit</span>
+<span class="s0"># - ENFILE: the system hit its fd limit</span>
+<span class="s0"># - (WSA)ENOBUFS, ENOMEM: unspecified memory problems</span>
+<span class="s0">#</span>
+<span class="s0"># Something is wrong with the connection we were going to accept. There's a</span>
+<span class="s0"># ton of variability between systems here:</span>
+<span class="s0"># - ECONNABORTED: documented everywhere, but apparently only the BSDs do this</span>
+<span class="s0">#   (signals a connection was closed/reset before being accepted)</span>
+<span class="s0"># - EPROTO: unspecified protocol error</span>
+<span class="s0"># - (Linux) EPERM: firewall rule prevented connection</span>
+<span class="s0"># - (Linux) ENETDOWN, EPROTO, ENOPROTOOPT, EHOSTDOWN, ENONET, EHOSTUNREACH,</span>
+<span class="s0">#   EOPNOTSUPP, ENETUNREACH, ENOSR, ESOCKTNOSUPPORT, EPROTONOSUPPORT,</span>
+<span class="s0">#   ETIMEDOUT, ... or any other error that the socket could give, because</span>
+<span class="s0">#   apparently if an error happens on a connection before it's accept()ed,</span>
+<span class="s0">#   Linux will report that error from accept().</span>
+<span class="s0"># - (Windows) WSAECONNRESET, WSAENETDOWN</span>
+<span class="s0">#</span>
+<span class="s0">#</span>
+<span class="s0"># Code review</span>
+<span class="s0"># -----------</span>
+<span class="s0">#</span>
+<span class="s0"># What do other libraries do?</span>
+<span class="s0">#</span>
+<span class="s0"># Twisted on Unix or when using nonblocking I/O on Windows:</span>
+<span class="s0"># - ignores EPERM, with comment about Linux firewalls</span>
+<span class="s0"># - logs and ignores EMFILE, ENOBUFS, ENFILE, ENOMEM, ECONNABORTED</span>
+<span class="s0">#   Comment notes that ECONNABORTED is a BSDism and that Linux returns the</span>
+<span class="s0">#   socket before having it fail, and macOS just silently discards it.</span>
+<span class="s0"># - other errors are raised, which is logged + kills the socket</span>
+<span class="s0"># ref: src/twisted/internet/tcp.py, Port.doRead</span>
+<span class="s0">#</span>
+<span class="s0"># Twisted using IOCP on Windows:</span>
+<span class="s0"># - logs and ignores all errors</span>
+<span class="s0"># ref: src/twisted/internet/iocpreactor/tcp.py, Port.handleAccept</span>
+<span class="s0">#</span>
+<span class="s0"># Tornado:</span>
+<span class="s0"># - ignore ECONNABORTED (comments notes that it was observed on FreeBSD)</span>
+<span class="s0"># - everything else raised, but all this does (by default) is cause it to be</span>
+<span class="s0">#   logged and then ignored</span>
+<span class="s0"># (ref: tornado/netutil.py, tornado/ioloop.py)</span>
+<span class="s0">#</span>
+<span class="s0"># libuv on Unix:</span>
+<span class="s0"># - ignores ECONNABORTED</span>
+<span class="s0"># - does a &quot;trick&quot; for EMFILE or ENFILE</span>
+<span class="s0"># - all other errors passed to the connection_cb to be handled</span>
+<span class="s0"># (ref: src/unix/stream.c:uv__server_io, uv__emfile_trick)</span>
+<span class="s0">#</span>
+<span class="s0"># libuv on Windows:</span>
+<span class="s0"># src/win/tcp.c:uv_tcp_queue_accept</span>
+<span class="s0">#   this calls AcceptEx, and then arranges to call:</span>
+<span class="s0"># src/win/tcp.c:uv_process_tcp_accept_req</span>
+<span class="s0">#   this gets the result from AcceptEx. If the original AcceptEx call failed,</span>
+<span class="s0">#   then &quot;we stop accepting connections and report this error to the</span>
+<span class="s0">#   connection callback&quot;. I think this is for things like ENOTSOCK. If</span>
+<span class="s0">#   AcceptEx successfully queues an overlapped operation, and then that</span>
+<span class="s0">#   reports an error, it's just discarded.</span>
+<span class="s0">#</span>
+<span class="s0"># asyncio, selector mode:</span>
+<span class="s0"># - ignores EWOULDBLOCK, EINTR, ECONNABORTED</span>
+<span class="s0"># - on EMFILE, ENFILE, ENOBUFS, ENOMEM, logs an error and then disables the</span>
+<span class="s0">#   listening loop for 1 second</span>
+<span class="s0"># - everything else raises, but then the event loop just logs and ignores it</span>
+<span class="s0"># (selector_events.py: BaseSelectorEventLoop._accept_connection)</span>
+<span class="s0">#</span>
+<span class="s0">#</span>
+<span class="s0"># What should we do?</span>
+<span class="s0"># ------------------</span>
+<span class="s0">#</span>
+<span class="s0"># When accept() returns an error, we can either ignore it or raise it.</span>
+<span class="s0">#</span>
+<span class="s0"># We have a long list of errors that should be ignored, and a long list of</span>
+<span class="s0"># errors that should be raised. The big question is what to do with an error</span>
+<span class="s0"># that isn't on either list. On Linux apparently you can get nearly arbitrary</span>
+<span class="s0"># errors from accept() and they should be ignored, because it just indicates a</span>
+<span class="s0"># socket that crashed before it began, and there isn't really anything to be</span>
+<span class="s0"># done about this, plus on other platforms you may not get any indication at</span>
+<span class="s0"># all, so programs have to tolerate not getting any indication too. OTOH if we</span>
+<span class="s0"># get an unexpected error then it could indicate something arbitrarily bad --</span>
+<span class="s0"># after all, it's unexpected.</span>
+<span class="s0">#</span>
+<span class="s0"># Given that we know that other libraries seem to be getting along fine with a</span>
+<span class="s0"># fairly minimal list of errors to ignore, I think we'll be OK if we write</span>
+<span class="s0"># down that list and then raise on everything else.</span>
+<span class="s0">#</span>
+<span class="s0"># The other question is what to do about the capacity problem errors: EMFILE,</span>
+<span class="s0"># ENFILE, ENOBUFS, ENOMEM. Just flat out ignoring these is clearly not optimal</span>
+<span class="s0"># -- at the very least you want to log them, and probably you want to take</span>
+<span class="s0"># some remedial action. And if we ignore them then it prevents higher levels</span>
+<span class="s0"># from doing anything clever with them. So we raise them.</span>
+
+<span class="s1">_ignorable_accept_errno_names </span><span class="s3">= [</span>
+    <span class="s0"># Linux can do this when the a connection is denied by the firewall</span>
+    <span class="s5">&quot;EPERM&quot;</span><span class="s3">,</span>
+    <span class="s0"># BSDs with an early close/reset</span>
+    <span class="s5">&quot;ECONNABORTED&quot;</span><span class="s3">,</span>
+    <span class="s0"># All the other miscellany noted above -- may not happen in practice, but</span>
+    <span class="s0"># whatever.</span>
+    <span class="s5">&quot;EPROTO&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ENETDOWN&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ENOPROTOOPT&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;EHOSTDOWN&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ENONET&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;EHOSTUNREACH&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;EOPNOTSUPP&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ENETUNREACH&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ENOSR&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ESOCKTNOSUPPORT&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;EPROTONOSUPPORT&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ETIMEDOUT&quot;</span><span class="s3">,</span>
+    <span class="s5">&quot;ECONNRESET&quot;</span><span class="s3">,</span>
+<span class="s3">]</span>
+
+<span class="s0"># Not all errnos are defined on all platforms</span>
+<span class="s1">_ignorable_accept_errnos</span><span class="s3">: </span><span class="s1">set</span><span class="s3">[</span><span class="s1">int</span><span class="s3">] = </span><span class="s1">set</span><span class="s3">()</span>
+<span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">_ignorable_accept_errno_names</span><span class="s3">:</span>
+    <span class="s2">with </span><span class="s1">suppress</span><span class="s3">(</span><span class="s1">AttributeError</span><span class="s3">):</span>
+        <span class="s1">_ignorable_accept_errnos</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">errno</span><span class="s3">, </span><span class="s1">name</span><span class="s3">))</span>
+
+
+<span class="s3">@</span><span class="s1">final</span>
+<span class="s2">class </span><span class="s1">SocketListener</span><span class="s3">(</span><span class="s1">Listener</span><span class="s3">[</span><span class="s1">SocketStream</span><span class="s3">]):</span>
+    <span class="s6">&quot;&quot;&quot;A :class:`~trio.abc.Listener` that uses a listening socket to accept 
+    incoming connections as :class:`SocketStream` objects. 
+ 
+    Args: 
+      socket: The Trio socket object to wrap. Must have type ``SOCK_STREAM``, 
+          and be listening. 
+ 
+    Note that the :class:`SocketListener` &quot;takes ownership&quot; of the given 
+    socket; closing the :class:`SocketListener` will also close the socket. 
+ 
+    .. attribute:: socket 
+ 
+       The Trio socket object that this stream wraps. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">socket</span><span class="s3">: </span><span class="s1">SocketType</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">socket</span><span class="s3">, </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SocketType</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s5">&quot;SocketListener requires a Trio socket object&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">socket</span><span class="s3">.</span><span class="s1">type </span><span class="s3">!= </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SOCK_STREAM</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;SocketListener requires a SOCK_STREAM socket&quot;</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">listening </span><span class="s3">= </span><span class="s1">socket</span><span class="s3">.</span><span class="s1">getsockopt</span><span class="s3">(</span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SOL_SOCKET</span><span class="s3">, </span><span class="s1">tsocket</span><span class="s3">.</span><span class="s1">SO_ACCEPTCONN</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">OSError</span><span class="s3">:</span>
+            <span class="s0"># SO_ACCEPTCONN fails on macOS; we just have to trust the user.</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">listening</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;SocketListener requires a listening socket&quot;</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">socket </span><span class="s3">= </span><span class="s1">socket</span>
+
+    <span class="s2">async def </span><span class="s1">accept</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; SocketStream</span><span class="s3">:</span>
+        <span class="s6">&quot;&quot;&quot;Accept an incoming connection. 
+ 
+        Returns: 
+          :class:`SocketStream` 
+ 
+        Raises: 
+          OSError: if the underlying call to ``accept`` raises an unexpected 
+              error. 
+          ClosedResourceError: if you already closed the socket. 
+ 
+        This method handles routine errors like ``ECONNABORTED``, but passes 
+        other errors on to its caller. In particular, it does *not* make any 
+        special effort to handle resource exhaustion errors like ``EMFILE``, 
+        ``ENFILE``, ``ENOBUFS``, ``ENOMEM``. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">sock</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">= </span><span class="s2">await </span><span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">accept</span><span class="s3">()</span>
+            <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">exc</span><span class="s3">.</span><span class="s1">errno </span><span class="s2">in </span><span class="s1">_closed_stream_errnos</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">ClosedResourceError </span><span class="s2">from None</span>
+                <span class="s2">if </span><span class="s1">exc</span><span class="s3">.</span><span class="s1">errno </span><span class="s2">not in </span><span class="s1">_ignorable_accept_errnos</span><span class="s3">:</span>
+                    <span class="s2">raise</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">SocketStream</span><span class="s3">(</span><span class="s1">sock</span><span class="s3">)</span>
+
+    <span class="s2">async def </span><span class="s1">aclose</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s6">&quot;&quot;&quot;Close this listener and its underlying socket.&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s2">await </span><span class="s1">trio</span><span class="s3">.</span><span class="s1">lowlevel</span><span class="s3">.</span><span class="s1">checkpoint</span><span class="s3">()</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,1037 @@
+<html>
+<head>
+<title>browsing_context.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+browsing_context.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Licensed to the Software Freedom Conservancy (SFC) under one</span>
+<span class="s0"># or more contributor license agreements.  See the NOTICE file</span>
+<span class="s0"># distributed with this work for additional information</span>
+<span class="s0"># regarding copyright ownership.  The SFC licenses this file</span>
+<span class="s0"># to you under the Apache License, Version 2.0 (the</span>
+<span class="s0"># &quot;License&quot;); you may not use this file except in compliance</span>
+<span class="s0"># with the License.  You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#   http://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0"># Unless required by applicable law or agreed to in writing,</span>
+<span class="s0"># software distributed under the License is distributed on an</span>
+<span class="s0"># &quot;AS IS&quot; BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY</span>
+<span class="s0"># KIND, either express or implied.  See the License for the</span>
+<span class="s0"># specific language governing permissions and limitations</span>
+<span class="s0"># under the License.</span>
+
+<span class="s2">import </span><span class="s1">threading</span>
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s2">from </span><span class="s1">selenium</span><span class="s3">.</span><span class="s1">webdriver</span><span class="s3">.</span><span class="s1">common</span><span class="s3">.</span><span class="s1">bidi</span><span class="s3">.</span><span class="s1">common </span><span class="s2">import </span><span class="s1">command_builder</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">session </span><span class="s2">import </span><span class="s1">Session</span>
+
+
+<span class="s2">class </span><span class="s1">ReadinessState</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Represents the stage of document loading at which a navigation command will return.&quot;&quot;&quot;</span>
+
+    <span class="s1">NONE </span><span class="s3">= </span><span class="s5">&quot;none&quot;</span>
+    <span class="s1">INTERACTIVE </span><span class="s3">= </span><span class="s5">&quot;interactive&quot;</span>
+    <span class="s1">COMPLETE </span><span class="s3">= </span><span class="s5">&quot;complete&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">UserPromptType</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Represents the possible user prompt types.&quot;&quot;&quot;</span>
+
+    <span class="s1">ALERT </span><span class="s3">= </span><span class="s5">&quot;alert&quot;</span>
+    <span class="s1">BEFORE_UNLOAD </span><span class="s3">= </span><span class="s5">&quot;beforeunload&quot;</span>
+    <span class="s1">CONFIRM </span><span class="s3">= </span><span class="s5">&quot;confirm&quot;</span>
+    <span class="s1">PROMPT </span><span class="s3">= </span><span class="s5">&quot;prompt&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">NavigationInfo</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Provides details of an ongoing navigation.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">navigation</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">timestamp</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">navigation </span><span class="s3">= </span><span class="s1">navigation</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">timestamp </span><span class="s3">= </span><span class="s1">timestamp</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">url </span><span class="s3">= </span><span class="s1">url</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s5">&quot;NavigationInfo&quot;</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a NavigationInfo instance from a dictionary. 
+ 
+        Parameters: 
+        ----------- 
+            json: A dictionary containing the navigation information. 
+ 
+        Returns: 
+        ------- 
+            NavigationInfo: A new instance of NavigationInfo. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;context&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;context is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">navigation </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;navigation&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">navigation </span><span class="s2">is not None and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">navigation</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;navigation must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">timestamp </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;timestamp&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">timestamp </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">timestamp</span><span class="s3">, </span><span class="s1">int</span><span class="s3">) </span><span class="s2">or </span><span class="s1">timestamp </span><span class="s3">&lt; </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;timestamp is required and must be a non-negative integer&quot;</span><span class="s3">)</span>
+
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;url&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">url </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;url is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">cls</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">navigation</span><span class="s3">, </span><span class="s1">timestamp</span><span class="s3">, </span><span class="s1">url</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">BrowsingContextInfo</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Represents the properties of a navigable.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">children</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s5">&quot;BrowsingContextInfo&quot;</span><span class="s3">]],</span>
+        <span class="s1">client_window</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">user_context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">parent</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">original_opener</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">url </span><span class="s3">= </span><span class="s1">url</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">children </span><span class="s3">= </span><span class="s1">children</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">parent </span><span class="s3">= </span><span class="s1">parent</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">user_context </span><span class="s3">= </span><span class="s1">user_context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">original_opener </span><span class="s3">= </span><span class="s1">original_opener</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">client_window </span><span class="s3">= </span><span class="s1">client_window</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s5">&quot;BrowsingContextInfo&quot;</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a BrowsingContextInfo instance from a dictionary. 
+ 
+        Parameters: 
+        ----------- 
+            json: A dictionary containing the browsing context information. 
+ 
+        Returns: 
+        ------- 
+            BrowsingContextInfo: A new instance of BrowsingContextInfo. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">children </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">raw_children </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;children&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">raw_children </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">raw_children</span><span class="s3">, </span><span class="s1">list</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;children must be a list if provided&quot;</span><span class="s3">)</span>
+
+            <span class="s1">children </span><span class="s3">= []</span>
+            <span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s1">raw_children</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">child</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">):</span>
+                    <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">f&quot;Each child must be a dictionary, got </span><span class="s2">{</span><span class="s1">type</span><span class="s3">(</span><span class="s1">child</span><span class="s3">)</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+                <span class="s1">children</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">BrowsingContextInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">child</span><span class="s3">))</span>
+
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;context&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;context is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;url&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">url </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;url is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">parent </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;parent&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">parent </span><span class="s2">is not None and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;parent must be a string if provided&quot;</span><span class="s3">)</span>
+
+        <span class="s1">user_context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;userContext&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">user_context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">user_context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;userContext is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">original_opener </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;originalOpener&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">original_opener </span><span class="s2">is not None and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">original_opener</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;originalOpener must be a string if provided&quot;</span><span class="s3">)</span>
+
+        <span class="s1">client_window </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;clientWindow&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">client_window </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">client_window</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;clientWindow is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">cls</span><span class="s3">(</span>
+            <span class="s1">context</span><span class="s3">=</span><span class="s1">context</span><span class="s3">,</span>
+            <span class="s1">url</span><span class="s3">=</span><span class="s1">url</span><span class="s3">,</span>
+            <span class="s1">children</span><span class="s3">=</span><span class="s1">children</span><span class="s3">,</span>
+            <span class="s1">client_window</span><span class="s3">=</span><span class="s1">client_window</span><span class="s3">,</span>
+            <span class="s1">user_context</span><span class="s3">=</span><span class="s1">user_context</span><span class="s3">,</span>
+            <span class="s1">parent</span><span class="s3">=</span><span class="s1">parent</span><span class="s3">,</span>
+            <span class="s1">original_opener</span><span class="s3">=</span><span class="s1">original_opener</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">DownloadWillBeginParams</span><span class="s3">(</span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot;Parameters for the downloadWillBegin event.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">navigation</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">timestamp</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">suggested_filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">navigation</span><span class="s3">, </span><span class="s1">timestamp</span><span class="s3">, </span><span class="s1">url</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">suggested_filename </span><span class="s3">= </span><span class="s1">suggested_filename</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s5">&quot;DownloadWillBeginParams&quot;</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a DownloadWillBeginParams instance from a dictionary. 
+ 
+        Parameters: 
+        ----------- 
+            json: A dictionary containing the download parameters. 
+ 
+        Returns: 
+        ------- 
+            DownloadWillBeginParams: A new instance of DownloadWillBeginParams. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;context&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;context is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">navigation </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;navigation&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">navigation </span><span class="s2">is not None and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">navigation</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;navigation must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">timestamp </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;timestamp&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">timestamp </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">timestamp</span><span class="s3">, </span><span class="s1">int</span><span class="s3">) </span><span class="s2">or </span><span class="s1">timestamp </span><span class="s3">&lt; </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;timestamp is required and must be a non-negative integer&quot;</span><span class="s3">)</span>
+
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;url&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">url </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;url is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">suggested_filename </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;suggestedFilename&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">suggested_filename </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">suggested_filename</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;suggestedFilename is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">cls</span><span class="s3">(</span>
+            <span class="s1">context</span><span class="s3">=</span><span class="s1">context</span><span class="s3">,</span>
+            <span class="s1">navigation</span><span class="s3">=</span><span class="s1">navigation</span><span class="s3">,</span>
+            <span class="s1">timestamp</span><span class="s3">=</span><span class="s1">timestamp</span><span class="s3">,</span>
+            <span class="s1">url</span><span class="s3">=</span><span class="s1">url</span><span class="s3">,</span>
+            <span class="s1">suggested_filename</span><span class="s3">=</span><span class="s1">suggested_filename</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">UserPromptOpenedParams</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Parameters for the userPromptOpened event.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">handler</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">message</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">type</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">default_value</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">handler </span><span class="s3">= </span><span class="s1">handler</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">message </span><span class="s3">= </span><span class="s1">message</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s3">= </span><span class="s1">type</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">default_value </span><span class="s3">= </span><span class="s1">default_value</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s5">&quot;UserPromptOpenedParams&quot;</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a UserPromptOpenedParams instance from a dictionary. 
+ 
+        Parameters: 
+        ----------- 
+            json: A dictionary containing the user prompt parameters. 
+ 
+        Returns: 
+        ------- 
+            UserPromptOpenedParams: A new instance of UserPromptOpenedParams. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;context&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;context is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">handler </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;handler&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">handler </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">handler</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;handler is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">message </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;message&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">message </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">message</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;message is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">type_value </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;type&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">type_value </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">type_value</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;type is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">default_value </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;defaultValue&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">default_value </span><span class="s2">is not None and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">default_value</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;defaultValue must be a string if provided&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">cls</span><span class="s3">(</span>
+            <span class="s1">context</span><span class="s3">=</span><span class="s1">context</span><span class="s3">,</span>
+            <span class="s1">handler</span><span class="s3">=</span><span class="s1">handler</span><span class="s3">,</span>
+            <span class="s1">message</span><span class="s3">=</span><span class="s1">message</span><span class="s3">,</span>
+            <span class="s1">type</span><span class="s3">=</span><span class="s1">type_value</span><span class="s3">,</span>
+            <span class="s1">default_value</span><span class="s3">=</span><span class="s1">default_value</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">UserPromptClosedParams</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Parameters for the userPromptClosed event.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">accepted</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">,</span>
+        <span class="s1">type</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">user_text</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">accepted </span><span class="s3">= </span><span class="s1">accepted</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">type </span><span class="s3">= </span><span class="s1">type</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">user_text </span><span class="s3">= </span><span class="s1">user_text</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s5">&quot;UserPromptClosedParams&quot;</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a UserPromptClosedParams instance from a dictionary. 
+ 
+        Parameters: 
+        ----------- 
+            json: A dictionary containing the user prompt closed parameters. 
+ 
+        Returns: 
+        ------- 
+            UserPromptClosedParams: A new instance of UserPromptClosedParams. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;context&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;context is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">accepted </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;accepted&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">accepted </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">accepted</span><span class="s3">, </span><span class="s1">bool</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;accepted is required and must be a boolean&quot;</span><span class="s3">)</span>
+
+        <span class="s1">type_value </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;type&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">type_value </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">type_value</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;type is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">user_text </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;userText&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">user_text </span><span class="s2">is not None and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">user_text</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;userText must be a string if provided&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">cls</span><span class="s3">(</span>
+            <span class="s1">context</span><span class="s3">=</span><span class="s1">context</span><span class="s3">,</span>
+            <span class="s1">accepted</span><span class="s3">=</span><span class="s1">accepted</span><span class="s3">,</span>
+            <span class="s1">type</span><span class="s3">=</span><span class="s1">type_value</span><span class="s3">,</span>
+            <span class="s1">user_text</span><span class="s3">=</span><span class="s1">user_text</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">HistoryUpdatedParams</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Parameters for the historyUpdated event.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">timestamp</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">timestamp </span><span class="s3">= </span><span class="s1">timestamp</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">url </span><span class="s3">= </span><span class="s1">url</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s5">&quot;HistoryUpdatedParams&quot;</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a HistoryUpdatedParams instance from a dictionary. 
+ 
+        Parameters: 
+        ----------- 
+            json: A dictionary containing the history updated parameters. 
+ 
+        Returns: 
+        ------- 
+            HistoryUpdatedParams: A new instance of HistoryUpdatedParams. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;context&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;context is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s1">timestamp </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;timestamp&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">timestamp </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">timestamp</span><span class="s3">, </span><span class="s1">int</span><span class="s3">) </span><span class="s2">or </span><span class="s1">timestamp </span><span class="s3">&lt; </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;timestamp is required and must be a non-negative integer&quot;</span><span class="s3">)</span>
+
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">json</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;url&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">url </span><span class="s2">is None or not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;url is required and must be a string&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">cls</span><span class="s3">(</span>
+            <span class="s1">context</span><span class="s3">=</span><span class="s1">context</span><span class="s3">,</span>
+            <span class="s1">timestamp</span><span class="s3">=</span><span class="s1">timestamp</span><span class="s3">,</span>
+            <span class="s1">url</span><span class="s3">=</span><span class="s1">url</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ContextCreated</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.contextCreated event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.contextCreated&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">BrowsingContextInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">BrowsingContextInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ContextDestroyed</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.contextDestroyed event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.contextDestroyed&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">BrowsingContextInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">BrowsingContextInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">NavigationStarted</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.navigationStarted event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.navigationStarted&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">NavigationCommitted</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.navigationCommitted event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.navigationCommitted&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">NavigationFailed</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.navigationFailed event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.navigationFailed&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">NavigationAborted</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.navigationAborted event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.navigationAborted&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">DomContentLoaded</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.domContentLoaded event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.domContentLoaded&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Load</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.load event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.load&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">FragmentNavigated</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.fragmentNavigated event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.fragmentNavigated&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">json</span><span class="s3">, </span><span class="s1">NavigationInfo</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">json</span>
+        <span class="s2">return </span><span class="s1">NavigationInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">DownloadWillBegin</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.downloadWillBegin event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.downloadWillBegin&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">DownloadWillBeginParams</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">UserPromptOpened</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.userPromptOpened event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.userPromptOpened&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">UserPromptOpenedParams</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">UserPromptClosed</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.userPromptClosed event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.userPromptClosed&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">UserPromptClosedParams</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">HistoryUpdated</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Event class for browsingContext.historyUpdated event.&quot;&quot;&quot;</span>
+
+    <span class="s1">event_class </span><span class="s3">= </span><span class="s5">&quot;browsingContext.historyUpdated&quot;</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">json</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">HistoryUpdatedParams</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">json</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span>
+<span class="s2">class </span><span class="s1">EventConfig</span><span class="s3">:</span>
+    <span class="s1">event_key</span><span class="s3">: </span><span class="s1">str</span>
+    <span class="s1">bidi_event</span><span class="s3">: </span><span class="s1">str</span>
+    <span class="s1">event_class</span><span class="s3">: </span><span class="s1">type</span>
+
+
+<span class="s2">class </span><span class="s1">_EventManager</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;Class to manage event subscriptions and callbacks for BrowsingContext.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">conn</span><span class="s3">, </span><span class="s1">event_configs</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">EventConfig</span><span class="s3">]):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn </span><span class="s3">= </span><span class="s1">conn</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">event_configs </span><span class="s3">= </span><span class="s1">event_configs</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">: </span><span class="s1">dict </span><span class="s3">= {}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_bidi_to_class </span><span class="s3">= {</span><span class="s1">config</span><span class="s3">.</span><span class="s1">bidi_event</span><span class="s3">: </span><span class="s1">config</span><span class="s3">.</span><span class="s1">event_class </span><span class="s2">for </span><span class="s1">config </span><span class="s2">in </span><span class="s1">event_configs</span><span class="s3">.</span><span class="s1">values</span><span class="s3">()}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_available_events </span><span class="s3">= </span><span class="s5">&quot;, &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">event_configs</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">()))</span>
+        <span class="s0"># Thread safety lock for subscription operations</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_subscription_lock </span><span class="s3">= </span><span class="s1">threading</span><span class="s3">.</span><span class="s1">Lock</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">validate_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; EventConfig</span><span class="s3">:</span>
+        <span class="s1">event_config </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">event_configs</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">event_config</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">f&quot;Event '</span><span class="s2">{</span><span class="s1">event</span><span class="s2">}</span><span class="s5">' not found. Available events: </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_available_events</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">event_config</span>
+
+    <span class="s2">def </span><span class="s1">subscribe_to_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">bidi_event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">contexts</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Subscribe to a BiDi event if not already subscribed. 
+ 
+        Parameters: 
+        ---------- 
+            bidi_event: The BiDi event name. 
+            contexts: Optional browsing context IDs to subscribe to. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_subscription_lock</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">bidi_event </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">:</span>
+                <span class="s1">session </span><span class="s3">= </span><span class="s1">Session</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">session</span><span class="s3">.</span><span class="s1">subscribe</span><span class="s3">(</span><span class="s1">bidi_event</span><span class="s3">, </span><span class="s1">browsing_contexts</span><span class="s3">=</span><span class="s1">contexts</span><span class="s3">))</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">[</span><span class="s1">bidi_event</span><span class="s3">] = []</span>
+
+    <span class="s2">def </span><span class="s1">unsubscribe_from_event</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">bidi_event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Unsubscribe from a BiDi event if no more callbacks exist. 
+ 
+        Parameters: 
+        ---------- 
+            bidi_event: The BiDi event name. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_subscription_lock</span><span class="s3">:</span>
+            <span class="s1">callback_list </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">bidi_event</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">callback_list </span><span class="s2">is not None and not </span><span class="s1">callback_list</span><span class="s3">:</span>
+                <span class="s1">session </span><span class="s3">= </span><span class="s1">Session</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">session</span><span class="s3">.</span><span class="s1">unsubscribe</span><span class="s3">(</span><span class="s1">bidi_event</span><span class="s3">))</span>
+                <span class="s2">del </span><span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">[</span><span class="s1">bidi_event</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">add_callback_to_tracking</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">bidi_event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_subscription_lock</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">[</span><span class="s1">bidi_event</span><span class="s3">].</span><span class="s1">append</span><span class="s3">(</span><span class="s1">callback_id</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">remove_callback_from_tracking</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">bidi_event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_subscription_lock</span><span class="s3">:</span>
+            <span class="s1">callback_list </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">bidi_event</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">callback_list </span><span class="s2">and </span><span class="s1">callback_id </span><span class="s2">in </span><span class="s1">callback_list</span><span class="s3">:</span>
+                <span class="s1">callback_list</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">(</span><span class="s1">callback_id</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">add_event_handler</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">contexts</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s1">event_config </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">validate_event</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+
+        <span class="s1">callback_id </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">add_callback</span><span class="s3">(</span><span class="s1">event_config</span><span class="s3">.</span><span class="s1">event_class</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">)</span>
+
+        <span class="s0"># Subscribe to the event if needed</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">subscribe_to_event</span><span class="s3">(</span><span class="s1">event_config</span><span class="s3">.</span><span class="s1">bidi_event</span><span class="s3">, </span><span class="s1">contexts</span><span class="s3">)</span>
+
+        <span class="s0"># Track the callback</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">add_callback_to_tracking</span><span class="s3">(</span><span class="s1">event_config</span><span class="s3">.</span><span class="s1">bidi_event</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">callback_id</span>
+
+    <span class="s2">def </span><span class="s1">remove_event_handler</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">event_config </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">validate_event</span><span class="s3">(</span><span class="s1">event</span><span class="s3">)</span>
+
+        <span class="s0"># Remove the callback from the connection</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">remove_callback</span><span class="s3">(</span><span class="s1">event_config</span><span class="s3">.</span><span class="s1">event_class</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">)</span>
+
+        <span class="s0"># Remove from tracking collections</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">remove_callback_from_tracking</span><span class="s3">(</span><span class="s1">event_config</span><span class="s3">.</span><span class="s1">bidi_event</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">)</span>
+
+        <span class="s0"># Unsubscribe if no more callbacks exist</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">unsubscribe_from_event</span><span class="s3">(</span><span class="s1">event_config</span><span class="s3">.</span><span class="s1">bidi_event</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">clear_event_handlers</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Clear all event handlers from the browsing context.&quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_subscription_lock</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">:</span>
+                <span class="s2">return</span>
+
+            <span class="s1">session </span><span class="s3">= </span><span class="s1">Session</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">)</span>
+
+            <span class="s2">for </span><span class="s1">bidi_event</span><span class="s3">, </span><span class="s1">callback_ids </span><span class="s2">in </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()):</span>
+                <span class="s1">event_class </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bidi_to_class</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">bidi_event</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">event_class</span><span class="s3">:</span>
+                    <span class="s0"># Remove all callbacks for this event</span>
+                    <span class="s2">for </span><span class="s1">callback_id </span><span class="s2">in </span><span class="s1">callback_ids</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">remove_callback</span><span class="s3">(</span><span class="s1">event_class</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">)</span>
+
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">session</span><span class="s3">.</span><span class="s1">unsubscribe</span><span class="s3">(</span><span class="s1">bidi_event</span><span class="s3">))</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">subscriptions</span><span class="s3">.</span><span class="s1">clear</span><span class="s3">()</span>
+
+
+<span class="s2">class </span><span class="s1">BrowsingContext</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;BiDi implementation of the browsingContext module.&quot;&quot;&quot;</span>
+
+    <span class="s1">EVENT_CONFIGS </span><span class="s3">= {</span>
+        <span class="s5">&quot;context_created&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;context_created&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.contextCreated&quot;</span><span class="s3">, </span><span class="s1">ContextCreated</span><span class="s3">),</span>
+        <span class="s5">&quot;context_destroyed&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;context_destroyed&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.contextDestroyed&quot;</span><span class="s3">, </span><span class="s1">ContextDestroyed</span><span class="s3">),</span>
+        <span class="s5">&quot;dom_content_loaded&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;dom_content_loaded&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.domContentLoaded&quot;</span><span class="s3">, </span><span class="s1">DomContentLoaded</span><span class="s3">),</span>
+        <span class="s5">&quot;download_will_begin&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span>
+            <span class="s5">&quot;download_will_begin&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.downloadWillBegin&quot;</span><span class="s3">, </span><span class="s1">DownloadWillBegin</span>
+        <span class="s3">),</span>
+        <span class="s5">&quot;fragment_navigated&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;fragment_navigated&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.fragmentNavigated&quot;</span><span class="s3">, </span><span class="s1">FragmentNavigated</span><span class="s3">),</span>
+        <span class="s5">&quot;history_updated&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;history_updated&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.historyUpdated&quot;</span><span class="s3">, </span><span class="s1">HistoryUpdated</span><span class="s3">),</span>
+        <span class="s5">&quot;load&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;load&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.load&quot;</span><span class="s3">, </span><span class="s1">Load</span><span class="s3">),</span>
+        <span class="s5">&quot;navigation_aborted&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;navigation_aborted&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.navigationAborted&quot;</span><span class="s3">, </span><span class="s1">NavigationAborted</span><span class="s3">),</span>
+        <span class="s5">&quot;navigation_committed&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span>
+            <span class="s5">&quot;navigation_committed&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.navigationCommitted&quot;</span><span class="s3">, </span><span class="s1">NavigationCommitted</span>
+        <span class="s3">),</span>
+        <span class="s5">&quot;navigation_failed&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;navigation_failed&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.navigationFailed&quot;</span><span class="s3">, </span><span class="s1">NavigationFailed</span><span class="s3">),</span>
+        <span class="s5">&quot;navigation_started&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;navigation_started&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.navigationStarted&quot;</span><span class="s3">, </span><span class="s1">NavigationStarted</span><span class="s3">),</span>
+        <span class="s5">&quot;user_prompt_closed&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;user_prompt_closed&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.userPromptClosed&quot;</span><span class="s3">, </span><span class="s1">UserPromptClosed</span><span class="s3">),</span>
+        <span class="s5">&quot;user_prompt_opened&quot;</span><span class="s3">: </span><span class="s1">EventConfig</span><span class="s3">(</span><span class="s5">&quot;user_prompt_opened&quot;</span><span class="s3">, </span><span class="s5">&quot;browsingContext.userPromptOpened&quot;</span><span class="s3">, </span><span class="s1">UserPromptOpened</span><span class="s3">),</span>
+    <span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">conn</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn </span><span class="s3">= </span><span class="s1">conn</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_event_manager </span><span class="s3">= </span><span class="s1">_EventManager</span><span class="s3">(</span><span class="s1">conn</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">EVENT_CONFIGS</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">get_event_names</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s4">&quot;&quot;&quot;Get a list of all available event names. 
+ 
+        Returns: 
+        ------- 
+            List[str]: A list of event names that can be used with event handlers. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">list</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">.</span><span class="s1">EVENT_CONFIGS</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">activate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Activates and focuses the given top-level traversable. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID to activate. 
+ 
+        Raises: 
+        ------ 
+            Exception: If the browsing context is not a top-level traversable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params </span><span class="s3">= {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.activate&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">capture_screenshot</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">origin</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s5">&quot;viewport&quot;</span><span class="s3">,</span>
+        <span class="s1">format</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">clip</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Captures an image of the given navigable, and returns it as a Base64-encoded string. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID to capture. 
+            origin: The origin of the screenshot, either &quot;viewport&quot; or &quot;document&quot;. 
+            format: The format of the screenshot. 
+            clip: The clip rectangle of the screenshot. 
+ 
+        Returns: 
+        ------- 
+            str: The Base64-encoded screenshot. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">, </span><span class="s5">&quot;origin&quot;</span><span class="s3">: </span><span class="s1">origin</span><span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">format </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;format&quot;</span><span class="s3">] = </span><span class="s1">format</span>
+        <span class="s2">if </span><span class="s1">clip </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;clip&quot;</span><span class="s3">] = </span><span class="s1">clip</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.captureScreenshot&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">[</span><span class="s5">&quot;data&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">prompt_unload</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Closes a top-level traversable. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID to close. 
+            prompt_unload: Whether to prompt to unload. 
+ 
+        Raises: 
+        ------ 
+            Exception: If the browsing context is not a top-level traversable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params </span><span class="s3">= {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">, </span><span class="s5">&quot;promptUnload&quot;</span><span class="s3">: </span><span class="s1">prompt_unload</span><span class="s3">}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.close&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">create</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">type</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">reference_context</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">background</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">user_context</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a new navigable, either in a new tab or in a new window, and returns its navigable id. 
+ 
+        Parameters: 
+        ----------- 
+            type: The type of the new navigable, either &quot;tab&quot; or &quot;window&quot;. 
+            reference_context: The reference browsing context ID. 
+            background: Whether to create the new navigable in the background. 
+            user_context: The user context ID. 
+ 
+        Returns: 
+        ------- 
+            str: The browsing context ID of the created navigable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {</span><span class="s5">&quot;type&quot;</span><span class="s3">: </span><span class="s1">type</span><span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">reference_context </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;referenceContext&quot;</span><span class="s3">] = </span><span class="s1">reference_context</span>
+        <span class="s2">if </span><span class="s1">background </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;background&quot;</span><span class="s3">] = </span><span class="s1">background</span>
+        <span class="s2">if </span><span class="s1">user_context </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;userContext&quot;</span><span class="s3">] = </span><span class="s1">user_context</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.create&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">[</span><span class="s5">&quot;context&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">get_tree</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">max_depth</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">int</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">root</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">BrowsingContextInfo</span><span class="s3">]:</span>
+        <span class="s4">&quot;&quot;&quot;Returns a tree of all descendent navigables including the given parent itself, or all top-level contexts 
+        when no parent is provided. 
+ 
+        Parameters: 
+        ----------- 
+            max_depth: The maximum depth of the tree. 
+            root: The root browsing context ID. 
+ 
+        Returns: 
+        ------- 
+            List[BrowsingContextInfo]: A list of browsing context information. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {}</span>
+        <span class="s2">if </span><span class="s1">max_depth </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;maxDepth&quot;</span><span class="s3">] = </span><span class="s1">max_depth</span>
+        <span class="s2">if </span><span class="s1">root </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;root&quot;</span><span class="s3">] = </span><span class="s1">root</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.getTree&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s3">[</span><span class="s1">BrowsingContextInfo</span><span class="s3">.</span><span class="s1">from_json</span><span class="s3">(</span><span class="s1">context</span><span class="s3">) </span><span class="s2">for </span><span class="s1">context </span><span class="s2">in </span><span class="s1">result</span><span class="s3">[</span><span class="s5">&quot;contexts&quot;</span><span class="s3">]]</span>
+
+    <span class="s2">def </span><span class="s1">handle_user_prompt</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">accept</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bool</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">user_text</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Allows closing an open prompt. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            accept: Whether to accept the prompt. 
+            user_text: The text to enter in the prompt. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">accept </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;accept&quot;</span><span class="s3">] = </span><span class="s1">accept</span>
+        <span class="s2">if </span><span class="s1">user_text </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;userText&quot;</span><span class="s3">] = </span><span class="s1">user_text</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.handleUserPrompt&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">locate_nodes</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">locator</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">,</span>
+        <span class="s1">max_node_count</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">int</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">serialization_options</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">start_nodes</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">]:</span>
+        <span class="s4">&quot;&quot;&quot;Returns a list of all nodes matching the specified locator. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            locator: The locator to use. 
+            max_node_count: The maximum number of nodes to return. 
+            serialization_options: The serialization options. 
+            start_nodes: The start nodes. 
+ 
+        Returns: 
+        ------- 
+            List[Dict]: A list of nodes. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">, </span><span class="s5">&quot;locator&quot;</span><span class="s3">: </span><span class="s1">locator</span><span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">max_node_count </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;maxNodeCount&quot;</span><span class="s3">] = </span><span class="s1">max_node_count</span>
+        <span class="s2">if </span><span class="s1">serialization_options </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;serializationOptions&quot;</span><span class="s3">] = </span><span class="s1">serialization_options</span>
+        <span class="s2">if </span><span class="s1">start_nodes </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;startNodes&quot;</span><span class="s3">] = </span><span class="s1">start_nodes</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.locateNodes&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">[</span><span class="s5">&quot;nodes&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">navigate</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">wait</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Navigates a navigable to the given URL. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            url: The URL to navigate to. 
+            wait: The readiness state to wait for. 
+ 
+        Returns: 
+        ------- 
+            Dict: A dictionary containing the navigation result. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params </span><span class="s3">= {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">, </span><span class="s5">&quot;url&quot;</span><span class="s3">: </span><span class="s1">url</span><span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">wait </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;wait&quot;</span><span class="s3">] = </span><span class="s1">wait</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.navigate&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">print</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">background</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">margin</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">orientation</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s5">&quot;portrait&quot;</span><span class="s3">,</span>
+        <span class="s1">page</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">page_ranges</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">Union</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">scale</span><span class="s3">: </span><span class="s1">float </span><span class="s3">= </span><span class="s6">1.0</span><span class="s3">,</span>
+        <span class="s1">shrink_to_fit</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Creates a paginated representation of a document, and returns it as a PDF document represented as a 
+        Base64-encoded string. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            background: Whether to include the background. 
+            margin: The margin parameters. 
+            orientation: The orientation, either &quot;portrait&quot; or &quot;landscape&quot;. 
+            page: The page parameters. 
+            page_ranges: The page ranges. 
+            scale: The scale. 
+            shrink_to_fit: Whether to shrink to fit. 
+ 
+        Returns: 
+        ------- 
+            str: The Base64-encoded PDF document. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params </span><span class="s3">= {</span>
+            <span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">,</span>
+            <span class="s5">&quot;background&quot;</span><span class="s3">: </span><span class="s1">background</span><span class="s3">,</span>
+            <span class="s5">&quot;orientation&quot;</span><span class="s3">: </span><span class="s1">orientation</span><span class="s3">,</span>
+            <span class="s5">&quot;scale&quot;</span><span class="s3">: </span><span class="s1">scale</span><span class="s3">,</span>
+            <span class="s5">&quot;shrinkToFit&quot;</span><span class="s3">: </span><span class="s1">shrink_to_fit</span><span class="s3">,</span>
+        <span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">margin </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;margin&quot;</span><span class="s3">] = </span><span class="s1">margin</span>
+        <span class="s2">if </span><span class="s1">page </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;page&quot;</span><span class="s3">] = </span><span class="s1">page</span>
+        <span class="s2">if </span><span class="s1">page_ranges </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;pageRanges&quot;</span><span class="s3">] = </span><span class="s1">page_ranges</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.print&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">[</span><span class="s5">&quot;data&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">reload</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+        <span class="s1">ignore_cache</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bool</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">wait</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Reloads a navigable. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            ignore_cache: Whether to ignore the cache. 
+            wait: The readiness state to wait for. 
+ 
+        Returns: 
+        ------- 
+            Dict: A dictionary containing the navigation result. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">ignore_cache </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;ignoreCache&quot;</span><span class="s3">] = </span><span class="s1">ignore_cache</span>
+        <span class="s2">if </span><span class="s1">wait </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;wait&quot;</span><span class="s3">] = </span><span class="s1">wait</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.reload&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">set_viewport</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">context</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">viewport</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">device_pixel_ratio</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">float</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">user_contexts</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Modifies specific viewport characteristics on the given top-level traversable. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            viewport: The viewport parameters. 
+            device_pixel_ratio: The device pixel ratio. 
+            user_contexts: The user context IDs. 
+ 
+        Raises: 
+        ------ 
+            Exception: If the browsing context is not a top-level traversable. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">] = {}</span>
+        <span class="s2">if </span><span class="s1">context </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;context&quot;</span><span class="s3">] = </span><span class="s1">context</span>
+        <span class="s2">if </span><span class="s1">viewport </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;viewport&quot;</span><span class="s3">] = </span><span class="s1">viewport</span>
+        <span class="s2">if </span><span class="s1">device_pixel_ratio </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;devicePixelRatio&quot;</span><span class="s3">] = </span><span class="s1">device_pixel_ratio</span>
+        <span class="s2">if </span><span class="s1">user_contexts </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">params</span><span class="s3">[</span><span class="s5">&quot;userContexts&quot;</span><span class="s3">] = </span><span class="s1">user_contexts</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.setViewport&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">traverse_history</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">delta</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Traverses the history of a given navigable by a delta. 
+ 
+        Parameters: 
+        ----------- 
+            context: The browsing context ID. 
+            delta: The delta to traverse by. 
+ 
+        Returns: 
+        ------- 
+            Dict: A dictionary containing the traverse history result. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">params </span><span class="s3">= {</span><span class="s5">&quot;context&quot;</span><span class="s3">: </span><span class="s1">context</span><span class="s3">, </span><span class="s5">&quot;delta&quot;</span><span class="s3">: </span><span class="s1">delta</span><span class="s3">}</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">conn</span><span class="s3">.</span><span class="s1">execute</span><span class="s3">(</span><span class="s1">command_builder</span><span class="s3">(</span><span class="s5">&quot;browsingContext.traverseHistory&quot;</span><span class="s3">, </span><span class="s1">params</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">add_event_handler</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">contexts</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Add an event handler to the browsing context. 
+ 
+        Parameters: 
+        ---------- 
+            event: The event to subscribe to. 
+            callback: The callback function to execute on event. 
+            contexts: The browsing context IDs to subscribe to. 
+ 
+        Returns: 
+        ------- 
+            int: callback id 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_event_manager</span><span class="s3">.</span><span class="s1">add_event_handler</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">callback</span><span class="s3">, </span><span class="s1">contexts</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">remove_event_handler</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Remove an event handler from the browsing context. 
+ 
+        Parameters: 
+        ---------- 
+            event: The event to unsubscribe from. 
+            callback_id: The callback id to remove. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_event_manager</span><span class="s3">.</span><span class="s1">remove_event_handler</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">callback_id</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">clear_event_handlers</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4">&quot;&quot;&quot;Clear all event handlers from the browsing context.&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_event_manager</span><span class="s3">.</span><span class="s1">clear_event_handlers</span><span class="s3">()</span>
+</pre>
+</body>
+</html>

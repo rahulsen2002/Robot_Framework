@@ -1,0 +1,207 @@
+<html>
+<head>
+<title>_signals.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_signals.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">OrderedDict</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">ConflictDetector</span><span class="s2">, </span><span class="s1">is_main_thread</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncIterator</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Generator</span><span class="s2">, </span><span class="s1">Iterable</span>
+    <span class="s0">from </span><span class="s1">types </span><span class="s0">import </span><span class="s1">FrameType</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Self</span>
+
+<span class="s3"># Discussion of signal handling strategies:</span>
+<span class="s3">#</span>
+<span class="s3"># - On Windows signals barely exist. There are no options; signal handlers are</span>
+<span class="s3">#   the only available API.</span>
+<span class="s3">#</span>
+<span class="s3"># - On Linux signalfd is arguably the natural way. Semantics: signalfd acts as</span>
+<span class="s3">#   an *alternative* signal delivery mechanism. The way you use it is to mask</span>
+<span class="s3">#   out the relevant signals process-wide (so that they don't get delivered</span>
+<span class="s3">#   the normal way), and then when you read from signalfd that actually counts</span>
+<span class="s3">#   as delivering it (despite the mask). The problem with this is that we</span>
+<span class="s3">#   don't have any reliable way to mask out signals process-wide -- the only</span>
+<span class="s3">#   way to do that in Python is to call pthread_sigmask from the main thread</span>
+<span class="s3">#   *before starting any other threads*, and as a library we can't really</span>
+<span class="s3">#   impose that, and the failure mode is annoying (signals get delivered via</span>
+<span class="s3">#   signal handlers whether we want them to or not).</span>
+<span class="s3">#</span>
+<span class="s3"># - on macOS/*BSD, kqueue is the natural way. Semantics: kqueue acts as an</span>
+<span class="s3">#   *extra* signal delivery mechanism. Signals are delivered the normal</span>
+<span class="s3">#   way, *and* are delivered to kqueue. So you want to set them to SIG_IGN so</span>
+<span class="s3">#   that they don't end up pending forever (I guess?). I can't find any actual</span>
+<span class="s3">#   docs on how masking and EVFILT_SIGNAL interact. I did see someone note</span>
+<span class="s3">#   that if a signal is pending when the kqueue filter is added then you</span>
+<span class="s3">#   *don't* get notified of that, which makes sense. But still, we have to</span>
+<span class="s3">#   manipulate signal state (e.g. setting SIG_IGN) which as far as Python is</span>
+<span class="s3">#   concerned means we have to do this from the main thread.</span>
+<span class="s3">#</span>
+<span class="s3"># So in summary, there don't seem to be any compelling advantages to using the</span>
+<span class="s3"># platform-native signal notification systems; they're kinda nice, but it's</span>
+<span class="s3"># simpler to implement the naive signal-handler-based system once and be</span>
+<span class="s3"># done. (The big advantage would be if there were a reliable way to monitor</span>
+<span class="s3"># for SIGCHLD from outside the main thread and without interfering with other</span>
+<span class="s3"># libraries that also want to monitor for SIGCHLD. But there isn't. I guess</span>
+<span class="s3"># kqueue might give us that, but in kqueue we don't need it, because kqueue</span>
+<span class="s3"># can directly monitor for child process state changes.)</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">_signal_handler</span><span class="s2">(</span>
+    <span class="s1">signals</span><span class="s2">: </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">int</span><span class="s2">],</span>
+    <span class="s1">handler</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">FrameType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">], </span><span class="s1">object</span><span class="s2">] | </span><span class="s1">int </span><span class="s2">| </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">Handlers </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s1">original_handlers </span><span class="s2">= {}</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">signum </span><span class="s0">in </span><span class="s1">set</span><span class="s2">(</span><span class="s1">signals</span><span class="s2">):</span>
+            <span class="s1">original_handlers</span><span class="s2">[</span><span class="s1">signum</span><span class="s2">] = </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">, </span><span class="s1">handler</span><span class="s2">)</span>
+        <span class="s0">yield</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">signum</span><span class="s2">, </span><span class="s1">original_handler </span><span class="s0">in </span><span class="s1">original_handlers</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">, </span><span class="s1">original_handler</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">SignalReceiver</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># {signal num: None}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">: </span><span class="s1">OrderedDict</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s0">None</span><span class="s2">] = </span><span class="s1">OrderedDict</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_lot </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">ParkingLot</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector </span><span class="s2">= </span><span class="s1">ConflictDetector</span><span class="s2">(</span>
+            <span class="s4">&quot;only one task can iterate on a signal receiver at a time&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_closed </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">_add</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">signum</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s1">signal</span><span class="s2">.</span><span class="s1">raise_signal</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">[</span><span class="s1">signum</span><span class="s2">] = </span><span class="s0">None</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_lot</span><span class="s2">.</span><span class="s1">unpark</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">_redeliver_remaining</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># First make sure that any signals still in the delivery pipeline will</span>
+        <span class="s3"># get redelivered</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_closed </span><span class="s2">= </span><span class="s0">True</span>
+
+        <span class="s3"># And then redeliver any that are sitting in pending. This is done</span>
+        <span class="s3"># using a weird recursive construct to make sure we process everything</span>
+        <span class="s3"># even if some of the handlers raise exceptions.</span>
+        <span class="s0">def </span><span class="s1">deliver_next</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">:</span>
+                <span class="s1">signum</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">.</span><span class="s1">popitem</span><span class="s2">(</span><span class="s1">last</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">signal</span><span class="s2">.</span><span class="s1">raise_signal</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">)</span>
+                <span class="s0">finally</span><span class="s2">:</span>
+                    <span class="s1">deliver_next</span><span class="s2">()</span>
+
+        <span class="s1">deliver_next</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__aiter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">async def </span><span class="s1">__anext__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_closed</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s4">&quot;open_signal_receiver block already exited&quot;</span><span class="s2">)</span>
+        <span class="s3"># In principle it would be possible to support multiple concurrent</span>
+        <span class="s3"># calls to __anext__, but doing it without race conditions is quite</span>
+        <span class="s3"># tricky, and there doesn't seem to be any point in trying.</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector</span><span class="s2">:</span>
+            <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_lot</span><span class="s2">.</span><span class="s1">park</span><span class="s2">()</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+            <span class="s1">signum</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">.</span><span class="s1">popitem</span><span class="s2">(</span><span class="s1">last</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s1">signum</span>
+
+
+<span class="s0">def </span><span class="s1">get_pending_signal_count</span><span class="s2">(</span><span class="s1">rec</span><span class="s2">: </span><span class="s1">AsyncIterator</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Helper for tests, not public or otherwise used.&quot;&quot;&quot;</span>
+    <span class="s3"># open_signal_receiver() always produces SignalReceiver, this should not fail.</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">rec</span><span class="s2">, </span><span class="s1">SignalReceiver</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">rec</span><span class="s2">.</span><span class="s1">_pending</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">open_signal_receiver</span><span class="s2">(</span>
+    <span class="s2">*</span><span class="s1">signals</span><span class="s2">: </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">Signals </span><span class="s2">| </span><span class="s1">int</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">AsyncIterator</span><span class="s2">[</span><span class="s1">int</span><span class="s2">], </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s5">&quot;&quot;&quot;A context manager for catching signals. 
+ 
+    Entering this context manager starts listening for the given signals and 
+    returns an async iterator; exiting the context manager stops listening. 
+ 
+    The async iterator blocks until a signal arrives, and then yields it. 
+ 
+    Note that if you leave the ``with`` block while the iterator has 
+    unextracted signals still pending inside it, then they will be 
+    re-delivered using Python's regular signal handling logic. This avoids a 
+    race condition when signals arrives just before we exit the ``with`` 
+    block. 
+ 
+    Args: 
+      signals: the signals to listen for. 
+ 
+    Raises: 
+      TypeError: if no signals were provided. 
+ 
+      RuntimeError: if you try to use this anywhere except Python's main 
+          thread. (This is a Python limitation.) 
+ 
+    Example: 
+ 
+      A common convention for Unix daemons is that they should reload their 
+      configuration when they receive a ``SIGHUP``. Here's a sketch of what 
+      that might look like using :func:`open_signal_receiver`:: 
+ 
+         with trio.open_signal_receiver(signal.SIGHUP) as signal_aiter: 
+             async for signum in signal_aiter: 
+                 assert signum == signal.SIGHUP 
+                 reload_configuration() 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">signals</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s4">&quot;No signals were provided&quot;</span><span class="s2">)</span>
+
+    <span class="s0">if not </span><span class="s1">is_main_thread</span><span class="s2">():</span>
+        <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span>
+            <span class="s4">&quot;Sorry, open_signal_receiver is only possible when running in &quot;</span>
+            <span class="s4">&quot;Python interpreter's main thread&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+    <span class="s1">token </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">current_trio_token</span><span class="s2">()</span>
+    <span class="s1">queue </span><span class="s2">= </span><span class="s1">SignalReceiver</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">handler</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">: </span><span class="s1">FrameType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">token</span><span class="s2">.</span><span class="s1">run_sync_soon</span><span class="s2">(</span><span class="s1">queue</span><span class="s2">.</span><span class="s1">_add</span><span class="s2">, </span><span class="s1">signum</span><span class="s2">, </span><span class="s1">idempotent</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">_signal_handler</span><span class="s2">(</span><span class="s1">signals</span><span class="s2">, </span><span class="s1">handler</span><span class="s2">):</span>
+            <span class="s0">yield </span><span class="s1">queue</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">queue</span><span class="s2">.</span><span class="s1">_redeliver_remaining</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

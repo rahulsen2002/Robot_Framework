@@ -1,0 +1,1361 @@
+<html>
+<head>
+<title>Telnet.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+Telnet.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#  Copyright 2008-2015 Nokia Networks</span>
+<span class="s0">#  Copyright 2016-     Robot Framework Foundation</span>
+<span class="s0">#</span>
+<span class="s0">#  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0">#  you may not use this file except in compliance with the License.</span>
+<span class="s0">#  You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#      http://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0">#  Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0">#  distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0">#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0">#  See the License for the specific language governing permissions and</span>
+<span class="s0">#  limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">inspect</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">socket</span>
+<span class="s2">import </span><span class="s1">struct</span>
+<span class="s2">import </span><span class="s1">telnetlib</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s2">import </span><span class="s1">pyte</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s1">pyte </span><span class="s3">= </span><span class="s2">None</span>
+
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">api </span><span class="s2">import </span><span class="s1">logger</span>
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">api</span><span class="s3">.</span><span class="s1">deco </span><span class="s2">import </span><span class="s1">keyword</span>
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">ConnectionCache</span><span class="s3">, </span><span class="s1">is_truthy</span><span class="s3">, </span><span class="s1">secs_to_timestr</span><span class="s3">, </span><span class="s1">seq2str</span><span class="s3">, </span><span class="s1">timestr_to_secs</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">version </span><span class="s2">import </span><span class="s1">get_version</span>
+
+
+<span class="s2">class </span><span class="s1">Telnet</span><span class="s3">:</span>
+    <span class="s4">&quot;&quot;&quot;A library providing communication over Telnet connections. 
+ 
+    ``Telnet`` is Robot Framework's standard library that makes it possible to 
+    connect to Telnet servers and execute commands on the opened connections. 
+ 
+    == Table of contents == 
+ 
+    %TOC% 
+ 
+    = Connections = 
+ 
+    The first step of using ``Telnet`` is opening a connection with `Open 
+    Connection` keyword. Typically the next step is logging in with `Login` 
+    keyword, and in the end the opened connection can be closed with `Close 
+    Connection`. 
+ 
+    It is possible to open multiple connections and switch the active one 
+    using `Switch Connection`. `Close All Connections` can be used to close 
+    all the connections, which is especially useful in suite teardowns to 
+    guarantee that all connections are always closed. 
+ 
+    = Writing and reading = 
+ 
+    After opening a connection and possibly logging in, commands can be 
+    executed or text written to the connection for other reasons using `Write` 
+    and `Write Bare` keywords. The main difference between these two is that 
+    the former adds a [#Configuration|configurable newline] after the text 
+    automatically. 
+ 
+    After writing something to the connection, the resulting output can be 
+    read using `Read`, `Read Until`, `Read Until Regexp`, and `Read Until 
+    Prompt` keywords. Which one to use depends on the context, but the latest 
+    one is often the most convenient. 
+ 
+    As a convenience when running a command, it is possible to use `Execute 
+    Command` that simply uses `Write` and `Read Until Prompt` internally. 
+    `Write Until Expected Output` is useful if you need to wait until writing 
+    something produces a desired output. 
+ 
+    Written and read text is automatically encoded/decoded using a 
+    [#Configuration|configured encoding]. 
+ 
+    The ANSI escape codes, like cursor movement and color codes, are 
+    normally returned as part of the read operation. If an escape code occurs 
+    in middle of a search pattern it may also prevent finding the searched 
+    string. `Terminal emulation` can be used to process these 
+    escape codes as they would be if a real terminal would be in use. 
+ 
+    = Configuration = 
+ 
+    Many aspects related the connections can be easily configured either 
+    globally or per connection basis. Global configuration is done when 
+    [#Importing|library is imported], and these values can be overridden per 
+    connection by `Open Connection` or with setting specific keywords 
+    `Set Timeout`, `Set Newline`, `Set Prompt`, `Set Encoding`, 
+    `Set Default Log Level` and `Set Telnetlib Log Level`. 
+ 
+    Values of ``environ_user``, ``window_size``, ``terminal_emulation``, and 
+    ``terminal_type`` can not be changed after opening the connection. 
+ 
+    == Timeout == 
+ 
+    Timeout defines how long is the maximum time to wait when reading 
+    output. It is used internally by `Read Until`, `Read Until Regexp`, 
+    `Read Until Prompt`, and `Login` keywords. The default value is 3 seconds. 
+ 
+    == Connection Timeout == 
+ 
+    Connection Timeout defines how long is the maximum time to wait when 
+    opening the telnet connection. It is used internally by `Open Connection`. 
+    The default value is the system global default timeout. 
+ 
+    == Newline == 
+ 
+    Newline defines which line separator `Write` keyword should use. The 
+    default value is ``CRLF`` that is typically used by Telnet connections. 
+ 
+    Newline can be given either in escaped format using ``\\n`` and ``\\r`` or 
+    with special ``LF`` and ``CR`` syntax. 
+ 
+    Examples: 
+    | `Set Newline` | \\n  | 
+    | `Set Newline` | CRLF | 
+ 
+    == Prompt == 
+ 
+    Often the easiest way to read the output of a command is reading all 
+    the output until the next prompt with `Read Until Prompt`. It also makes 
+    it easier, and faster, to verify did `Login` succeed. 
+ 
+    Prompt can be specified either as a normal string or a regular expression. 
+    The latter is especially useful if the prompt changes as a result of 
+    the executed commands. Prompt can be set to be a regular expression 
+    by giving ``prompt_is_regexp`` argument a true value (see `Boolean 
+    arguments`). 
+ 
+    Examples: 
+    | `Open Connection` | lolcathost | prompt=$              | 
+    | `Set Prompt`      | (&gt; |# )    | prompt_is_regexp=true | 
+ 
+    == Encoding == 
+ 
+    To ease handling text containing non-ASCII characters, all written text is 
+    encoded and read text decoded by default. The default encoding is UTF-8 
+    that works also with ASCII. Encoding can be disabled by using a special 
+    encoding value ``NONE``. This is mainly useful if you need to get the bytes 
+    received from the connection as-is. 
+ 
+    Notice that when writing to the connection, only Unicode strings are 
+    encoded using the defined encoding. Byte strings are expected to be already 
+    encoded correctly. Notice also that normal text in data is passed to 
+    the library as Unicode and you need to use variables to use bytes. 
+ 
+    It is also possible to configure the error handler to use if encoding or 
+    decoding characters fails. Accepted values are the same that encode/decode 
+    functions in Python strings accept. In practice the following values are 
+    the most useful: 
+ 
+    - ``ignore``: ignore characters that cannot be encoded (default) 
+    - ``strict``: fail if characters cannot be encoded 
+    - ``replace``: replace characters that cannot be encoded with a replacement 
+      character 
+ 
+    Examples: 
+    | `Open Connection` | lolcathost | encoding=Latin1 | encoding_errors=strict | 
+    | `Set Encoding` | ISO-8859-15 | 
+    | `Set Encoding` | errors=ignore | 
+ 
+    == Default log level == 
+ 
+    Default log level specifies the log level keywords use for `logging` unless 
+    they are given an explicit log level. The default value is ``INFO``, and 
+    changing it, for example, to ``DEBUG`` can be a good idea if there is lot 
+    of unnecessary output that makes log files big. 
+ 
+    == Terminal type == 
+ 
+    By default the Telnet library does not negotiate any specific terminal type 
+    with the server. If a specific terminal type, for example ``vt100``, is 
+    desired, the terminal type can be configured in `importing` and with 
+    `Open Connection`. 
+ 
+    == Window size == 
+ 
+    Window size for negotiation with the server can be configured when 
+    `importing` the library and with `Open Connection`. 
+ 
+    == USER environment variable == 
+ 
+    Telnet protocol allows the ``USER`` environment variable to be sent when 
+    connecting to the server. On some servers it may happen that there is no 
+    login prompt, and on those cases this configuration option will allow still 
+    to define the desired username. The option ``environ_user`` can be used in 
+    `importing` and with `Open Connection`. 
+ 
+    = Terminal emulation = 
+ 
+    Telnet library supports terminal 
+    emulation with [http://pyte.readthedocs.io|Pyte]. Terminal emulation 
+    will process the output in a virtual screen. This means that ANSI escape 
+    codes, like cursor movements, and also control characters, like 
+    carriage returns and backspaces, have the same effect on the result as they 
+    would have on a normal terminal screen. For example the sequence 
+    ``acdc\\x1b[3Dbba`` will result in output ``abba``. 
+ 
+    Terminal emulation is taken into use by giving ``terminal_emulation`` 
+    argument a true value (see `Boolean arguments`) either in the library 
+    initialization or with `Open Connection`. 
+ 
+    As Pyte approximates vt-style terminal, you may also want to set the 
+    terminal type as ``vt100``. We also recommend that you increase the window 
+    size, as the terminal emulation will break all lines that are longer than 
+    the window row length. 
+ 
+    When terminal emulation is used, the `newline` and `encoding` can not be 
+    changed anymore after opening the connection. 
+ 
+    Examples: 
+    | `Open Connection` | lolcathost | terminal_emulation=True | terminal_type=vt100 | window_size=400x100 | 
+ 
+    As a prerequisite for using terminal emulation, you need to have Pyte 
+    installed. Due to backwards incompatible changes in Pyte, different 
+    Robot Framework versions support different Pyte versions: 
+ 
+    - Pyte 0.6 and newer are supported by Robot Framework 3.0.3. 
+      Latest Pyte version can be installed (or upgraded) with 
+      ``pip install --upgrade pyte``. 
+    - Pyte 0.5.2 and older are supported by Robot Framework 3.0.2 and earlier. 
+      Pyte 0.5.2 can be installed with ``pip install pyte==0.5.2``. 
+ 
+    = Logging = 
+ 
+    All keywords that read something log the output. These keywords take the 
+    log level to use as an optional argument, and if no log level is specified 
+    they use the [#Configuration|configured] default value. 
+ 
+    The valid log levels to use are ``TRACE``, ``DEBUG``, ``INFO`` (default), 
+    and ``WARN``. Levels below ``INFO`` are not shown in log files by default 
+    whereas warnings are shown more prominently. 
+ 
+    The [http://docs.python.org/library/telnetlib.html|telnetlib module] 
+    used by this library has a custom logging system for logging content it 
+    sends and receives. By default these messages are written using ``TRACE`` 
+    level, but the level is configurable with the ``telnetlib_log_level`` 
+    option either in the library initialization, to the `Open Connection` 
+    or by using the `Set Telnetlib Log Level` keyword to the active 
+    connection. Special level ``NONE`` con be used to disable the logging 
+    altogether. 
+ 
+    = Time string format = 
+ 
+    Timeouts and other times used must be given as a time string using format 
+    like ``15 seconds`` or ``1min 10s``. If the timeout is given as just 
+    a number, for example, ``10`` or ``1.5``, it is considered to be seconds. 
+    The time string format is described in more detail in an appendix of 
+    [http://robotframework.org/robotframework/#user-guide|Robot Framework User Guide]. 
+ 
+    = Boolean arguments = 
+ 
+    Some keywords accept arguments that are handled as Boolean values true or 
+    false. If such an argument is given as a string, it is considered false if 
+    it is an empty string or equal to ``FALSE``, ``NONE``, ``NO``, ``OFF`` or 
+    ``0``, case-insensitively. Other strings are considered true regardless 
+    their value, and other argument types are tested using the same 
+    [http://docs.python.org/library/stdtypes.html#truth|rules as in Python]. 
+ 
+    True examples: 
+    | `Open Connection` | lolcathost | terminal_emulation=True    | # Strings are generally true.    | 
+    | `Open Connection` | lolcathost | terminal_emulation=yes     | # Same as the above.             | 
+    | `Open Connection` | lolcathost | terminal_emulation=${TRUE} | # Python ``True`` is true.       | 
+    | `Open Connection` | lolcathost | terminal_emulation=${42}   | # Numbers other than 0 are true. | 
+ 
+    False examples: 
+    | `Open Connection` | lolcathost | terminal_emulation=False    | # String ``false`` is false.   | 
+    | `Open Connection` | lolcathost | terminal_emulation=no       | # Also string ``no`` is false. | 
+    | `Open Connection` | lolcathost | terminal_emulation=${EMPTY} | # Empty string is false.       | 
+    | `Open Connection` | lolcathost | terminal_emulation=${FALSE} | # Python ``False`` is false.   | 
+ 
+    Considering string ``NONE`` false is new in Robot Framework 3.0.3 and 
+    considering also ``OFF`` and ``0`` false is new in Robot Framework 3.1. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">ROBOT_LIBRARY_SCOPE </span><span class="s3">= </span><span class="s5">&quot;SUITE&quot;</span>
+    <span class="s1">ROBOT_LIBRARY_VERSION </span><span class="s3">= </span><span class="s1">get_version</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">=</span><span class="s5">&quot;3 seconds&quot;</span><span class="s3">,</span>
+        <span class="s1">newline</span><span class="s3">=</span><span class="s5">&quot;CRLF&quot;</span><span class="s3">,</span>
+        <span class="s1">prompt</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">prompt_is_regexp</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;UTF-8&quot;</span><span class="s3">,</span>
+        <span class="s1">encoding_errors</span><span class="s3">=</span><span class="s5">&quot;ignore&quot;</span><span class="s3">,</span>
+        <span class="s1">default_log_level</span><span class="s3">=</span><span class="s5">&quot;INFO&quot;</span><span class="s3">,</span>
+        <span class="s1">window_size</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">environ_user</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">terminal_emulation</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">terminal_type</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">telnetlib_log_level</span><span class="s3">=</span><span class="s5">&quot;TRACE&quot;</span><span class="s3">,</span>
+        <span class="s1">connection_timeout</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Telnet library can be imported with optional configuration parameters. 
+ 
+        Configuration parameters are used as default values when new 
+        connections are opened with `Open Connection` keyword. They can also be 
+        overridden after opening the connection using the `Set ...` `keywords`. 
+        See these keywords as well as `Configuration`, `Terminal emulation` and 
+        `Logging` sections above for more information about these parameters 
+        and their possible values. 
+ 
+        See `Time string format` and `Boolean arguments` sections for 
+        information about using arguments accepting times and Boolean values, 
+        respectively. 
+ 
+        Examples (use only one of these): 
+        | = Setting = | = Value = | = Value =                | = Value =            | = Value =           | = Comment = | 
+        | Library     | Telnet    |                          |                      |                     | # default values | 
+        | Library     | Telnet    | 5 seconds                |                      |                     | # set only timeout | 
+        | Library     | Telnet    | newline=LF               | encoding=ISO-8859-1  |                     | # set newline and encoding using named arguments | 
+        | Library     | Telnet    | prompt=$                 |                      |                     | # set prompt | 
+        | Library     | Telnet    | prompt=(&gt; |# )           | prompt_is_regexp=yes |                     | # set prompt as a regular expression | 
+        | Library     | Telnet    | terminal_emulation=True  | terminal_type=vt100  | window_size=400x100 | # use terminal emulation with defined window size and terminal type | 
+        | Library     | Telnet    | telnetlib_log_level=NONE |                      |                     | # disable logging messages from the underlying telnetlib | 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout </span><span class="s3">= </span><span class="s1">timeout </span><span class="s2">or </span><span class="s6">3.0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_connection_timeout</span><span class="s3">(</span><span class="s1">connection_timeout</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_newline </span><span class="s3">= </span><span class="s1">newline </span><span class="s2">or </span><span class="s5">&quot;CRLF&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt </span><span class="s3">= (</span><span class="s1">prompt</span><span class="s3">, </span><span class="s1">prompt_is_regexp</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding </span><span class="s3">= </span><span class="s1">encoding</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding_errors </span><span class="s3">= </span><span class="s1">encoding_errors</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_default_log_level </span><span class="s3">= </span><span class="s1">default_log_level</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_window_size </span><span class="s3">= </span><span class="s1">window_size</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_environ_user </span><span class="s3">= </span><span class="s1">environ_user</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulation </span><span class="s3">= </span><span class="s1">terminal_emulation</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_type </span><span class="s3">= </span><span class="s1">terminal_type</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level </span><span class="s3">= </span><span class="s1">telnetlib_log_level</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_cache </span><span class="s3">= </span><span class="s1">ConnectionCache</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_conn </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_conn_kws </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_lib_kws </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">get_keyword_names</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_library_keywords</span><span class="s3">() + </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_connection_keywords</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_get_library_keywords</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_lib_kws </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_lib_kws </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_keywords</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, [</span><span class="s5">&quot;get_keyword_names&quot;</span><span class="s3">])</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_lib_kws</span>
+
+    <span class="s2">def </span><span class="s1">_get_keywords</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">excluded</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s3">[</span>
+            <span class="s1">name </span><span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">dir</span><span class="s3">(</span><span class="s1">source</span><span class="s3">) </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_keyword</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">excluded</span><span class="s3">)</span>
+        <span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">_is_keyword</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">source</span><span class="s3">, </span><span class="s1">excluded</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s3">(</span>
+            <span class="s1">name </span><span class="s2">not in </span><span class="s1">excluded</span>
+            <span class="s2">and not </span><span class="s1">name</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+            <span class="s2">and </span><span class="s1">name </span><span class="s3">!= </span><span class="s5">&quot;get_keyword_names&quot;</span>
+            <span class="s2">and </span><span class="s1">inspect</span><span class="s3">.</span><span class="s1">ismethod</span><span class="s3">(</span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">source</span><span class="s3">, </span><span class="s1">name</span><span class="s3">))</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_connection_keywords</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_conn_kws </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">conn </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_connection</span><span class="s3">()</span>
+            <span class="s1">excluded </span><span class="s3">= [</span>
+                <span class="s1">name</span>
+                <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">dir</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">Telnet</span><span class="s3">())</span>
+                <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s3">[</span><span class="s5">&quot;write&quot;</span><span class="s3">, </span><span class="s5">&quot;read&quot;</span><span class="s3">, </span><span class="s5">&quot;read_until&quot;</span><span class="s3">]</span>
+            <span class="s3">]</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_conn_kws </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_keywords</span><span class="s3">(</span><span class="s1">conn</span><span class="s3">, </span><span class="s1">excluded</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_conn_kws</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_connection_keywords</span><span class="s3">():</span>
+            <span class="s2">raise </span><span class="s1">AttributeError</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s0"># If no connection is initialized, get attributes from a non-active</span>
+        <span class="s0"># connection. This makes it possible for Robot to create keyword</span>
+        <span class="s0"># handlers when it imports the library.</span>
+        <span class="s2">return </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_conn </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_connection</span><span class="s3">(), </span><span class="s1">name</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">keyword</span><span class="s3">(</span><span class="s1">types</span><span class="s3">=</span><span class="s2">None</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">open_connection</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">host</span><span class="s3">,</span>
+        <span class="s1">alias</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">port</span><span class="s3">=</span><span class="s6">23</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">newline</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">prompt</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">prompt_is_regexp</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">encoding</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">encoding_errors</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">default_log_level</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">window_size</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">environ_user</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">terminal_emulation</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">terminal_type</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">telnetlib_log_level</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">connection_timeout</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Opens a new Telnet connection to the given host and port. 
+ 
+        The ``timeout``, ``newline``, ``prompt``, ``prompt_is_regexp``, 
+        ``encoding``, ``default_log_level``, ``window_size``, ``environ_user``, 
+        ``terminal_emulation``, ``terminal_type`` and ``telnetlib_log_level`` 
+        arguments get default values when the library is [#Importing|imported]. 
+        Setting them here overrides those values for the opened connection. 
+        See `Configuration`, `Terminal emulation` and `Logging` sections for 
+        more information about these parameters and their possible values. 
+ 
+        Possible already opened connections are cached and it is possible to 
+        switch back to them using `Switch Connection` keyword. It is possible to 
+        switch either using explicitly given ``alias`` or using index returned 
+        by this keyword. Indexing starts from 1 and is reset back to it by 
+        `Close All Connections` keyword. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">timeout </span><span class="s3">= </span><span class="s1">timeout </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span>
+        <span class="s1">connection_timeout </span><span class="s3">= (</span>
+            <span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">connection_timeout</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">connection_timeout</span>
+            <span class="s2">else </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_connection_timeout</span>
+        <span class="s3">)</span>
+        <span class="s1">newline </span><span class="s3">= </span><span class="s1">newline </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span>
+        <span class="s1">encoding </span><span class="s3">= </span><span class="s1">encoding </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding</span>
+        <span class="s1">encoding_errors </span><span class="s3">= </span><span class="s1">encoding_errors </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding_errors</span>
+        <span class="s1">default_log_level </span><span class="s3">= </span><span class="s1">default_log_level </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_default_log_level</span>
+        <span class="s1">window_size </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_parse_window_size</span><span class="s3">(</span><span class="s1">window_size </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_window_size</span><span class="s3">)</span>
+        <span class="s1">environ_user </span><span class="s3">= </span><span class="s1">environ_user </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_environ_user</span>
+        <span class="s2">if </span><span class="s1">terminal_emulation </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">terminal_emulation </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulation</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">terminal_emulation </span><span class="s3">= </span><span class="s1">is_truthy</span><span class="s3">(</span><span class="s1">terminal_emulation</span><span class="s3">)</span>
+        <span class="s1">terminal_type </span><span class="s3">= </span><span class="s1">terminal_type </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_type</span>
+        <span class="s1">telnetlib_log_level </span><span class="s3">= </span><span class="s1">telnetlib_log_level </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level</span>
+        <span class="s2">if not </span><span class="s1">prompt</span><span class="s3">:</span>
+            <span class="s1">prompt</span><span class="s3">, </span><span class="s1">prompt_is_regexp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span>
+            <span class="s5">f&quot;Opening connection to </span><span class="s2">{</span><span class="s1">host</span><span class="s2">}</span><span class="s5">:</span><span class="s2">{</span><span class="s1">port</span><span class="s2">} </span><span class="s5">with prompt: &quot;</span>
+            <span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">prompt</span><span class="s2">}{</span><span class="s5">' (regexp)' </span><span class="s2">if </span><span class="s1">prompt_is_regexp </span><span class="s2">else </span><span class="s5">''</span><span class="s2">}</span><span class="s5">&quot;</span>
+        <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_conn </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_connection</span><span class="s3">(</span>
+            <span class="s1">host</span><span class="s3">,</span>
+            <span class="s1">port</span><span class="s3">,</span>
+            <span class="s1">timeout</span><span class="s3">,</span>
+            <span class="s1">newline</span><span class="s3">,</span>
+            <span class="s1">prompt</span><span class="s3">,</span>
+            <span class="s1">prompt_is_regexp</span><span class="s3">,</span>
+            <span class="s1">encoding</span><span class="s3">,</span>
+            <span class="s1">encoding_errors</span><span class="s3">,</span>
+            <span class="s1">default_log_level</span><span class="s3">,</span>
+            <span class="s1">window_size</span><span class="s3">,</span>
+            <span class="s1">environ_user</span><span class="s3">,</span>
+            <span class="s1">terminal_emulation</span><span class="s3">,</span>
+            <span class="s1">terminal_type</span><span class="s3">,</span>
+            <span class="s1">telnetlib_log_level</span><span class="s3">,</span>
+            <span class="s1">connection_timeout</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cache</span><span class="s3">.</span><span class="s1">register</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_conn</span><span class="s3">, </span><span class="s1">alias</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_parse_window_size</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">window_size</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">window_size</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">cols</span><span class="s3">, </span><span class="s1">rows </span><span class="s3">= </span><span class="s1">window_size</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;x&quot;</span><span class="s3">, </span><span class="s6">1</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">int</span><span class="s3">(</span><span class="s1">cols</span><span class="s3">), </span><span class="s1">int</span><span class="s3">(</span><span class="s1">rows</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Invalid window size '</span><span class="s2">{</span><span class="s1">window_size</span><span class="s2">}</span><span class="s5">'. Should be &lt;rows&gt;x&lt;columns&gt;.&quot;</span>
+            <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Can be overridden to use a custom connection.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">TelnetConnection</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_set_connection_timeout</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">connection_timeout</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_connection_timeout </span><span class="s3">= </span><span class="s1">connection_timeout</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_connection_timeout</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_connection_timeout </span><span class="s3">= </span><span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">connection_timeout</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">switch_connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">index_or_alias</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Switches between active connections using an index or an alias. 
+ 
+        Aliases can be given to `Open Connection` keyword which also always 
+        returns the connection index. 
+ 
+        This keyword returns the index of previous active connection. 
+ 
+        Example: 
+        | `Open Connection`   | myhost.net              |          |           | 
+        | `Login`             | john                    | secret   |           | 
+        | `Write`             | some command            |          |           | 
+        | `Open Connection`   | yourhost.com            | 2nd conn |           | 
+        | `Login`             | root                    | password |           | 
+        | `Write`             | another cmd             |          |           | 
+        | ${old index}=       | `Switch Connection`     | 1        | # index   | 
+        | `Write`             | something               |          |           | 
+        | `Switch Connection` | 2nd conn                |          | # alias   | 
+        | `Write`             | whatever                |          |           | 
+        | `Switch Connection` | ${old index}            | | # back to original | 
+        | [Teardown]          | `Close All Connections` |          |           | 
+ 
+        The example above expects that there were no other open 
+        connections when opening the first one, because it used index 
+        ``1`` when switching to the connection later. If you are not 
+        sure about that, you can store the index into a variable as 
+        shown below. 
+ 
+        | ${index} =          | `Open Connection` | myhost.net | 
+        | `Do Something`      |                   |            | 
+        | `Switch Connection` | ${index}          |            | 
+        &quot;&quot;&quot;</span>
+        <span class="s1">old_index </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cache</span><span class="s3">.</span><span class="s1">current_index</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_conn </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cache</span><span class="s3">.</span><span class="s1">switch</span><span class="s3">(</span><span class="s1">index_or_alias</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">old_index</span>
+
+    <span class="s2">def </span><span class="s1">close_all_connections</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Closes all open connections and empties the connection cache. 
+ 
+        If multiple connections are opened, this keyword should be used in 
+        a test or suite teardown to make sure that all connections are closed. 
+        It is not an error if some of the connections have already been closed 
+        by `Close Connection`. 
+ 
+        After this keyword, new indexes returned by `Open Connection` 
+        keyword are reset to 1. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_conn </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_cache</span><span class="s3">.</span><span class="s1">close_all</span><span class="s3">()</span>
+
+
+<span class="s2">class </span><span class="s1">TelnetConnection</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">Telnet</span><span class="s3">):</span>
+    <span class="s1">NEW_ENVIRON_IS </span><span class="s3">= </span><span class="s7">b&quot;</span><span class="s2">\x00</span><span class="s7">&quot;</span>
+    <span class="s1">NEW_ENVIRON_VAR </span><span class="s3">= </span><span class="s7">b&quot;</span><span class="s2">\x00</span><span class="s7">&quot;</span>
+    <span class="s1">NEW_ENVIRON_VALUE </span><span class="s3">= </span><span class="s7">b&quot;</span><span class="s2">\x01</span><span class="s7">&quot;</span>
+    <span class="s1">INTERNAL_UPDATE_FREQUENCY </span><span class="s3">= </span><span class="s6">0.03</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">host</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">port</span><span class="s3">=</span><span class="s6">23</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">=</span><span class="s6">3.0</span><span class="s3">,</span>
+        <span class="s1">newline</span><span class="s3">=</span><span class="s5">&quot;CRLF&quot;</span><span class="s3">,</span>
+        <span class="s1">prompt</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">prompt_is_regexp</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;UTF-8&quot;</span><span class="s3">,</span>
+        <span class="s1">encoding_errors</span><span class="s3">=</span><span class="s5">&quot;ignore&quot;</span><span class="s3">,</span>
+        <span class="s1">default_log_level</span><span class="s3">=</span><span class="s5">&quot;INFO&quot;</span><span class="s3">,</span>
+        <span class="s1">window_size</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">environ_user</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">terminal_emulation</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">terminal_type</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">telnetlib_log_level</span><span class="s3">=</span><span class="s5">&quot;TRACE&quot;</span><span class="s3">,</span>
+        <span class="s1">connection_timeout</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">connection_timeout </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">host</span><span class="s3">, </span><span class="s1">int</span><span class="s3">(</span><span class="s1">port</span><span class="s3">) </span><span class="s2">if </span><span class="s1">port </span><span class="s2">else </span><span class="s6">23</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">host</span><span class="s3">, </span><span class="s1">int</span><span class="s3">(</span><span class="s1">port</span><span class="s3">) </span><span class="s2">if </span><span class="s1">port </span><span class="s2">else </span><span class="s6">23</span><span class="s3">, </span><span class="s1">connection_timeout</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_timeout</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_newline</span><span class="s3">(</span><span class="s1">newline</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_prompt</span><span class="s3">(</span><span class="s1">prompt</span><span class="s3">, </span><span class="s1">prompt_is_regexp</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_encoding</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">, </span><span class="s1">encoding_errors</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_default_log_level</span><span class="s3">(</span><span class="s1">default_log_level</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_window_size </span><span class="s3">= </span><span class="s1">window_size</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_environ_user </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">environ_user</span><span class="s3">) </span><span class="s2">if </span><span class="s1">environ_user </span><span class="s2">else None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_check_terminal_emulation</span><span class="s3">(</span><span class="s1">terminal_emulation</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_type </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">terminal_type</span><span class="s3">) </span><span class="s2">if </span><span class="s1">terminal_type </span><span class="s2">else None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_option_negotiation_callback</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_negotiate_options</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_telnetlib_log_level</span><span class="s3">(</span><span class="s1">telnetlib_log_level</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_responses </span><span class="s3">= []</span>
+
+    <span class="s2">def </span><span class="s1">set_timeout</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Sets the timeout used for waiting output in the current connection. 
+ 
+        Read operations that expect some output to appear (`Read Until`, `Read 
+        Until Regexp`, `Read Until Prompt`, `Login`) use this timeout and fail 
+        if the expected output does not appear before this timeout expires. 
+ 
+        The ``timeout`` must be given in `time string format`. The old timeout 
+        is returned and can be used to restore the timeout later. 
+ 
+        Example: 
+        | ${old} =       | `Set Timeout` | 2 minute 30 seconds | 
+        | `Do Something` | 
+        | `Set Timeout`  | ${old}  | 
+ 
+        See `Configuration` section for more information about global and 
+        connection specific configuration. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_timeout</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">secs_to_timestr</span><span class="s3">(</span><span class="s1">old</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_set_timeout</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout </span><span class="s3">= </span><span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_newline</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">newline</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Sets the newline used by `Write` keyword in the current connection. 
+ 
+        The old newline is returned and can be used to restore the newline later. 
+        See `Set Timeout` for a similar example. 
+ 
+        If terminal emulation is used, the newline can not be changed on an open 
+        connection. 
+ 
+        See `Configuration` section for more information about global and 
+        connection specific configuration. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span>
+                <span class="s5">&quot;Newline can not be changed when terminal emulation is used.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_newline</span><span class="s3">(</span><span class="s1">newline</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">old</span>
+
+    <span class="s2">def </span><span class="s1">_set_newline</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">newline</span><span class="s3">):</span>
+        <span class="s1">newline </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">newline</span><span class="s3">).</span><span class="s1">upper</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_newline </span><span class="s3">= </span><span class="s1">newline</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;LF&quot;</span><span class="s3">, </span><span class="s5">&quot;</span><span class="s2">\n</span><span class="s5">&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;CR&quot;</span><span class="s3">, </span><span class="s5">&quot;</span><span class="s2">\r</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_prompt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">prompt</span><span class="s3">, </span><span class="s1">prompt_is_regexp</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Sets the prompt used by `Read Until Prompt` and `Login` in the current connection. 
+ 
+        If ``prompt_is_regexp`` is given a true value (see `Boolean arguments`), 
+        the given ``prompt`` is considered to be a regular expression. 
+ 
+        The old prompt is returned and can be used to restore the prompt later. 
+ 
+        Example: 
+        | ${prompt} | ${regexp} = | `Set Prompt` | $ | 
+        | `Do Something` | 
+        | `Set Prompt` | ${prompt} | ${regexp} | 
+ 
+        See the documentation of 
+        [http://docs.python.org/library/re.html|Python re module] 
+        for more information about the supported regular expression syntax. 
+        Notice that possible backslashes need to be escaped in Robot Framework data. 
+ 
+        See `Configuration` section for more information about global and 
+        connection specific configuration. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_prompt</span><span class="s3">(</span><span class="s1">prompt</span><span class="s3">, </span><span class="s1">prompt_is_regexp</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">old</span><span class="s3">[</span><span class="s6">1</span><span class="s3">]:</span>
+            <span class="s2">return </span><span class="s1">old</span><span class="s3">[</span><span class="s6">0</span><span class="s3">].</span><span class="s1">pattern</span><span class="s3">, </span><span class="s2">True</span>
+        <span class="s2">return </span><span class="s1">old</span>
+
+    <span class="s2">def </span><span class="s1">_set_prompt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">prompt</span><span class="s3">, </span><span class="s1">prompt_is_regexp</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">prompt_is_regexp</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt </span><span class="s3">= (</span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">prompt</span><span class="s3">), </span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt </span><span class="s3">= (</span><span class="s1">prompt</span><span class="s3">, </span><span class="s2">False</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_prompt_is_set</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt</span><span class="s3">[</span><span class="s6">0</span><span class="s3">] </span><span class="s2">is not None</span>
+
+    <span class="s3">@</span><span class="s1">keyword</span><span class="s3">(</span><span class="s1">types</span><span class="s3">=</span><span class="s2">None</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">set_encoding</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Sets the encoding to use for `writing and reading` in the current connection. 
+ 
+        The given ``encoding`` specifies the encoding to use when written/read 
+        text is encoded/decoded, and ``errors`` specifies the error handler to 
+        use if encoding/decoding fails. Either of these can be omitted and in 
+        that case the old value is not affected. Use string ``NONE`` to disable 
+        encoding altogether. 
+ 
+        See `Configuration` section for more information about encoding and 
+        error handlers, as well as global and connection specific configuration 
+        in general. 
+ 
+        The old values are returned and can be used to restore the encoding 
+        and the error handler later. See `Set Prompt` for a similar example. 
+ 
+        If terminal emulation is used, the encoding can not be changed on an open 
+        connection. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span>
+                <span class="s5">&quot;Encoding can not be changed when terminal emulation is used.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_encoding</span><span class="s3">(</span><span class="s1">encoding </span><span class="s2">or </span><span class="s1">old</span><span class="s3">[</span><span class="s6">0</span><span class="s3">], </span><span class="s1">errors </span><span class="s2">or </span><span class="s1">old</span><span class="s3">[</span><span class="s6">1</span><span class="s3">])</span>
+        <span class="s2">return </span><span class="s1">old</span>
+
+    <span class="s2">def </span><span class="s1">_set_encoding</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding </span><span class="s3">= (</span><span class="s1">encoding</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">(), </span><span class="s1">errors</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">text</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">)):</span>
+            <span class="s2">return </span><span class="s1">text</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding</span><span class="s3">[</span><span class="s6">0</span><span class="s3">] == </span><span class="s5">&quot;NONE&quot;</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">text</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;ASCII&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">text</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(*</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding</span><span class="s3">[</span><span class="s6">0</span><span class="s3">] == </span><span class="s5">&quot;NONE&quot;</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">bytes</span>
+        <span class="s2">return </span><span class="s1">bytes</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(*</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encoding</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">set_telnetlib_log_level</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Sets the log level used for `logging` in the underlying ``telnetlib``. 
+ 
+        Note that ``telnetlib`` can be very noisy thus using the level ``NONE`` 
+        can shutdown the messages generated by this library. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_telnetlib_log_level</span><span class="s3">(</span><span class="s1">level</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">old</span>
+
+    <span class="s2">def </span><span class="s1">_set_telnetlib_log_level</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">level</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">() == </span><span class="s5">&quot;NONE&quot;</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level </span><span class="s3">= </span><span class="s5">&quot;NONE&quot;</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_valid_log_level</span><span class="s3">(</span><span class="s1">level</span><span class="s3">) </span><span class="s2">is False</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span><span class="s5">f&quot;Invalid log level '</span><span class="s2">{</span><span class="s1">level</span><span class="s2">}</span><span class="s5">'&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level </span><span class="s3">= </span><span class="s1">level</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">set_default_log_level</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Sets the default log level used for `logging` in the current connection. 
+ 
+        The old default log level is returned and can be used to restore the 
+        log level later. 
+ 
+        See `Configuration` section for more information about global and 
+        connection specific configuration. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_default_log_level</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_set_default_log_level</span><span class="s3">(</span><span class="s1">level</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">old</span>
+
+    <span class="s2">def </span><span class="s1">_set_default_log_level</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">level </span><span class="s2">is None or not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_valid_log_level</span><span class="s3">(</span><span class="s1">level</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span><span class="s5">f&quot;Invalid log level '</span><span class="s2">{</span><span class="s1">level</span><span class="s2">}</span><span class="s5">'&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_default_log_level </span><span class="s3">= </span><span class="s1">level</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_is_valid_log_level</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">level</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">level </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">level</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">level</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">() </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;TRACE&quot;</span><span class="s3">, </span><span class="s5">&quot;DEBUG&quot;</span><span class="s3">, </span><span class="s5">&quot;INFO&quot;</span><span class="s3">, </span><span class="s5">&quot;WARN&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">close_connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Closes the current Telnet connection. 
+ 
+        Remaining output in the connection is read, logged, and returned. 
+        It is not an error to close an already closed connection. 
+ 
+        Use `Close All Connections` if you want to make sure all opened 
+        connections are closed. 
+ 
+        See `Logging` section for more information about log levels. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">shutdown</span><span class="s3">(</span><span class="s1">socket</span><span class="s3">.</span><span class="s1">SHUT_RDWR</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_all</span><span class="s3">())</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_log</span><span class="s3">(</span><span class="s1">output</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">login</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">username</span><span class="s3">,</span>
+        <span class="s1">password</span><span class="s3">,</span>
+        <span class="s1">login_prompt</span><span class="s3">=</span><span class="s5">&quot;login: &quot;</span><span class="s3">,</span>
+        <span class="s1">password_prompt</span><span class="s3">=</span><span class="s5">&quot;Password: &quot;</span><span class="s3">,</span>
+        <span class="s1">login_timeout</span><span class="s3">=</span><span class="s5">&quot;1 second&quot;</span><span class="s3">,</span>
+        <span class="s1">login_incorrect</span><span class="s3">=</span><span class="s5">&quot;Login incorrect&quot;</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Logs in to the Telnet server with the given user information. 
+ 
+        This keyword reads from the connection until the ``login_prompt`` is 
+        encountered and then types the given ``username``. Then it reads until 
+        the ``password_prompt`` and types the given ``password``. In both cases 
+        a newline is appended automatically and the connection specific 
+        timeout used when waiting for outputs. 
+ 
+        How logging status is verified depends on whether a prompt is set for 
+        this connection or not: 
+ 
+        1) If the prompt is set, this keyword reads the output until the prompt 
+        is found using the normal timeout. If no prompt is found, login is 
+        considered failed and also this keyword fails. Note that in this case 
+        both ``login_timeout`` and ``login_incorrect`` arguments are ignored. 
+ 
+        2) If the prompt is not set, this keywords sleeps until ``login_timeout`` 
+        and then reads all the output available on the connection. If the 
+        output contains ``login_incorrect`` text, login is considered failed 
+        and also this keyword fails. 
+ 
+        See `Configuration` section for more information about setting 
+        newline, timeout, and prompt. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_submit_credentials</span><span class="s3">(</span>
+            <span class="s1">username</span><span class="s3">, </span><span class="s1">password</span><span class="s3">, </span><span class="s1">login_prompt</span><span class="s3">, </span><span class="s1">password_prompt</span>
+        <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt_is_set</span><span class="s3">():</span>
+            <span class="s1">success</span><span class="s3">, </span><span class="s1">output2 </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_read_until_prompt</span><span class="s3">()</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">success</span><span class="s3">, </span><span class="s1">output2 </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_login_without_prompt</span><span class="s3">(</span>
+                <span class="s1">login_timeout</span><span class="s3">, </span><span class="s1">login_incorrect</span>
+            <span class="s3">)</span>
+        <span class="s1">output </span><span class="s3">+= </span><span class="s1">output2</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_log</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">success</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span><span class="s5">&quot;Login incorrect&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">_submit_credentials</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">username</span><span class="s3">, </span><span class="s1">password</span><span class="s3">, </span><span class="s1">login_prompt</span><span class="s3">, </span><span class="s1">password_prompt</span><span class="s3">):</span>
+        <span class="s0"># Using write_bare here instead of write because don't want to wait for</span>
+        <span class="s0"># newline: https://github.com/robotframework/robotframework/issues/1371</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">login_prompt</span><span class="s3">, </span><span class="s5">&quot;TRACE&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_bare</span><span class="s3">(</span><span class="s1">username </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">)</span>
+        <span class="s1">output </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">password_prompt</span><span class="s3">, </span><span class="s5">&quot;TRACE&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_bare</span><span class="s3">(</span><span class="s1">password </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">_verify_login_without_prompt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">delay</span><span class="s3">, </span><span class="s1">incorrect</span><span class="s3">):</span>
+        <span class="s1">time</span><span class="s3">.</span><span class="s1">sleep</span><span class="s3">(</span><span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">delay</span><span class="s3">))</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s5">&quot;TRACE&quot;</span><span class="s3">)</span>
+        <span class="s1">success </span><span class="s3">= </span><span class="s1">incorrect </span><span class="s2">not in </span><span class="s1">output</span>
+        <span class="s2">return </span><span class="s1">success</span><span class="s3">, </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">write</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Writes the given text plus a newline into the connection. 
+ 
+        The newline character sequence to use can be [#Configuration|configured] 
+        both globally and per connection basis. The default value is ``CRLF``. 
+ 
+        This keyword consumes the written text, until the added newline, from 
+        the output and logs and returns it. The given text itself must not 
+        contain newlines. Use `Write Bare` instead if either of these features 
+        causes a problem. 
+ 
+        *Note:* This keyword does not return the possible output of the executed 
+        command. To get the output, one of the `Read ...` `keywords` must be 
+        used. See `Writing and reading` section for more details. 
+ 
+        See `Logging` section for more information about log levels. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">newline </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_newline_for</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">newline </span><span class="s2">in </span><span class="s1">text</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span>
+                <span class="s5">&quot;'Write' keyword cannot be used with strings &quot;</span>
+                <span class="s5">&quot;containing newlines. Use 'Write Bare' instead.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_bare</span><span class="s3">(</span><span class="s1">text </span><span class="s3">+ </span><span class="s1">newline</span><span class="s3">)</span>
+        <span class="s0"># Can't read until 'text' because long lines are cut strangely in the output</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_newline_for</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">text</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">)):</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span>
+
+    <span class="s2">def </span><span class="s1">write_bare</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Writes the given text, and nothing else, into the connection. 
+ 
+        This keyword does not append a newline nor consume the written text. 
+        Use `Write` if these features are needed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">write</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">text</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">write_until_expected_output</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">text</span><span class="s3">,</span>
+        <span class="s1">expected</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">,</span>
+        <span class="s1">retry_interval</span><span class="s3">,</span>
+        <span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Writes the given ``text`` repeatedly, until ``expected`` appears in the output. 
+ 
+        ``text`` is written without appending a newline and it is consumed from 
+        the output before trying to find ``expected``. If ``expected`` does not 
+        appear in the output within ``timeout``, this keyword fails. 
+ 
+        ``retry_interval`` defines the time to wait ``expected`` to appear before 
+        writing the ``text`` again. Consuming the written ``text`` is subject to 
+        the normal [#Configuration|configured timeout]. 
+ 
+        Both ``timeout`` and ``retry_interval`` must be given in `time string 
+        format`. See `Logging` section for more information about log levels. 
+ 
+        Example: 
+        | Write Until Expected Output | ps -ef| grep myprocess\\r\\n | myprocess | 
+        | ...                         | 5 s                          | 0.5 s     | 
+ 
+        The above example writes command ``ps -ef | grep myprocess\\r\\n`` until 
+        ``myprocess`` appears in the output. The command is written every 0.5 
+        seconds and the keyword fails if ``myprocess`` does not appear in 
+        the output in 5 seconds. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">timeout </span><span class="s3">= </span><span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+        <span class="s1">retry_interval </span><span class="s3">= </span><span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">retry_interval</span><span class="s3">)</span>
+        <span class="s1">maxtime </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() + </span><span class="s1">timeout</span>
+        <span class="s2">while </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() &lt; </span><span class="s1">maxtime</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">write_bare</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">text</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_custom_timeout</span><span class="s3">(</span><span class="s1">retry_interval</span><span class="s3">):</span>
+                    <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">AssertionError</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+        <span class="s2">raise </span><span class="s1">NoMatchError</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">write_control_character</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">character</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Writes the given control character into the connection. 
+ 
+        The control character is prepended with an IAC (interpret as command) 
+        character. 
+ 
+        The following control character names are supported: BRK, IP, AO, AYT, 
+        EC, EL, NOP. Additionally, you can use arbitrary numbers to send any 
+        control character. 
+ 
+        Example: 
+        | Write Control Character | BRK | # Send Break command | 
+        | Write Control Character | 241 | # Send No operation command | 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_control_character</span><span class="s3">(</span><span class="s1">character</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_get_control_character</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">int_or_name</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">ordinal </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">int_or_name</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">bytes</span><span class="s3">(</span><span class="s1">bytearray</span><span class="s3">([</span><span class="s1">ordinal</span><span class="s3">]))</span>
+        <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_convert_control_code_name_to_character</span><span class="s3">(</span><span class="s1">int_or_name</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_convert_control_code_name_to_character</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">):</span>
+        <span class="s1">code_names </span><span class="s3">= {</span>
+            <span class="s5">&quot;BRK&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">BRK</span><span class="s3">,</span>
+            <span class="s5">&quot;IP&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IP</span><span class="s3">,</span>
+            <span class="s5">&quot;AO&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">AO</span><span class="s3">,</span>
+            <span class="s5">&quot;AYT&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">AYT</span><span class="s3">,</span>
+            <span class="s5">&quot;EC&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">EC</span><span class="s3">,</span>
+            <span class="s5">&quot;EL&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">EL</span><span class="s3">,</span>
+            <span class="s5">&quot;NOP&quot;</span><span class="s3">: </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">NOP</span><span class="s3">,</span>
+        <span class="s3">}</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">code_names</span><span class="s3">[</span><span class="s1">name</span><span class="s3">]</span>
+        <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s5">f&quot;Unsupported control character '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s5">'.&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Reads everything that is currently available in the output. 
+ 
+        Read output is both returned and logged. See `Logging` section for more 
+        information about log levels. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_very_eager</span><span class="s3">())</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+            <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_log</span><span class="s3">(</span><span class="s1">output</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Reads output until ``expected`` text is encountered. 
+ 
+        Text up to and including the match is returned and logged. If no match 
+        is found, this keyword fails. How much to wait for the output depends 
+        on the [#Configuration|configured timeout]. 
+ 
+        See `Logging` section for more information about log levels. Use 
+        `Read Until Regexp` if more complex matching is needed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">success</span><span class="s3">, </span><span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_read_until</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_log</span><span class="s3">(</span><span class="s1">output</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">success</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">NoMatchError</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span><span class="s3">, </span><span class="s1">output</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">_read_until</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_read_until</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s1">expected </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">super</span><span class="s3">().</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">), </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">_terminal_frequency</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">min</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">INTERNAL_UPDATE_FREQUENCY</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_terminal_read_until</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected</span><span class="s3">):</span>
+        <span class="s1">max_time </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() + </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span>
+        <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">output</span><span class="s3">:</span>
+            <span class="s2">return True</span><span class="s3">, </span><span class="s1">output</span>
+        <span class="s2">while </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() &lt; </span><span class="s1">max_time</span><span class="s3">:</span>
+            <span class="s1">output </span><span class="s3">= </span><span class="s1">super</span><span class="s3">().</span><span class="s1">read_until</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">), </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_frequency</span>
+            <span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">output</span><span class="s3">))</span>
+            <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">output</span><span class="s3">:</span>
+                <span class="s2">return True</span><span class="s3">, </span><span class="s1">output</span>
+        <span class="s2">return False</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_read_until_regexp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">expected</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_verify_connection</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_read_until_regexp</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s1">expected </span><span class="s3">= [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">e</span><span class="s3">) </span><span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">e</span><span class="s3">, </span><span class="s1">str</span><span class="s3">) </span><span class="s2">else </span><span class="s1">e </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">expected</span><span class="s3">]</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_telnet_read_until_regexp</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_terminal_read_until_regexp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected_list</span><span class="s3">):</span>
+        <span class="s1">max_time </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() + </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span>
+        <span class="s1">regexps_bytes </span><span class="s3">= [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_to_byte_regexp</span><span class="s3">(</span><span class="s1">rgx</span><span class="s3">) </span><span class="s2">for </span><span class="s1">rgx </span><span class="s2">in </span><span class="s1">expected_list</span><span class="s3">]</span>
+        <span class="s1">regexps_unicode </span><span class="s3">= [</span>
+            <span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">rgx</span><span class="s3">.</span><span class="s1">pattern</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">rgx </span><span class="s2">in </span><span class="s1">regexps_bytes</span>
+        <span class="s3">]</span>
+        <span class="s1">out </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read_until_regexp</span><span class="s3">(</span><span class="s1">regexps_unicode</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">out</span><span class="s3">:</span>
+            <span class="s2">return True</span><span class="s3">, </span><span class="s1">out</span>
+        <span class="s2">while </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() &lt; </span><span class="s1">max_time</span><span class="s3">:</span>
+            <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">expect</span><span class="s3">(</span><span class="s1">regexps_bytes</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_frequency</span><span class="s3">)[-</span><span class="s6">1</span><span class="s3">]</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">output</span><span class="s3">))</span>
+            <span class="s1">out </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read_until_regexp</span><span class="s3">(</span><span class="s1">regexps_unicode</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">out</span><span class="s3">:</span>
+                <span class="s2">return True</span><span class="s3">, </span><span class="s1">out</span>
+        <span class="s2">return False</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_emulator</span><span class="s3">.</span><span class="s1">read</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_telnet_read_until_regexp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected_list</span><span class="s3">):</span>
+        <span class="s1">expected </span><span class="s3">= [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_to_byte_regexp</span><span class="s3">(</span><span class="s1">exp</span><span class="s3">) </span><span class="s2">for </span><span class="s1">exp </span><span class="s2">in </span><span class="s1">expected_list</span><span class="s3">]</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">index</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">expect</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">TypeError</span><span class="s3">:</span>
+            <span class="s1">index</span><span class="s3">, </span><span class="s1">output </span><span class="s3">= -</span><span class="s6">1</span><span class="s3">, </span><span class="s7">b&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">index </span><span class="s3">!= -</span><span class="s6">1</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_decode</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_to_byte_regexp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">exp</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">exp</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">)):</span>
+            <span class="s2">return </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">exp</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">exp</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">exp</span><span class="s3">))</span>
+        <span class="s1">pattern </span><span class="s3">= </span><span class="s1">exp</span><span class="s3">.</span><span class="s1">pattern</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">)):</span>
+            <span class="s2">return </span><span class="s1">exp</span>
+        <span class="s2">return </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_encode</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">read_until_regexp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">expected</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Reads output until any of the ``expected`` regular expressions match. 
+ 
+        This keyword accepts any number of regular expressions patterns or 
+        compiled Python regular expression objects as arguments. Text up to 
+        and including the first match to any of the regular expressions is 
+        returned and logged. If no match is found, this keyword fails. How much 
+        to wait for the output depends on the [#Configuration|configured timeout]. 
+ 
+        If the last given argument is a [#Logging|valid log level], it is used 
+        as ``loglevel`` similarly as with `Read Until` keyword. 
+ 
+        See the documentation of 
+        [http://docs.python.org/library/re.html|Python re module] 
+        for more information about the supported regular expression syntax. 
+        Notice that possible backslashes need to be escaped in Robot Framework data. 
+ 
+        Examples: 
+        | `Read Until Regexp` | (#|$) | 
+        | `Read Until Regexp` | first_regexp | second_regexp | 
+        | `Read Until Regexp` | \\\\d{4}-\\\\d{2}-\\\\d{2} | DEBUG | 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">expected</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s5">&quot;At least one pattern required&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_valid_log_level</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">[-</span><span class="s6">1</span><span class="s3">]):</span>
+            <span class="s1">loglevel </span><span class="s3">= </span><span class="s1">expected</span><span class="s3">[-</span><span class="s6">1</span><span class="s3">]</span>
+            <span class="s1">expected </span><span class="s3">= </span><span class="s1">expected</span><span class="s3">[:-</span><span class="s6">1</span><span class="s3">]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">loglevel </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">success</span><span class="s3">, </span><span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_read_until_regexp</span><span class="s3">(*</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_log</span><span class="s3">(</span><span class="s1">output</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">success</span><span class="s3">:</span>
+            <span class="s1">expected </span><span class="s3">= [</span><span class="s1">e </span><span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">e</span><span class="s3">, </span><span class="s1">str</span><span class="s3">) </span><span class="s2">else </span><span class="s1">e</span><span class="s3">.</span><span class="s1">pattern </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">expected</span><span class="s3">]</span>
+            <span class="s2">raise </span><span class="s1">NoMatchError</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span><span class="s3">, </span><span class="s1">output</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">read_until_prompt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">strip_prompt</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Reads output until the prompt is encountered. 
+ 
+        This keyword requires the prompt to be [#Configuration|configured] 
+        either in `importing` or with `Open Connection` or `Set Prompt` keyword. 
+ 
+        By default, text up to and including the prompt is returned and logged. 
+        If no prompt is found, this keyword fails. How much to wait for the 
+        output depends on the [#Configuration|configured timeout]. 
+ 
+        If you want to exclude the prompt from the returned output, set 
+        ``strip_prompt`` to a true value (see `Boolean arguments`). If your 
+        prompt is a regular expression, make sure that the expression spans the 
+        whole prompt, because only the part of the output that matches the 
+        regular expression is stripped away. 
+ 
+        See `Logging` section for more information about log levels. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt_is_set</span><span class="s3">():</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s5">&quot;Prompt is not set.&quot;</span><span class="s3">)</span>
+        <span class="s1">success</span><span class="s3">, </span><span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_read_until_prompt</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_log</span><span class="s3">(</span><span class="s1">output</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">success</span><span class="s3">:</span>
+            <span class="s1">prompt</span><span class="s3">, </span><span class="s1">regexp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt</span>
+            <span class="s1">pattern </span><span class="s3">= </span><span class="s1">prompt</span><span class="s3">.</span><span class="s1">pattern </span><span class="s2">if </span><span class="s1">regexp </span><span class="s2">else </span><span class="s1">prompt</span>
+            <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Prompt '</span><span class="s2">{</span><span class="s1">pattern</span><span class="s2">}</span><span class="s5">' not found in </span><span class="s2">{</span><span class="s1">secs_to_timestr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_timeout</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">strip_prompt</span><span class="s3">:</span>
+            <span class="s1">output </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_strip_prompt</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">output</span>
+
+    <span class="s2">def </span><span class="s1">_read_until_prompt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">prompt</span><span class="s3">, </span><span class="s1">regexp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt</span>
+        <span class="s1">read_until </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_read_until_regexp </span><span class="s2">if </span><span class="s1">regexp </span><span class="s2">else </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_read_until</span>
+        <span class="s2">return </span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">prompt</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_strip_prompt</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">output</span><span class="s3">):</span>
+        <span class="s1">prompt</span><span class="s3">, </span><span class="s1">regexp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_prompt</span>
+        <span class="s2">if not </span><span class="s1">regexp</span><span class="s3">:</span>
+            <span class="s1">length </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">prompt</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">match </span><span class="s3">= </span><span class="s1">prompt</span><span class="s3">.</span><span class="s1">search</span><span class="s3">(</span><span class="s1">output</span><span class="s3">)</span>
+            <span class="s1">length </span><span class="s3">= </span><span class="s1">match</span><span class="s3">.</span><span class="s1">end</span><span class="s3">() - </span><span class="s1">match</span><span class="s3">.</span><span class="s1">start</span><span class="s3">()</span>
+        <span class="s2">return </span><span class="s1">output</span><span class="s3">[:-</span><span class="s1">length</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">execute_command</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">command</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">strip_prompt</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s4">&quot;&quot;&quot;Executes the given ``command`` and reads, logs, and returns everything until the prompt. 
+ 
+        This keyword requires the prompt to be [#Configuration|configured] 
+        either in `importing` or with `Open Connection` or `Set Prompt` keyword. 
+ 
+        This is a convenience keyword that uses `Write` and `Read Until Prompt` 
+        internally. Following two examples are thus functionally identical: 
+ 
+        | ${out} = | `Execute Command`   | pwd | 
+ 
+        | `Write`  | pwd                 | 
+        | ${out} = | `Read Until Prompt` | 
+ 
+        See `Logging` section for more information about log levels and `Read 
+        Until Prompt` for more information about the ``strip_prompt`` parameter. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">command</span><span class="s3">, </span><span class="s1">loglevel</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">read_until_prompt</span><span class="s3">(</span><span class="s1">loglevel</span><span class="s3">, </span><span class="s1">strip_prompt</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">contextmanager</span>
+    <span class="s2">def </span><span class="s1">_custom_timeout</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">):</span>
+        <span class="s1">old </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">set_timeout</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">yield</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">set_timeout</span><span class="s3">(</span><span class="s1">old</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_verify_connection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s5">&quot;No connection open&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_log</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, </span><span class="s1">level</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s1">msg</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">msg</span><span class="s3">:</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">, </span><span class="s1">level </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_default_log_level</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_negotiate_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">sock</span><span class="s3">, </span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">):</span>
+        <span class="s0"># We don't have state changes in our accepted telnet options.</span>
+        <span class="s0"># Therefore, we just track if we've already responded to an option. If</span>
+        <span class="s0"># this is the case, we must not send any response.</span>
+        <span class="s2">if </span><span class="s1">cmd </span><span class="s2">in </span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DO</span><span class="s3">, </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DONT</span><span class="s3">, </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WILL</span><span class="s3">, </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WONT</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">) </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_responses</span><span class="s3">:</span>
+                <span class="s2">return</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_responses</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">))</span>
+
+        <span class="s0"># This is supposed to turn server side echoing on and turn other options off.</span>
+        <span class="s2">if </span><span class="s1">opt </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">ECHO </span><span class="s2">and </span><span class="s1">cmd </span><span class="s2">in </span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WILL</span><span class="s3">, </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WONT</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_echo_on</span><span class="s3">(</span><span class="s1">opt</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">cmd </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DO </span><span class="s2">and </span><span class="s1">opt </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">TTYPE </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_type</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_terminal_type</span><span class="s3">(</span><span class="s1">opt</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_terminal_type</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s3">(</span>
+            <span class="s1">cmd </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DO </span><span class="s2">and </span><span class="s1">opt </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">NEW_ENVIRON </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_environ_user</span>
+        <span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_environ_user</span><span class="s3">(</span><span class="s1">opt</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_environ_user</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">cmd </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DO </span><span class="s2">and </span><span class="s1">opt </span><span class="s3">== </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">NAWS </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_window_size</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_window_size</span><span class="s3">(</span><span class="s1">opt</span><span class="s3">, *</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_window_size</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">opt </span><span class="s3">!= </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">NOOPT</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_opt_dont_and_wont</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_opt_echo_on</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DO </span><span class="s3">+ </span><span class="s1">opt</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_opt_terminal_type</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">, </span><span class="s1">terminal_type</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WILL </span><span class="s3">+ </span><span class="s1">opt</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span>
+            <span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">SB</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">TTYPE</span>
+            <span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">NEW_ENVIRON_IS</span>
+            <span class="s3">+ </span><span class="s1">terminal_type</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">SE</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_opt_environ_user</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">, </span><span class="s1">environ_user</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WILL </span><span class="s3">+ </span><span class="s1">opt</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span>
+            <span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">SB</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">NEW_ENVIRON</span>
+            <span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">NEW_ENVIRON_IS</span>
+            <span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">NEW_ENVIRON_VAR</span>
+            <span class="s3">+ </span><span class="s7">b&quot;USER&quot;</span>
+            <span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">NEW_ENVIRON_VALUE</span>
+            <span class="s3">+ </span><span class="s1">environ_user</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">SE</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_opt_window_size</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">, </span><span class="s1">window_x</span><span class="s3">, </span><span class="s1">window_y</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WILL </span><span class="s3">+ </span><span class="s1">opt</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span>
+            <span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">SB</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">NAWS</span>
+            <span class="s3">+ </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">pack</span><span class="s3">(</span><span class="s5">&quot;!HH&quot;</span><span class="s3">, </span><span class="s1">window_x</span><span class="s3">, </span><span class="s1">window_y</span><span class="s3">)</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC</span>
+            <span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">SE</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_opt_dont_and_wont</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">cmd</span><span class="s3">, </span><span class="s1">opt</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">cmd </span><span class="s2">in </span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DO</span><span class="s3">, </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DONT</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WONT </span><span class="s3">+ </span><span class="s1">opt</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">cmd </span><span class="s2">in </span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WILL</span><span class="s3">, </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">WONT</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">sock</span><span class="s3">.</span><span class="s1">sendall</span><span class="s3">(</span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">IAC </span><span class="s3">+ </span><span class="s1">telnetlib</span><span class="s3">.</span><span class="s1">DONT </span><span class="s3">+ </span><span class="s1">opt</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">msg</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">):</span>
+        <span class="s0"># Forward telnetlib's debug messages to log</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level </span><span class="s3">!= </span><span class="s5">&quot;NONE&quot;</span><span class="s3">:</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">msg </span><span class="s3">% </span><span class="s1">args</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_telnetlib_log_level</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_check_terminal_emulation</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">terminal_emulation</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">terminal_emulation</span><span class="s3">:</span>
+            <span class="s2">return False</span>
+        <span class="s2">if not </span><span class="s1">pyte</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span>
+                <span class="s5">&quot;Terminal emulation requires pyte module!</span><span class="s2">\n</span><span class="s5">&quot;</span>
+                <span class="s5">&quot;http://pypi.python.org/pypi/pyte/&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">TerminalEmulator</span><span class="s3">(</span><span class="s1">window_size</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_window_size</span><span class="s3">, </span><span class="s1">newline</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">TerminalEmulator</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">window_size</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">newline</span><span class="s3">=</span><span class="s5">&quot;</span><span class="s2">\r\n</span><span class="s5">&quot;</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_rows</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_columns </span><span class="s3">= </span><span class="s1">window_size </span><span class="s2">or </span><span class="s3">(</span><span class="s6">200</span><span class="s3">, </span><span class="s6">200</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_newline </span><span class="s3">= </span><span class="s1">newline</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_stream </span><span class="s3">= </span><span class="s1">pyte</span><span class="s3">.</span><span class="s1">Stream</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_screen </span><span class="s3">= </span><span class="s1">pyte</span><span class="s3">.</span><span class="s1">HistoryScreen</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_rows</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_columns</span><span class="s3">, </span><span class="s1">history</span><span class="s3">=</span><span class="s6">100000</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_stream</span><span class="s3">.</span><span class="s1">attach</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_screen</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_buffer </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_whitespace_after_last_feed </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">current_output</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_buffer </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dump_screen</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_dump_screen</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_get_history</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_screen</span><span class="s3">)</span>
+            <span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_screen</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_screen</span><span class="s3">)</span>
+            <span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_whitespace_after_last_feed</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_history</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">screen</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">screen</span><span class="s3">.</span><span class="s1">history</span><span class="s3">.</span><span class="s1">top</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s5">&quot;&quot;</span>
+        <span class="s1">rows </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">row </span><span class="s2">in </span><span class="s1">screen</span><span class="s3">.</span><span class="s1">history</span><span class="s3">.</span><span class="s1">top</span><span class="s3">:</span>
+            <span class="s0"># Newer pyte versions store row data in mappings</span>
+            <span class="s1">data </span><span class="s3">= (</span><span class="s1">char</span><span class="s3">.</span><span class="s1">data </span><span class="s2">for </span><span class="s1">_</span><span class="s3">, </span><span class="s1">char </span><span class="s2">in </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">row</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()))</span>
+            <span class="s1">rows</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s5">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">data</span><span class="s3">).</span><span class="s1">rstrip</span><span class="s3">())</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">rows</span><span class="s3">).</span><span class="s1">rstrip</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">) + </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span>
+
+    <span class="s2">def </span><span class="s1">_get_screen</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">screen</span><span class="s3">):</span>
+        <span class="s1">rows </span><span class="s3">= (</span><span class="s1">row</span><span class="s3">.</span><span class="s1">rstrip</span><span class="s3">() </span><span class="s2">for </span><span class="s1">row </span><span class="s2">in </span><span class="s1">screen</span><span class="s3">.</span><span class="s1">display</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">rows</span><span class="s3">).</span><span class="s1">rstrip</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_newline</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">feed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_stream</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_whitespace_after_last_feed </span><span class="s3">= </span><span class="s1">text</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">text</span><span class="s3">.</span><span class="s1">rstrip</span><span class="s3">()) :]</span>
+
+    <span class="s2">def </span><span class="s1">read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">current_out </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">current_output</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_update_buffer</span><span class="s3">(</span><span class="s5">&quot;&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">current_out</span>
+
+    <span class="s2">def </span><span class="s1">read_until</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected</span><span class="s3">):</span>
+        <span class="s1">current_out </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">current_output</span>
+        <span class="s1">exp_index </span><span class="s3">= </span><span class="s1">current_out</span><span class="s3">.</span><span class="s1">find</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">exp_index </span><span class="s3">!= -</span><span class="s6">1</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_update_buffer</span><span class="s3">(</span><span class="s1">current_out</span><span class="s3">[</span><span class="s1">exp_index </span><span class="s3">+ </span><span class="s1">len</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">) :])</span>
+            <span class="s2">return </span><span class="s1">current_out</span><span class="s3">[: </span><span class="s1">exp_index </span><span class="s3">+ </span><span class="s1">len</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">)]</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">read_until_regexp</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">regexp_list</span><span class="s3">):</span>
+        <span class="s1">current_out </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">current_output</span>
+        <span class="s2">for </span><span class="s1">rgx </span><span class="s2">in </span><span class="s1">regexp_list</span><span class="s3">:</span>
+            <span class="s1">match </span><span class="s3">= </span><span class="s1">rgx</span><span class="s3">.</span><span class="s1">search</span><span class="s3">(</span><span class="s1">current_out</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">match</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_update_buffer</span><span class="s3">(</span><span class="s1">current_out</span><span class="s3">[</span><span class="s1">match</span><span class="s3">.</span><span class="s1">end</span><span class="s3">() :])</span>
+                <span class="s2">return </span><span class="s1">current_out</span><span class="s3">[: </span><span class="s1">match</span><span class="s3">.</span><span class="s1">end</span><span class="s3">()]</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_update_buffer</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">terminal_buffer</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_buffer </span><span class="s3">= </span><span class="s1">terminal_buffer</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_whitespace_after_last_feed </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_screen</span><span class="s3">.</span><span class="s1">reset</span><span class="s3">()</span>
+
+
+<span class="s2">class </span><span class="s1">NoMatchError</span><span class="s3">(</span><span class="s1">AssertionError</span><span class="s3">):</span>
+    <span class="s1">ROBOT_SUPPRESS_NAME </span><span class="s3">= </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">expected</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">, </span><span class="s1">output</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">expected </span><span class="s3">= </span><span class="s1">expected</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">timeout </span><span class="s3">= </span><span class="s1">secs_to_timestr</span><span class="s3">(</span><span class="s1">timeout</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">output </span><span class="s3">= </span><span class="s1">output</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_message</span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">_get_message</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">expected </span><span class="s3">= (</span>
+            <span class="s5">f&quot;'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">expected</span><span class="s2">}</span><span class="s5">'&quot;</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">str</span><span class="s3">)</span>
+            <span class="s2">else </span><span class="s1">seq2str</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">expected</span><span class="s3">, </span><span class="s1">lastsep</span><span class="s3">=</span><span class="s5">&quot; or &quot;</span><span class="s3">)</span>
+        <span class="s3">)</span>
+        <span class="s1">msg </span><span class="s3">= </span><span class="s5">f&quot;No match found for </span><span class="s2">{</span><span class="s1">expected</span><span class="s2">} </span><span class="s5">in </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">timeout</span><span class="s2">}</span><span class="s5">.&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">output </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">+= </span><span class="s5">&quot; Output:</span><span class="s2">\n</span><span class="s5">&quot; </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">output</span>
+        <span class="s2">return </span><span class="s1">msg</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,1002 @@
+<html>
+<head>
+<title>test_setupcfg.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_setupcfg.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">configparser</span>
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">pathlib </span><span class="s0">import </span><span class="s1">Path</span>
+<span class="s0">from </span><span class="s1">unittest</span><span class="s2">.</span><span class="s1">mock </span><span class="s0">import </span><span class="s1">Mock</span><span class="s2">, </span><span class="s1">patch</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+<span class="s0">from </span><span class="s1">packaging</span><span class="s2">.</span><span class="s1">requirements </span><span class="s0">import </span><span class="s1">InvalidRequirement</span>
+
+<span class="s0">from </span><span class="s1">setuptools</span><span class="s2">.</span><span class="s1">config</span><span class="s2">.</span><span class="s1">setupcfg </span><span class="s0">import </span><span class="s1">ConfigHandler</span><span class="s2">, </span><span class="s1">Target</span><span class="s2">, </span><span class="s1">read_configuration</span>
+<span class="s0">from </span><span class="s1">setuptools</span><span class="s2">.</span><span class="s1">dist </span><span class="s0">import </span><span class="s1">Distribution</span><span class="s2">, </span><span class="s1">_Distribution</span>
+<span class="s0">from </span><span class="s1">setuptools</span><span class="s2">.</span><span class="s1">warnings </span><span class="s0">import </span><span class="s1">SetuptoolsDeprecationWarning</span>
+
+<span class="s0">from </span><span class="s2">..</span><span class="s1">textwrap </span><span class="s0">import </span><span class="s1">DALS</span>
+
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">errors </span><span class="s0">import </span><span class="s1">DistutilsFileError</span><span class="s2">, </span><span class="s1">DistutilsOptionError</span>
+
+
+<span class="s0">class </span><span class="s1">ErrConfigHandler</span><span class="s2">(</span><span class="s1">ConfigHandler</span><span class="s2">[</span><span class="s1">Target</span><span class="s2">]):</span>
+    <span class="s3">&quot;&quot;&quot;Erroneous handler. Fails to implement required methods.&quot;&quot;&quot;</span>
+
+    <span class="s1">section_prefix </span><span class="s2">= </span><span class="s4">&quot;**err**&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">make_package_dir</span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">base_dir</span><span class="s2">, </span><span class="s1">ns</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+    <span class="s1">dir_package </span><span class="s2">= </span><span class="s1">base_dir</span>
+    <span class="s0">for </span><span class="s1">dir_name </span><span class="s0">in </span><span class="s1">name</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">'/'</span><span class="s2">):</span>
+        <span class="s1">dir_package </span><span class="s2">= </span><span class="s1">dir_package</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s1">dir_name</span><span class="s2">)</span>
+    <span class="s1">init_file </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s0">if not </span><span class="s1">ns</span><span class="s2">:</span>
+        <span class="s1">init_file </span><span class="s2">= </span><span class="s1">dir_package</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'__init__.py'</span><span class="s2">)</span>
+        <span class="s1">init_file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">dir_package</span><span class="s2">, </span><span class="s1">init_file</span>
+
+
+<span class="s0">def </span><span class="s1">fake_env</span><span class="s2">(</span>
+    <span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">setup_cfg</span><span class="s2">, </span><span class="s1">setup_py</span><span class="s2">=</span><span class="s0">None</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">=</span><span class="s4">'ascii'</span><span class="s2">, </span><span class="s1">package_path</span><span class="s2">=</span><span class="s4">'fake_package'</span>
+<span class="s2">):</span>
+    <span class="s0">if </span><span class="s1">setup_py </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">setup_py </span><span class="s2">= </span><span class="s4">'from setuptools import setup</span><span class="s0">\n</span><span class="s4">setup()</span><span class="s0">\n</span><span class="s4">'</span>
+
+    <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'setup.py'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s1">setup_py</span><span class="s2">)</span>
+    <span class="s1">config </span><span class="s2">= </span><span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'setup.cfg'</span><span class="s2">)</span>
+    <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">setup_cfg</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s1">encoding</span><span class="s2">), </span><span class="s1">mode</span><span class="s2">=</span><span class="s4">'wb'</span><span class="s2">)</span>
+
+    <span class="s1">package_dir</span><span class="s2">, </span><span class="s1">init_file </span><span class="s2">= </span><span class="s1">make_package_dir</span><span class="s2">(</span><span class="s1">package_path</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">)</span>
+
+    <span class="s1">init_file</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span>
+        <span class="s4">'VERSION = (1, 2, 3)</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s4">'VERSION_MAJOR = 1'</span>
+        <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s4">'def get_version():</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s4">'    return [3, 4, 5, &quot;dev&quot;]</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+    <span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">package_dir</span><span class="s2">, </span><span class="s1">config</span>
+
+
+<span class="s2">@</span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">kwargs_initial</span><span class="s2">=</span><span class="s0">None</span><span class="s2">, </span><span class="s1">parse</span><span class="s2">=</span><span class="s0">True</span><span class="s2">):</span>
+    <span class="s1">kwargs_initial </span><span class="s2">= </span><span class="s1">kwargs_initial </span><span class="s0">or </span><span class="s2">{}</span>
+
+    <span class="s0">with </span><span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">as_cwd</span><span class="s2">():</span>
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">(</span><span class="s1">kwargs_initial</span><span class="s2">)</span>
+        <span class="s1">dist</span><span class="s2">.</span><span class="s1">script_name </span><span class="s2">= </span><span class="s4">'setup.py'</span>
+        <span class="s1">parse </span><span class="s0">and </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()</span>
+
+        <span class="s0">yield </span><span class="s1">dist</span>
+
+
+<span class="s0">def </span><span class="s1">test_parsers_implemented</span><span class="s2">():</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">NotImplementedError</span><span class="s2">):</span>
+        <span class="s1">handler </span><span class="s2">= </span><span class="s1">ErrConfigHandler</span><span class="s2">(</span><span class="s0">None</span><span class="s2">, {}, </span><span class="s0">False</span><span class="s2">, </span><span class="s1">Mock</span><span class="s2">())</span>
+        <span class="s1">handler</span><span class="s2">.</span><span class="s1">parsers</span>
+
+
+<span class="s0">class </span><span class="s1">TestConfigurationReader</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">test_basic</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'version = 10.1.1</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'keywords = one, two</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'scripts = bin/a.py, bin/b.py</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">config_dict </span><span class="s2">= </span><span class="s1">read_configuration</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">config</span><span class="s2">))</span>
+        <span class="s0">assert </span><span class="s1">config_dict</span><span class="s2">[</span><span class="s4">'metadata'</span><span class="s2">][</span><span class="s4">'version'</span><span class="s2">] == </span><span class="s4">'10.1.1'</span>
+        <span class="s0">assert </span><span class="s1">config_dict</span><span class="s2">[</span><span class="s4">'metadata'</span><span class="s2">][</span><span class="s4">'keywords'</span><span class="s2">] == [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">config_dict</span><span class="s2">[</span><span class="s4">'options'</span><span class="s2">][</span><span class="s4">'scripts'</span><span class="s2">] == [</span><span class="s4">'bin/a.py'</span><span class="s2">, </span><span class="s4">'bin/b.py'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_no_config</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsFileError</span><span class="s2">):</span>
+            <span class="s1">read_configuration</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'setup.cfg'</span><span class="s2">)))</span>
+
+    <span class="s0">def </span><span class="s1">test_ignore_errors</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = attr: none.VERSION</span><span class="s0">\n</span><span class="s4">keywords = one, two</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ImportError</span><span class="s2">):</span>
+            <span class="s1">read_configuration</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">config</span><span class="s2">))</span>
+
+        <span class="s1">config_dict </span><span class="s2">= </span><span class="s1">read_configuration</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">config</span><span class="s2">), </span><span class="s1">ignore_option_errors</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+        <span class="s0">assert </span><span class="s1">config_dict</span><span class="s2">[</span><span class="s4">'metadata'</span><span class="s2">][</span><span class="s4">'keywords'</span><span class="s2">] == [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s4">'version' </span><span class="s0">not in </span><span class="s1">config_dict</span><span class="s2">[</span><span class="s4">'metadata'</span><span class="s2">]</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">TestMetadata</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">test_basic</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'version = 10.1.1</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'description = Some description</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'long_description_content_type = text/something</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'long_description = file: README</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'name = fake_name</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'keywords = one, two</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'provides = package, package.sub</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'license = otherlic</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'download_url = http://test.test.com/test/</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'maintainer_email = test@test.com</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'README'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'readme contents</span><span class="s0">\n</span><span class="s4">line2'</span><span class="s2">)</span>
+
+        <span class="s1">meta_initial </span><span class="s2">= {</span>
+            <span class="s5"># This will be used so `otherlic` won't replace it.</span>
+            <span class="s4">'license'</span><span class="s2">: </span><span class="s4">'BSD 3-Clause License'</span><span class="s2">,</span>
+        <span class="s2">}</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">meta_initial</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">metadata </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span>
+
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'10.1.1'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">description </span><span class="s2">== </span><span class="s4">'Some description'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">long_description_content_type </span><span class="s2">== </span><span class="s4">'text/something'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">long_description </span><span class="s2">== </span><span class="s4">'readme contents</span><span class="s0">\n</span><span class="s4">line2'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">provides </span><span class="s2">== [</span><span class="s4">'package'</span><span class="s2">, </span><span class="s4">'package.sub'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">license </span><span class="s2">== </span><span class="s4">'BSD 3-Clause License'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">'fake_name'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">keywords </span><span class="s2">== [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">download_url </span><span class="s2">== </span><span class="s4">'http://test.test.com/test/'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">maintainer_email </span><span class="s2">== </span><span class="s4">'test@test.com'</span>
+
+    <span class="s0">def </span><span class="s1">test_license_cfg</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s1">DALS</span><span class="s2">(</span>
+                <span class="s4">&quot;&quot;&quot; 
+            [metadata] 
+            name=foo 
+            version=0.0.1 
+            license=Apache 2.0 
+            &quot;&quot;&quot;</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">metadata </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span>
+
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">&quot;foo&quot;</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">&quot;0.0.1&quot;</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">license </span><span class="s2">== </span><span class="s4">&quot;Apache 2.0&quot;</span>
+
+    <span class="s0">def </span><span class="s1">test_file_mixed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">long_description = file: README.rst, CHANGES.rst</span><span class="s0">\n\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'README.rst'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'readme contents</span><span class="s0">\n</span><span class="s4">line2'</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'CHANGES.rst'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'changelog contents</span><span class="s0">\n</span><span class="s4">and stuff'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">long_description </span><span class="s2">== (</span>
+                <span class="s4">'readme contents</span><span class="s0">\n</span><span class="s4">line2</span><span class="s0">\n</span><span class="s4">changelog contents</span><span class="s0">\n</span><span class="s4">and stuff'</span>
+            <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">test_file_sandboxed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">ensure</span><span class="s2">(</span><span class="s4">&quot;README&quot;</span><span class="s2">)</span>
+        <span class="s1">project </span><span class="s2">= </span><span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'depth1'</span><span class="s2">, </span><span class="s4">'depth2'</span><span class="s2">)</span>
+        <span class="s1">project</span><span class="s2">.</span><span class="s1">ensure</span><span class="s2">(</span><span class="s1">dir</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">project</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">long_description = file: ../../README</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">project</span><span class="s2">, </span><span class="s1">parse</span><span class="s2">=</span><span class="s0">False</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsOptionError</span><span class="s2">):</span>
+                <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()  </span><span class="s5"># file: out of sandbox</span>
+
+    <span class="s0">def </span><span class="s1">test_aliases</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'author_email = test@test.com</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'home_page = http://test.test.com/test/</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'summary = Short summary</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'platform = a, b</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'classifier =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  Framework :: Django</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  Programming Language :: Python :: 3.5</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">metadata </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">author_email </span><span class="s2">== </span><span class="s4">'test@test.com'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">url </span><span class="s2">== </span><span class="s4">'http://test.test.com/test/'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">description </span><span class="s2">== </span><span class="s4">'Short summary'</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">platforms </span><span class="s2">== [</span><span class="s4">'a'</span><span class="s2">, </span><span class="s4">'b'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">classifiers </span><span class="s2">== [</span>
+                <span class="s4">'Framework :: Django'</span><span class="s2">,</span>
+                <span class="s4">'Programming Language :: Python :: 3.5'</span><span class="s2">,</span>
+            <span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_multiline</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'name = fake_name</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'keywords =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  one</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  two</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'classifiers =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  Framework :: Django</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  Programming Language :: Python :: 3.5</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">metadata </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">keywords </span><span class="s2">== [</span><span class="s4">'one'</span><span class="s2">, </span><span class="s4">'two'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">classifiers </span><span class="s2">== [</span>
+                <span class="s4">'Framework :: Django'</span><span class="s2">,</span>
+                <span class="s4">'Programming Language :: Python :: 3.5'</span><span class="s2">,</span>
+            <span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_dict</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'project_urls =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  Link One = https://example.com/one/</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  Link Two = https://example.com/two/</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">metadata </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span>
+            <span class="s0">assert </span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">project_urls </span><span class="s2">== {</span>
+                <span class="s4">'Link One'</span><span class="s2">: </span><span class="s4">'https://example.com/one/'</span><span class="s2">,</span>
+                <span class="s4">'Link Two'</span><span class="s2">: </span><span class="s4">'https://example.com/two/'</span><span class="s2">,</span>
+            <span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">test_version</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">package_dir</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = attr: fake_package.VERSION</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+
+        <span class="s1">sub_a </span><span class="s2">= </span><span class="s1">package_dir</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s4">'subpkg_a'</span><span class="s2">)</span>
+        <span class="s1">sub_a</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'__init__.py'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">sub_a</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'mod.py'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'VERSION = (2016, 11, 26)'</span><span class="s2">)</span>
+
+        <span class="s1">sub_b </span><span class="s2">= </span><span class="s1">package_dir</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s4">'subpkg_b'</span><span class="s2">)</span>
+        <span class="s1">sub_b</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'__init__.py'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">sub_b</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'mod.py'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'import third_party_module</span><span class="s0">\n</span><span class="s4">VERSION = (2016, 11, 26)'</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'1.2.3'</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = attr: fake_package.get_version</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'3.4.5.dev'</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = attr: fake_package.VERSION_MAJOR</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'1'</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = attr: fake_package.subpkg_a.mod.VERSION</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'2016.11.26'</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = attr: fake_package.subpkg_b.mod.VERSION</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'2016.11.26'</span>
+
+    <span class="s0">def </span><span class="s1">test_version_file</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">version = file: fake_package/version.txt</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'fake_package'</span><span class="s2">, </span><span class="s4">'version.txt'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'1.2.3</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'1.2.3'</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'fake_package'</span><span class="s2">, </span><span class="s4">'version.txt'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'1.2.3</span><span class="s0">\n</span><span class="s4">4.5.6</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsOptionError</span><span class="s2">):</span>
+            <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+                <span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version</span>
+
+    <span class="s0">def </span><span class="s1">test_version_with_package_dir_simple</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'version = attr: fake_package_simple.VERSION</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'package_dir =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    = src</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+            <span class="s1">package_path</span><span class="s2">=</span><span class="s4">'src/fake_package_simple'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'1.2.3'</span>
+
+    <span class="s0">def </span><span class="s1">test_version_with_package_dir_rename</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'version = attr: fake_package_rename.VERSION</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'package_dir =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    fake_package_rename = fake_dir</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+            <span class="s1">package_path</span><span class="s2">=</span><span class="s4">'fake_dir'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'1.2.3'</span>
+
+    <span class="s0">def </span><span class="s1">test_version_with_package_dir_complex</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'version = attr: fake_package_complex.VERSION</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'package_dir =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    fake_package_complex = src/fake_dir</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+            <span class="s1">package_path</span><span class="s2">=</span><span class="s4">'src/fake_dir'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">version </span><span class="s2">== </span><span class="s4">'1.2.3'</span>
+
+    <span class="s0">def </span><span class="s1">test_unknown_meta_item</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">name = fake_name</span><span class="s0">\n</span><span class="s4">unknown = some</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">parse</span><span class="s2">=</span><span class="s0">False</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()  </span><span class="s5"># Skip unknown.</span>
+
+    <span class="s0">def </span><span class="s1">test_usupported_section</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata.some]</span><span class="s0">\n</span><span class="s4">key = val</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">parse</span><span class="s2">=</span><span class="s0">False</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsOptionError</span><span class="s2">):</span>
+                <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">test_classifiers</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">expected </span><span class="s2">= </span><span class="s1">set</span><span class="s2">([</span>
+            <span class="s4">'Framework :: Django'</span><span class="s2">,</span>
+            <span class="s4">'Programming Language :: Python :: 3'</span><span class="s2">,</span>
+            <span class="s4">'Programming Language :: Python :: 3.5'</span><span class="s2">,</span>
+        <span class="s2">])</span>
+
+        <span class="s5"># From file.</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">classifiers = file: classifiers</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'classifiers'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'Framework :: Django</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'Programming Language :: Python :: 3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'Programming Language :: Python :: 3.5</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">classifiers</span><span class="s2">) == </span><span class="s1">expected</span>
+
+        <span class="s5"># From list notation</span>
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'classifiers =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    Framework :: Django</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    Programming Language :: Python :: 3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    Programming Language :: Python :: 3.5</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">classifiers</span><span class="s2">) == </span><span class="s1">expected</span>
+
+    <span class="s0">def </span><span class="s1">test_interpolation</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">description = %(message)s</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">configparser</span><span class="s2">.</span><span class="s1">InterpolationMissingOptionError</span><span class="s2">):</span>
+            <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">):</span>
+                <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">test_non_ascii_1</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[metadata]</span><span class="s0">\n</span><span class="s4">description = éàïôñ</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">=</span><span class="s4">'utf-8'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">):</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">test_non_ascii_3</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'</span><span class="s0">\n</span><span class="s4"># -*- coding: invalid</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">):</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">test_non_ascii_4</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'# -*- coding: utf-8</span><span class="s0">\n</span><span class="s4">[metadata]</span><span class="s0">\n</span><span class="s4">description = éàïôñ</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+            <span class="s1">encoding</span><span class="s2">=</span><span class="s4">'utf-8'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">description </span><span class="s2">== </span><span class="s4">'éàïôñ'</span>
+
+    <span class="s0">def </span><span class="s1">test_not_utf8</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Config files encoded not in UTF-8 will fail 
+        &quot;&quot;&quot;</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'# vim: set fileencoding=iso-8859-15 :</span><span class="s0">\n</span><span class="s4">[metadata]</span><span class="s0">\n</span><span class="s4">description = éàïôñ</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+            <span class="s1">encoding</span><span class="s2">=</span><span class="s4">'iso-8859-15'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">UnicodeDecodeError</span><span class="s2">):</span>
+            <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">):</span>
+                <span class="s0">pass</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+        <span class="s2">(</span><span class="s4">&quot;error_msg&quot;</span><span class="s2">, </span><span class="s4">&quot;config&quot;</span><span class="s2">, </span><span class="s4">&quot;invalid&quot;</span><span class="s2">),</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span>
+                <span class="s4">&quot;Invalid dash-separated key 'author-email' in 'metadata' (setup.cfg)&quot;</span><span class="s2">,</span>
+                <span class="s1">DALS</span><span class="s2">(</span>
+                    <span class="s4">&quot;&quot;&quot; 
+                    [metadata] 
+                    author-email = test@test.com 
+                    maintainer_email = foo@foo.com 
+                    &quot;&quot;&quot;</span>
+                <span class="s2">),</span>
+                <span class="s2">{</span><span class="s4">&quot;author-email&quot;</span><span class="s2">: </span><span class="s4">&quot;test@test.com&quot;</span><span class="s2">},</span>
+            <span class="s2">),</span>
+            <span class="s2">(</span>
+                <span class="s4">&quot;Invalid uppercase key 'Name' in 'metadata' (setup.cfg)&quot;</span><span class="s2">,</span>
+                <span class="s1">DALS</span><span class="s2">(</span>
+                    <span class="s4">&quot;&quot;&quot; 
+                    [metadata] 
+                    Name = foo 
+                    description = Some description 
+                    &quot;&quot;&quot;</span>
+                <span class="s2">),</span>
+                <span class="s2">{</span><span class="s4">&quot;Name&quot;</span><span class="s2">: </span><span class="s4">&quot;foo&quot;</span><span class="s2">},</span>
+            <span class="s2">),</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_invalid_options_previously_deprecated</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">error_msg</span><span class="s2">, </span><span class="s1">config</span><span class="s2">, </span><span class="s1">invalid</span>
+    <span class="s2">):</span>
+        <span class="s5"># This test and related methods can be removed when no longer needed.</span>
+        <span class="s5"># Deprecation postponed due to push-back from the community in</span>
+        <span class="s5"># https://github.com/pypa/setuptools/issues/4910</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">config</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">warns</span><span class="s2">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s1">re</span><span class="s2">.</span><span class="s1">escape</span><span class="s2">(</span><span class="s1">error_msg</span><span class="s2">)):</span>
+            <span class="s1">dist </span><span class="s2">= </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">).</span><span class="s1">__enter__</span><span class="s2">()</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'setup.cfg'</span><span class="s2">).</span><span class="s1">remove</span><span class="s2">()</span>
+
+        <span class="s0">for </span><span class="s1">field</span><span class="s2">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">invalid</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s1">attr </span><span class="s2">= </span><span class="s1">field</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">(</span><span class="s4">&quot;-&quot;</span><span class="s2">, </span><span class="s4">&quot;_&quot;</span><span class="s2">).</span><span class="s1">lower</span><span class="s2">()</span>
+            <span class="s0">assert </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">, </span><span class="s1">attr</span><span class="s2">) == </span><span class="s1">value</span>
+
+
+<span class="s0">class </span><span class="s1">TestOptions</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">test_basic</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'zip_safe = True</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'include_package_data = yes</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'package_dir = b=c, =src</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'packages = pack_a, pack_b.subpack</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'namespace_packages = pack1, pack2</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'scripts = bin/one.py, bin/two.py</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'eager_resources = bin/one.py, bin/two.py</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'install_requires = docutils&gt;=0.3; pack ==1.1, ==1.3; hey</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'setup_requires = docutils&gt;=0.3; spack ==1.1, ==1.3; there</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'dependency_links = http://some.com/here/1, '</span>
+            <span class="s4">'http://some.com/there/2</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'python_requires = &gt;=1.0, !=2.8</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'py_modules = module1, module2</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">deprec </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">warns</span><span class="s2">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s4">&quot;namespace_packages&quot;</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">deprec</span><span class="s2">, </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">zip_safe</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">include_package_data</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">== {</span><span class="s4">''</span><span class="s2">: </span><span class="s4">'src'</span><span class="s2">, </span><span class="s4">'b'</span><span class="s2">: </span><span class="s4">'c'</span><span class="s2">}</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">== [</span><span class="s4">'pack_a'</span><span class="s2">, </span><span class="s4">'pack_b.subpack'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">namespace_packages </span><span class="s2">== [</span><span class="s4">'pack1'</span><span class="s2">, </span><span class="s4">'pack2'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">scripts </span><span class="s2">== [</span><span class="s4">'bin/one.py'</span><span class="s2">, </span><span class="s4">'bin/two.py'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">dependency_links </span><span class="s2">== ([</span>
+                <span class="s4">'http://some.com/here/1'</span><span class="s2">,</span>
+                <span class="s4">'http://some.com/there/2'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">install_requires </span><span class="s2">== ([</span>
+                <span class="s4">'docutils&gt;=0.3'</span><span class="s2">,</span>
+                <span class="s4">'pack==1.1,==1.3'</span><span class="s2">,</span>
+                <span class="s4">'hey'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">setup_requires </span><span class="s2">== ([</span>
+                <span class="s4">'docutils&gt;=0.3'</span><span class="s2">,</span>
+                <span class="s4">'spack ==1.1, ==1.3'</span><span class="s2">,</span>
+                <span class="s4">'there'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">python_requires </span><span class="s2">== </span><span class="s4">'&gt;=1.0, !=2.8'</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">py_modules </span><span class="s2">== [</span><span class="s4">'module1'</span><span class="s2">, </span><span class="s4">'module2'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_multiline</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'package_dir = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  b=c</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  =src</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'packages = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  pack_a</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  pack_b.subpack</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'namespace_packages = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  pack1</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  pack2</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'scripts = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  bin/one.py</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  bin/two.py</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'eager_resources = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  bin/one.py</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  bin/two.py</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'install_requires = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  docutils&gt;=0.3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  pack ==1.1, ==1.3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  hey</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'setup_requires = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  docutils&gt;=0.3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  spack ==1.1, ==1.3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  there</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'dependency_links = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  http://some.com/here/1</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  http://some.com/there/2</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">deprec </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">warns</span><span class="s2">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s4">&quot;namespace_packages&quot;</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">deprec</span><span class="s2">, </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">package_dir </span><span class="s2">== {</span><span class="s4">''</span><span class="s2">: </span><span class="s4">'src'</span><span class="s2">, </span><span class="s4">'b'</span><span class="s2">: </span><span class="s4">'c'</span><span class="s2">}</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">== [</span><span class="s4">'pack_a'</span><span class="s2">, </span><span class="s4">'pack_b.subpack'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">namespace_packages </span><span class="s2">== [</span><span class="s4">'pack1'</span><span class="s2">, </span><span class="s4">'pack2'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">scripts </span><span class="s2">== [</span><span class="s4">'bin/one.py'</span><span class="s2">, </span><span class="s4">'bin/two.py'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">dependency_links </span><span class="s2">== ([</span>
+                <span class="s4">'http://some.com/here/1'</span><span class="s2">,</span>
+                <span class="s4">'http://some.com/there/2'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">install_requires </span><span class="s2">== ([</span>
+                <span class="s4">'docutils&gt;=0.3'</span><span class="s2">,</span>
+                <span class="s4">'pack==1.1,==1.3'</span><span class="s2">,</span>
+                <span class="s4">'hey'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">setup_requires </span><span class="s2">== ([</span>
+                <span class="s4">'docutils&gt;=0.3'</span><span class="s2">,</span>
+                <span class="s4">'spack ==1.1, ==1.3'</span><span class="s2">,</span>
+                <span class="s4">'there'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+
+    <span class="s0">def </span><span class="s1">test_package_dir_fail</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">package_dir = a b</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">parse</span><span class="s2">=</span><span class="s0">False</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">DistutilsOptionError</span><span class="s2">):</span>
+                <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">test_package_data</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options.package_data]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'* = *.txt, *.rst</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'hello = *.msg</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options.exclude_package_data]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'* = fake1.txt, fake2.txt</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'hello = *.dat</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">package_data </span><span class="s2">== {</span>
+                <span class="s4">''</span><span class="s2">: [</span><span class="s4">'*.txt'</span><span class="s2">, </span><span class="s4">'*.rst'</span><span class="s2">],</span>
+                <span class="s4">'hello'</span><span class="s2">: [</span><span class="s4">'*.msg'</span><span class="s2">],</span>
+            <span class="s2">}</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">exclude_package_data </span><span class="s2">== {</span>
+                <span class="s4">''</span><span class="s2">: [</span><span class="s4">'fake1.txt'</span><span class="s2">, </span><span class="s4">'fake2.txt'</span><span class="s2">],</span>
+                <span class="s4">'hello'</span><span class="s2">: [</span><span class="s4">'*.dat'</span><span class="s2">],</span>
+            <span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">test_packages</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">packages = find:</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">== [</span><span class="s4">'fake_package'</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">test_find_directive</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">dir_package</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">packages = find:</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s1">make_package_dir</span><span class="s2">(</span><span class="s4">'sub_one'</span><span class="s2">, </span><span class="s1">dir_package</span><span class="s2">)</span>
+        <span class="s1">make_package_dir</span><span class="s2">(</span><span class="s4">'sub_two'</span><span class="s2">, </span><span class="s1">dir_package</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages</span><span class="s2">) == </span><span class="s1">set</span><span class="s2">([</span>
+                <span class="s4">'fake_package'</span><span class="s2">,</span>
+                <span class="s4">'fake_package.sub_two'</span><span class="s2">,</span>
+                <span class="s4">'fake_package.sub_one'</span><span class="s2">,</span>
+            <span class="s2">])</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'packages = find:</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options.packages.find]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'where = .</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'include =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    fake_package.sub_one</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    two</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">== [</span><span class="s4">'fake_package.sub_one'</span><span class="s2">]</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'packages = find:</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options.packages.find]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'exclude =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    fake_package.sub_one</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages</span><span class="s2">) == </span><span class="s1">set</span><span class="s2">([</span><span class="s4">'fake_package'</span><span class="s2">, </span><span class="s4">'fake_package.sub_two'</span><span class="s2">])</span>
+
+    <span class="s0">def </span><span class="s1">test_find_namespace_directive</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">dir_package</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">packages = find_namespace:</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+
+        <span class="s1">make_package_dir</span><span class="s2">(</span><span class="s4">'sub_one'</span><span class="s2">, </span><span class="s1">dir_package</span><span class="s2">)</span>
+        <span class="s1">make_package_dir</span><span class="s2">(</span><span class="s4">'sub_two'</span><span class="s2">, </span><span class="s1">dir_package</span><span class="s2">, </span><span class="s1">ns</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages</span><span class="s2">) == {</span>
+                <span class="s4">'fake_package'</span><span class="s2">,</span>
+                <span class="s4">'fake_package.sub_two'</span><span class="s2">,</span>
+                <span class="s4">'fake_package.sub_one'</span><span class="s2">,</span>
+            <span class="s2">}</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'packages = find_namespace:</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options.packages.find]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'where = .</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'include =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    fake_package.sub_one</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    two</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages </span><span class="s2">== [</span><span class="s4">'fake_package.sub_one'</span><span class="s2">]</span>
+
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span>
+            <span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'packages = find_namespace:</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'[options.packages.find]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'exclude =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'    fake_package.sub_one</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">packages</span><span class="s2">) == {</span><span class="s4">'fake_package'</span><span class="s2">, </span><span class="s4">'fake_package.sub_two'</span><span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">test_extras_require</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options.extras_require]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'pdf = ReportLab&gt;=1.2; RXP</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'rest = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  docutils&gt;=0.3</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'  pack ==1.1, ==1.3</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">extras_require </span><span class="s2">== {</span>
+                <span class="s4">'pdf'</span><span class="s2">: [</span><span class="s4">'ReportLab&gt;=1.2'</span><span class="s2">, </span><span class="s4">'RXP'</span><span class="s2">],</span>
+                <span class="s4">'rest'</span><span class="s2">: [</span><span class="s4">'docutils&gt;=0.3'</span><span class="s2">, </span><span class="s4">'pack==1.1,==1.3'</span><span class="s2">],</span>
+            <span class="s2">}</span>
+            <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">provides_extras</span><span class="s2">) == {</span><span class="s4">'pdf'</span><span class="s2">, </span><span class="s4">'rest'</span><span class="s2">}</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+        <span class="s4">&quot;config&quot;</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;python_version&lt;'3'&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;os_name=='linux'&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;python_version&lt;'3'</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;os_name=='linux'</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;python_version&lt;'3'&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;os_name=='linux'&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;python_version&lt;'3'</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;os_name=='linux'</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_raises_accidental_env_marker_misconfig</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">config</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">config</span><span class="s2">)</span>
+        <span class="s1">match </span><span class="s2">= (</span>
+            <span class="s4">r&quot;One of the parsed requirements in `(install_requires|extras_require.+)` &quot;</span>
+            <span class="s4">&quot;looks like a valid environment marker.*&quot;</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">InvalidRequirement</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s1">match</span><span class="s2">):</span>
+            <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">_</span><span class="s2">:</span>
+                <span class="s0">pass</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+        <span class="s4">&quot;config&quot;</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;python_version&lt;3&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;python_version&lt;3</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;python_version&lt;3&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;python_version&lt;3</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_warn_accidental_env_marker_misconfig</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">config</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">config</span><span class="s2">)</span>
+        <span class="s1">match </span><span class="s2">= (</span>
+            <span class="s4">r&quot;One of the parsed requirements in `(install_requires|extras_require.+)` &quot;</span>
+            <span class="s4">&quot;looks like a valid environment marker.*&quot;</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">warns</span><span class="s2">(</span><span class="s1">SetuptoolsDeprecationWarning</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s1">match</span><span class="s2">):</span>
+            <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">_</span><span class="s2">:</span>
+                <span class="s0">pass</span>
+
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+        <span class="s4">&quot;config&quot;</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo =</span><span class="s0">\n    </span><span class="s4">bar;python_version&lt;'3'&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;baz</span><span class="s0">\n</span><span class="s4">boo = xxx;yyy&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo =</span><span class="s0">\n    </span><span class="s4">bar;python_version&lt;'3'</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo = bar;baz</span><span class="s0">\n</span><span class="s4">boo = xxx;yyy</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo =</span><span class="s0">\n    </span><span class="s4">bar</span><span class="s0">\n    </span><span class="s4">python_version&lt;3</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires =</span><span class="s0">\n    </span><span class="s4">bar;python_version&lt;'3'&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;baz</span><span class="s0">\n</span><span class="s4">boo = xxx;yyy&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires =</span><span class="s0">\n    </span><span class="s4">bar;python_version&lt;'3'</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires = bar;baz</span><span class="s0">\n</span><span class="s4">boo = xxx;yyy</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s4">&quot;[options]</span><span class="s0">\n</span><span class="s4">install_requires =</span><span class="s0">\n    </span><span class="s4">bar</span><span class="s0">\n    </span><span class="s4">python_version&lt;3</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">filterwarnings</span><span class="s2">(</span><span class="s4">&quot;error::setuptools.SetuptoolsDeprecationWarning&quot;</span><span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_nowarn_accidental_env_marker_misconfig</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">config</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">recwarn</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">config</span><span class="s2">)</span>
+        <span class="s1">num_warnings </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">recwarn</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">_</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s5"># The examples are valid, no warnings shown</span>
+        <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">recwarn</span><span class="s2">) == </span><span class="s1">num_warnings</span>
+
+    <span class="s0">def </span><span class="s1">test_dash_preserved_extras_require</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">'[options.extras_require]</span><span class="s0">\n</span><span class="s4">foo-a = foo</span><span class="s0">\n</span><span class="s4">foo_b = test</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">extras_require </span><span class="s2">== {</span><span class="s4">'foo-a'</span><span class="s2">: [</span><span class="s4">'foo'</span><span class="s2">], </span><span class="s4">'foo_b'</span><span class="s2">: [</span><span class="s4">'test'</span><span class="s2">]}</span>
+
+    <span class="s0">def </span><span class="s1">test_entry_points</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">config </span><span class="s2">= </span><span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options.entry_points]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'group1 = point1 = pack.module:func, '</span>
+            <span class="s4">'.point2 = pack.module2:func_rest [rest]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'group2 = point3 = pack.module:func2</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">entry_points </span><span class="s2">== {</span>
+                <span class="s4">'group1'</span><span class="s2">: [</span>
+                    <span class="s4">'point1 = pack.module:func'</span><span class="s2">,</span>
+                    <span class="s4">'.point2 = pack.module2:func_rest [rest]'</span><span class="s2">,</span>
+                <span class="s2">],</span>
+                <span class="s4">'group2'</span><span class="s2">: [</span><span class="s4">'point3 = pack.module:func2'</span><span class="s2">],</span>
+            <span class="s2">}</span>
+
+        <span class="s1">expected </span><span class="s2">= (</span>
+            <span class="s4">'[blogtool.parsers]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'.rst = some.nested.module:SomeClass.some_classmethod[reST]</span><span class="s0">\n</span><span class="s4">'</span>
+        <span class="s2">)</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'entry_points'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">)</span>
+
+        <span class="s5"># From file.</span>
+        <span class="s1">config</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'[options]</span><span class="s0">\n</span><span class="s4">entry_points = file: entry_points</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">entry_points </span><span class="s2">== </span><span class="s1">expected</span>
+
+    <span class="s0">def </span><span class="s1">test_case_sensitive_entry_points</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options.entry_points]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'GROUP1 = point1 = pack.module:func, '</span>
+            <span class="s4">'.point2 = pack.module2:func_rest [rest]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'group2 = point3 = pack.module:func2</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">entry_points </span><span class="s2">== {</span>
+                <span class="s4">'GROUP1'</span><span class="s2">: [</span>
+                    <span class="s4">'point1 = pack.module:func'</span><span class="s2">,</span>
+                    <span class="s4">'.point2 = pack.module2:func_rest [rest]'</span><span class="s2">,</span>
+                <span class="s2">],</span>
+                <span class="s4">'group2'</span><span class="s2">: [</span><span class="s4">'point3 = pack.module:func2'</span><span class="s2">],</span>
+            <span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">test_data_files</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options.data_files]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'cfg =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      a/b.conf</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      c/d.conf</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'data = e/f.dat, g/h.dat</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">expected </span><span class="s2">= [</span>
+                <span class="s2">(</span><span class="s4">'cfg'</span><span class="s2">, [</span><span class="s4">'a/b.conf'</span><span class="s2">, </span><span class="s4">'c/d.conf'</span><span class="s2">]),</span>
+                <span class="s2">(</span><span class="s4">'data'</span><span class="s2">, [</span><span class="s4">'e/f.dat'</span><span class="s2">, </span><span class="s4">'g/h.dat'</span><span class="s2">]),</span>
+            <span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">data_files</span><span class="s2">) == </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">test_data_files_globby</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s4">'[options.data_files]</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'cfg =</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      a/b.conf</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      c/d.conf</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'data = *.dat</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'icons = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      *.ico</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'audio = </span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      *.wav</span><span class="s0">\n</span><span class="s4">'</span>
+            <span class="s4">'      sounds.db</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s5"># Create dummy files for glob()'s sake:</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'a.dat'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'b.dat'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'c.dat'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'a.ico'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'b.ico'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'c.ico'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'beep.wav'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'boop.wav'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'sounds.db'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">''</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">expected </span><span class="s2">= [</span>
+                <span class="s2">(</span><span class="s4">'cfg'</span><span class="s2">, [</span><span class="s4">'a/b.conf'</span><span class="s2">, </span><span class="s4">'c/d.conf'</span><span class="s2">]),</span>
+                <span class="s2">(</span><span class="s4">'data'</span><span class="s2">, [</span><span class="s4">'a.dat'</span><span class="s2">, </span><span class="s4">'b.dat'</span><span class="s2">, </span><span class="s4">'c.dat'</span><span class="s2">]),</span>
+                <span class="s2">(</span><span class="s4">'icons'</span><span class="s2">, [</span><span class="s4">'a.ico'</span><span class="s2">, </span><span class="s4">'b.ico'</span><span class="s2">, </span><span class="s4">'c.ico'</span><span class="s2">]),</span>
+                <span class="s2">(</span><span class="s4">'audio'</span><span class="s2">, [</span><span class="s4">'beep.wav'</span><span class="s2">, </span><span class="s4">'boop.wav'</span><span class="s2">, </span><span class="s4">'sounds.db'</span><span class="s2">]),</span>
+            <span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">data_files</span><span class="s2">) == </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">test_python_requires_simple</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s1">DALS</span><span class="s2">(</span>
+                <span class="s4">&quot;&quot;&quot; 
+            [options] 
+            python_requires=&gt;=2.7 
+            &quot;&quot;&quot;</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">test_python_requires_compound</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s1">DALS</span><span class="s2">(</span>
+                <span class="s4">&quot;&quot;&quot; 
+            [options] 
+            python_requires=&gt;=2.7,!=3.0.* 
+            &quot;&quot;&quot;</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">test_python_requires_invalid</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s1">DALS</span><span class="s2">(</span>
+                <span class="s4">&quot;&quot;&quot; 
+            [options] 
+            python_requires=invalid 
+            &quot;&quot;&quot;</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">Exception</span><span class="s2">):</span>
+            <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+                <span class="s1">dist</span><span class="s2">.</span><span class="s1">parse_config_files</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">test_cmdclass</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">module_path </span><span class="s2">= </span><span class="s1">Path</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s4">&quot;src/custom_build.py&quot;</span><span class="s2">)  </span><span class="s5"># auto discovery for src</span>
+        <span class="s1">module_path</span><span class="s2">.</span><span class="s1">parent</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s1">parents</span><span class="s2">=</span><span class="s0">True</span><span class="s2">, </span><span class="s1">exist_ok</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s1">module_path</span><span class="s2">.</span><span class="s1">write_text</span><span class="s2">(</span>
+            <span class="s4">&quot;from distutils.core import Command</span><span class="s0">\n</span><span class="s4">class CustomCmd(Command): pass</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s1">encoding</span><span class="s2">=</span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+        <span class="s1">setup_cfg </span><span class="s2">= </span><span class="s4">&quot;&quot;&quot; 
+            [options] 
+            cmdclass = 
+                customcmd = custom_build.CustomCmd 
+        &quot;&quot;&quot;</span>
+        <span class="s1">fake_env</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">, </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">cleandoc</span><span class="s2">(</span><span class="s1">setup_cfg</span><span class="s2">))</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s1">cmdclass </span><span class="s2">= </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">cmdclass</span><span class="s2">[</span><span class="s4">'customcmd'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">cmdclass</span><span class="s2">.</span><span class="s1">__name__ </span><span class="s2">== </span><span class="s4">&quot;CustomCmd&quot;</span>
+            <span class="s0">assert </span><span class="s1">cmdclass</span><span class="s2">.</span><span class="s1">__module__ </span><span class="s2">== </span><span class="s4">&quot;custom_build&quot;</span>
+            <span class="s0">assert </span><span class="s1">module_path</span><span class="s2">.</span><span class="s1">samefile</span><span class="s2">(</span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">getfile</span><span class="s2">(</span><span class="s1">cmdclass</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">test_requirements_file</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">fake_env</span><span class="s2">(</span>
+            <span class="s1">tmpdir</span><span class="s2">,</span>
+            <span class="s1">DALS</span><span class="s2">(</span>
+                <span class="s4">&quot;&quot;&quot; 
+            [options] 
+            install_requires = file:requirements.txt 
+            [options.extras_require] 
+            colors = file:requirements-extra.txt 
+            &quot;&quot;&quot;</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'requirements.txt'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'</span><span class="s0">\n</span><span class="s4">docutils&gt;=0.3</span><span class="s0">\n\n</span><span class="s4">'</span><span class="s2">)</span>
+        <span class="s1">tmpdir</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s4">'requirements-extra.txt'</span><span class="s2">).</span><span class="s1">write</span><span class="s2">(</span><span class="s4">'colorama'</span><span class="s2">)</span>
+
+        <span class="s0">with </span><span class="s1">get_dist</span><span class="s2">(</span><span class="s1">tmpdir</span><span class="s2">) </span><span class="s0">as </span><span class="s1">dist</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">install_requires </span><span class="s2">== [</span><span class="s4">'docutils&gt;=0.3'</span><span class="s2">]</span>
+            <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">extras_require </span><span class="s2">== {</span><span class="s4">'colors'</span><span class="s2">: [</span><span class="s4">'colorama'</span><span class="s2">]}</span>
+
+
+<span class="s1">saved_dist_init </span><span class="s2">= </span><span class="s1">_Distribution</span><span class="s2">.</span><span class="s1">__init__</span>
+
+
+<span class="s0">class </span><span class="s1">TestExternalSetters</span><span class="s2">:</span>
+    <span class="s5"># During creation of the setuptools Distribution() object, we call</span>
+    <span class="s5"># the init of the parent distutils Distribution object via</span>
+    <span class="s5"># _Distribution.__init__ ().</span>
+    <span class="s5">#</span>
+    <span class="s5"># It's possible distutils calls out to various keyword</span>
+    <span class="s5"># implementations (i.e. distutils.setup_keywords entry points)</span>
+    <span class="s5"># that may set a range of variables.</span>
+    <span class="s5">#</span>
+    <span class="s5"># This wraps distutil's Distribution.__init__ and simulates</span>
+    <span class="s5"># pbr or something else setting these values.</span>
+    <span class="s0">def </span><span class="s1">_fake_distribution_init</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">dist</span><span class="s2">, </span><span class="s1">attrs</span><span class="s2">):</span>
+        <span class="s1">saved_dist_init</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">, </span><span class="s1">attrs</span><span class="s2">)</span>
+        <span class="s5"># see self._DISTUTILS_UNSUPPORTED_METADATA</span>
+        <span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">long_description_content_type </span><span class="s2">= </span><span class="s4">'text/something'</span>
+        <span class="s5"># Test overwrite setup() args</span>
+        <span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">project_urls </span><span class="s2">= {</span>
+            <span class="s4">'Link One'</span><span class="s2">: </span><span class="s4">'https://example.com/one/'</span><span class="s2">,</span>
+            <span class="s4">'Link Two'</span><span class="s2">: </span><span class="s4">'https://example.com/two/'</span><span class="s2">,</span>
+        <span class="s2">}</span>
+
+    <span class="s2">@</span><span class="s1">patch</span><span class="s2">.</span><span class="s1">object</span><span class="s2">(</span><span class="s1">_Distribution</span><span class="s2">, </span><span class="s4">'__init__'</span><span class="s2">, </span><span class="s1">autospec</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s0">def </span><span class="s1">test_external_setters</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">mock_parent_init</span><span class="s2">, </span><span class="s1">tmpdir</span><span class="s2">):</span>
+        <span class="s1">mock_parent_init</span><span class="s2">.</span><span class="s1">side_effect </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fake_distribution_init</span>
+
+        <span class="s1">dist </span><span class="s2">= </span><span class="s1">Distribution</span><span class="s2">(</span><span class="s1">attrs</span><span class="s2">={</span><span class="s4">'project_urls'</span><span class="s2">: {</span><span class="s4">'will_be'</span><span class="s2">: </span><span class="s4">'ignored'</span><span class="s2">}})</span>
+
+        <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">long_description_content_type </span><span class="s2">== </span><span class="s4">'text/something'</span>
+        <span class="s0">assert </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">metadata</span><span class="s2">.</span><span class="s1">project_urls </span><span class="s2">== {</span>
+            <span class="s4">'Link One'</span><span class="s2">: </span><span class="s4">'https://example.com/one/'</span><span class="s2">,</span>
+            <span class="s4">'Link Two'</span><span class="s2">: </span><span class="s4">'https://example.com/two/'</span><span class="s2">,</span>
+        <span class="s2">}</span>
+</pre>
+</body>
+</html>

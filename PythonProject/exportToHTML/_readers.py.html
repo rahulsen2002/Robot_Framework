@@ -1,0 +1,273 @@
+<html>
+<head>
+<title>_readers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #a5c261;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_readers.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Code to read HTTP data</span>
+<span class="s0">#</span>
+<span class="s0"># Strategy: each reader is a callable which takes a ReceiveBuffer object, and</span>
+<span class="s0"># either:</span>
+<span class="s0"># 1) consumes some of it and returns an Event</span>
+<span class="s0"># 2) raises a LocalProtocolError (for consistency -- e.g. we call validate()</span>
+<span class="s0">#    and it might raise a LocalProtocolError, so simpler just to always use</span>
+<span class="s0">#    this)</span>
+<span class="s0"># 3) returns None, meaning &quot;I need more data&quot;</span>
+<span class="s0">#</span>
+<span class="s0"># If they have a .read_eof attribute, then this will be called if an EOF is</span>
+<span class="s0"># received -- but this is optional. Either way, the actual ConnectionClosed</span>
+<span class="s0"># event will be generated afterwards.</span>
+<span class="s0">#</span>
+<span class="s0"># READERS is a dict describing how to pick a reader. It maps states to either:</span>
+<span class="s0"># - a reader</span>
+<span class="s0"># - or, for body readers, a dict of per-framing reader factories</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">Iterable</span><span class="s3">, </span><span class="s1">NoReturn</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Type</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_abnf </span><span class="s2">import </span><span class="s1">chunk_header</span><span class="s3">, </span><span class="s1">header_field</span><span class="s3">, </span><span class="s1">request_line</span><span class="s3">, </span><span class="s1">status_line</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_events </span><span class="s2">import </span><span class="s1">Data</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">, </span><span class="s1">InformationalResponse</span><span class="s3">, </span><span class="s1">Request</span><span class="s3">, </span><span class="s1">Response</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_receivebuffer </span><span class="s2">import </span><span class="s1">ReceiveBuffer</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_state </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">CLIENT</span><span class="s3">,</span>
+    <span class="s1">CLOSED</span><span class="s3">,</span>
+    <span class="s1">DONE</span><span class="s3">,</span>
+    <span class="s1">IDLE</span><span class="s3">,</span>
+    <span class="s1">MUST_CLOSE</span><span class="s3">,</span>
+    <span class="s1">SEND_BODY</span><span class="s3">,</span>
+    <span class="s1">SEND_RESPONSE</span><span class="s3">,</span>
+    <span class="s1">SERVER</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_util </span><span class="s2">import </span><span class="s1">LocalProtocolError</span><span class="s3">, </span><span class="s1">RemoteProtocolError</span><span class="s3">, </span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">validate</span>
+
+<span class="s1">__all__ </span><span class="s3">= [</span><span class="s4">&quot;READERS&quot;</span><span class="s3">]</span>
+
+<span class="s1">header_field_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">header_field</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;ascii&quot;</span><span class="s3">))</span>
+<span class="s1">obs_fold_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s5">rb&quot;[ \t]+&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_obsolete_line_fold</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]) </span><span class="s1">-&gt; Iterable</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]:</span>
+    <span class="s1">it </span><span class="s3">= </span><span class="s1">iter</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">)</span>
+    <span class="s1">last</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = </span><span class="s2">None</span>
+    <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">it</span><span class="s3">:</span>
+        <span class="s1">match </span><span class="s3">= </span><span class="s1">obs_fold_re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">match</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">last </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;continuation line at start of headers&quot;</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">last</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">):</span>
+                <span class="s0"># Cast to a mutable type, avoiding copy on append to ensure O(n) time</span>
+                <span class="s1">last </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">(</span><span class="s1">last</span><span class="s3">)</span>
+            <span class="s1">last </span><span class="s3">+= </span><span class="s5">b&quot; &quot;</span>
+            <span class="s1">last </span><span class="s3">+= </span><span class="s1">line</span><span class="s3">[</span><span class="s1">match</span><span class="s3">.</span><span class="s1">end</span><span class="s3">() :]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">last </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s1">last</span>
+            <span class="s1">last </span><span class="s3">= </span><span class="s1">line</span>
+    <span class="s2">if </span><span class="s1">last </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">yield </span><span class="s1">last</span>
+
+
+<span class="s2">def </span><span class="s1">_decode_header_lines</span><span class="s3">(</span>
+    <span class="s1">lines</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">],</span>
+<span class="s3">) </span><span class="s1">-&gt; Iterable</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">]]:</span>
+    <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">_obsolete_line_fold</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">):</span>
+        <span class="s1">matches </span><span class="s3">= </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">header_field_re</span><span class="s3">, </span><span class="s1">line</span><span class="s3">, </span><span class="s4">&quot;illegal header line: {!r}&quot;</span><span class="s3">, </span><span class="s1">line</span><span class="s3">)</span>
+        <span class="s2">yield </span><span class="s3">(</span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;field_name&quot;</span><span class="s3">], </span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;field_value&quot;</span><span class="s3">])</span>
+
+
+<span class="s1">request_line_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">request_line</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;ascii&quot;</span><span class="s3">))</span>
+
+
+<span class="s2">def </span><span class="s1">maybe_read_from_IDLE_client</span><span class="s3">(</span><span class="s1">buf</span><span class="s3">: </span><span class="s1">ReceiveBuffer</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">Request</span><span class="s3">]:</span>
+    <span class="s1">lines </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_lines</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">lines </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">is_next_line_obviously_invalid_request_line</span><span class="s3">():</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;illegal request line&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+    <span class="s2">if not </span><span class="s1">lines</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;no request line received&quot;</span><span class="s3">)</span>
+    <span class="s1">matches </span><span class="s3">= </span><span class="s1">validate</span><span class="s3">(</span>
+        <span class="s1">request_line_re</span><span class="s3">, </span><span class="s1">lines</span><span class="s3">[</span><span class="s6">0</span><span class="s3">], </span><span class="s4">&quot;illegal request line: {!r}&quot;</span><span class="s3">, </span><span class="s1">lines</span><span class="s3">[</span><span class="s6">0</span><span class="s3">]</span>
+    <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">Request</span><span class="s3">(</span>
+        <span class="s1">headers</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">_decode_header_lines</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">[</span><span class="s6">1</span><span class="s3">:])), </span><span class="s1">_parsed</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, **</span><span class="s1">matches</span>
+    <span class="s3">)</span>
+
+
+<span class="s1">status_line_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">status_line</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;ascii&quot;</span><span class="s3">))</span>
+
+
+<span class="s2">def </span><span class="s1">maybe_read_from_SEND_RESPONSE_server</span><span class="s3">(</span>
+    <span class="s1">buf</span><span class="s3">: </span><span class="s1">ReceiveBuffer</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Union</span><span class="s3">[</span><span class="s1">InformationalResponse</span><span class="s3">, </span><span class="s1">Response</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+    <span class="s1">lines </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_lines</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">lines </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">is_next_line_obviously_invalid_request_line</span><span class="s3">():</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;illegal request line&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+    <span class="s2">if not </span><span class="s1">lines</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;no response line received&quot;</span><span class="s3">)</span>
+    <span class="s1">matches </span><span class="s3">= </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">status_line_re</span><span class="s3">, </span><span class="s1">lines</span><span class="s3">[</span><span class="s6">0</span><span class="s3">], </span><span class="s4">&quot;illegal status line: {!r}&quot;</span><span class="s3">, </span><span class="s1">lines</span><span class="s3">[</span><span class="s6">0</span><span class="s3">])</span>
+    <span class="s1">http_version </span><span class="s3">= (</span>
+        <span class="s5">b&quot;1.1&quot; </span><span class="s2">if </span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;http_version&quot;</span><span class="s3">] </span><span class="s2">is None else </span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;http_version&quot;</span><span class="s3">]</span>
+    <span class="s3">)</span>
+    <span class="s1">reason </span><span class="s3">= </span><span class="s5">b&quot;&quot; </span><span class="s2">if </span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;reason&quot;</span><span class="s3">] </span><span class="s2">is None else </span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;reason&quot;</span><span class="s3">]</span>
+    <span class="s1">status_code </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;status_code&quot;</span><span class="s3">])</span>
+    <span class="s1">class_</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">InformationalResponse</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Response</span><span class="s3">]] = (</span>
+        <span class="s1">InformationalResponse </span><span class="s2">if </span><span class="s1">status_code </span><span class="s3">&lt; </span><span class="s6">200 </span><span class="s2">else </span><span class="s1">Response</span>
+    <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">class_</span><span class="s3">(</span>
+        <span class="s1">headers</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">_decode_header_lines</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">[</span><span class="s6">1</span><span class="s3">:])),</span>
+        <span class="s1">_parsed</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">status_code</span><span class="s3">=</span><span class="s1">status_code</span><span class="s3">,</span>
+        <span class="s1">reason</span><span class="s3">=</span><span class="s1">reason</span><span class="s3">,</span>
+        <span class="s1">http_version</span><span class="s3">=</span><span class="s1">http_version</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ContentLengthReader</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">length</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_length </span><span class="s3">= </span><span class="s1">length</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_remaining </span><span class="s3">= </span><span class="s1">length</span>
+
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">buf</span><span class="s3">: </span><span class="s1">ReceiveBuffer</span><span class="s3">) </span><span class="s1">-&gt; Union</span><span class="s3">[</span><span class="s1">Data</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_remaining </span><span class="s3">== </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">EndOfMessage</span><span class="s3">()</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_at_most</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_remaining</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_remaining </span><span class="s3">-= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">Data</span><span class="s3">(</span><span class="s1">data</span><span class="s3">=</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">read_eof</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; NoReturn</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+            <span class="s4">&quot;peer closed connection without sending complete message body &quot;</span>
+            <span class="s4">&quot;(received {} bytes, expected {})&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_length </span><span class="s3">- </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_remaining</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_length</span>
+            <span class="s3">)</span>
+        <span class="s3">)</span>
+
+
+<span class="s1">chunk_header_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">chunk_header</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;ascii&quot;</span><span class="s3">))</span>
+
+
+<span class="s2">class </span><span class="s1">ChunkedReader</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">= </span><span class="s6">0</span>
+        <span class="s0"># After reading a chunk, we have to throw away the trailing \r\n.</span>
+        <span class="s0"># This tracks the bytes that we need to match and throw away.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard </span><span class="s3">= </span><span class="s5">b&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_reading_trailer </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">buf</span><span class="s3">: </span><span class="s1">ReceiveBuffer</span><span class="s3">) </span><span class="s1">-&gt; Union</span><span class="s3">[</span><span class="s1">Data</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_reading_trailer</span><span class="s3">:</span>
+            <span class="s1">lines </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_lines</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">lines </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s2">return </span><span class="s1">EndOfMessage</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">=</span><span class="s1">list</span><span class="s3">(</span><span class="s1">_decode_header_lines</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">)))</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_at_most</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard</span><span class="s3">))</span>
+            <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s2">if </span><span class="s1">data </span><span class="s3">!= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard</span><span class="s3">[: </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)]:</span>
+                <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                    <span class="s4">f&quot;malformed chunk footer: </span><span class="s2">{</span><span class="s1">data</span><span class="s2">!r} </span><span class="s4">(expected </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard</span><span class="s2">!r}</span><span class="s4">)&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard</span><span class="s3">[</span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) :]</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s0"># else, fall through and read some more</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard </span><span class="s3">== </span><span class="s5">b&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">== </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s0"># We need to refill our chunk count</span>
+            <span class="s1">chunk_header </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_next_line</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">chunk_header </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s1">matches </span><span class="s3">= </span><span class="s1">validate</span><span class="s3">(</span>
+                <span class="s1">chunk_header_re</span><span class="s3">,</span>
+                <span class="s1">chunk_header</span><span class="s3">,</span>
+                <span class="s4">&quot;illegal chunk header: {!r}&quot;</span><span class="s3">,</span>
+                <span class="s1">chunk_header</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s0"># XX FIXME: we discard chunk extensions. Does anyone care?</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">matches</span><span class="s3">[</span><span class="s4">&quot;chunk_size&quot;</span><span class="s3">], </span><span class="s1">base</span><span class="s3">=</span><span class="s6">16</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">== </span><span class="s6">0</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_reading_trailer </span><span class="s3">= </span><span class="s2">True</span>
+                <span class="s2">return </span><span class="s1">self</span><span class="s3">(</span><span class="s1">buf</span><span class="s3">)</span>
+            <span class="s1">chunk_start </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">chunk_start </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">&gt; </span><span class="s6">0</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_at_most</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">-= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_in_chunk </span><span class="s3">== </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_bytes_to_discard </span><span class="s3">= </span><span class="s5">b&quot;</span><span class="s2">\r\n</span><span class="s5">&quot;</span>
+            <span class="s1">chunk_end </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">chunk_end </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">return </span><span class="s1">Data</span><span class="s3">(</span><span class="s1">data</span><span class="s3">=</span><span class="s1">data</span><span class="s3">, </span><span class="s1">chunk_start</span><span class="s3">=</span><span class="s1">chunk_start</span><span class="s3">, </span><span class="s1">chunk_end</span><span class="s3">=</span><span class="s1">chunk_end</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">read_eof</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; NoReturn</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">RemoteProtocolError</span><span class="s3">(</span>
+            <span class="s4">&quot;peer closed connection without sending complete message body &quot;</span>
+            <span class="s4">&quot;(incomplete chunked read)&quot;</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Http10Reader</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__call__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">buf</span><span class="s3">: </span><span class="s1">ReceiveBuffer</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">Data</span><span class="s3">]:</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">buf</span><span class="s3">.</span><span class="s1">maybe_extract_at_most</span><span class="s3">(</span><span class="s6">999999999</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">Data</span><span class="s3">(</span><span class="s1">data</span><span class="s3">=</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">read_eof</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; EndOfMessage</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">EndOfMessage</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">expect_nothing</span><span class="s3">(</span><span class="s1">buf</span><span class="s3">: </span><span class="s1">ReceiveBuffer</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">buf</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;Got data when expecting EOF&quot;</span><span class="s3">)</span>
+    <span class="s2">return None</span>
+
+
+<span class="s1">ReadersType </span><span class="s3">= </span><span class="s1">Dict</span><span class="s3">[</span>
+    <span class="s1">Union</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]],</span>
+    <span class="s1">Union</span><span class="s3">[</span><span class="s1">Callable</span><span class="s3">[..., </span><span class="s1">Any</span><span class="s3">], </span><span class="s1">Dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">[..., </span><span class="s1">Any</span><span class="s3">]]],</span>
+<span class="s3">]</span>
+
+<span class="s1">READERS</span><span class="s3">: </span><span class="s1">ReadersType </span><span class="s3">= {</span>
+    <span class="s3">(</span><span class="s1">CLIENT</span><span class="s3">, </span><span class="s1">IDLE</span><span class="s3">): </span><span class="s1">maybe_read_from_IDLE_client</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">SERVER</span><span class="s3">, </span><span class="s1">IDLE</span><span class="s3">): </span><span class="s1">maybe_read_from_SEND_RESPONSE_server</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">SERVER</span><span class="s3">, </span><span class="s1">SEND_RESPONSE</span><span class="s3">): </span><span class="s1">maybe_read_from_SEND_RESPONSE_server</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">CLIENT</span><span class="s3">, </span><span class="s1">DONE</span><span class="s3">): </span><span class="s1">expect_nothing</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">CLIENT</span><span class="s3">, </span><span class="s1">MUST_CLOSE</span><span class="s3">): </span><span class="s1">expect_nothing</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">CLIENT</span><span class="s3">, </span><span class="s1">CLOSED</span><span class="s3">): </span><span class="s1">expect_nothing</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">SERVER</span><span class="s3">, </span><span class="s1">DONE</span><span class="s3">): </span><span class="s1">expect_nothing</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">SERVER</span><span class="s3">, </span><span class="s1">MUST_CLOSE</span><span class="s3">): </span><span class="s1">expect_nothing</span><span class="s3">,</span>
+    <span class="s3">(</span><span class="s1">SERVER</span><span class="s3">, </span><span class="s1">CLOSED</span><span class="s3">): </span><span class="s1">expect_nothing</span><span class="s3">,</span>
+    <span class="s1">SEND_BODY</span><span class="s3">: {</span>
+        <span class="s4">&quot;chunked&quot;</span><span class="s3">: </span><span class="s1">ChunkedReader</span><span class="s3">,</span>
+        <span class="s4">&quot;content-length&quot;</span><span class="s3">: </span><span class="s1">ContentLengthReader</span><span class="s3">,</span>
+        <span class="s4">&quot;http/1.0&quot;</span><span class="s3">: </span><span class="s1">Http10Reader</span><span class="s3">,</span>
+    <span class="s3">},</span>
+<span class="s3">}</span>
+</pre>
+</body>
+</html>

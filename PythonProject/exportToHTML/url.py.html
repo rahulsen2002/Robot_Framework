@@ -1,0 +1,493 @@
+<html>
+<head>
+<title>url.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+url.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">typing</span>
+
+<span class="s0">from </span><span class="s2">..</span><span class="s1">exceptions </span><span class="s0">import </span><span class="s1">LocationParseError</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">util </span><span class="s0">import </span><span class="s1">to_str</span>
+
+<span class="s3"># We only want to normalize urls with an HTTP(S) scheme.</span>
+<span class="s3"># urllib3 infers URLs without a scheme (None) to be http.</span>
+<span class="s1">_NORMALIZABLE_SCHEMES </span><span class="s2">= (</span><span class="s4">&quot;http&quot;</span><span class="s2">, </span><span class="s4">&quot;https&quot;</span><span class="s2">, </span><span class="s0">None</span><span class="s2">)</span>
+
+<span class="s3"># Almost all of these patterns were derived from the</span>
+<span class="s3"># 'rfc3986' module: https://github.com/python-hyper/rfc3986</span>
+<span class="s1">_PERCENT_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">r&quot;%[a-fA-F0-9]{2}&quot;</span><span class="s2">)</span>
+<span class="s1">_SCHEME_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">r&quot;^(?:[a-zA-Z][a-zA-Z0-9+-]*:|/)&quot;</span><span class="s2">)</span>
+<span class="s1">_URI_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span>
+    <span class="s4">r&quot;^(?:([a-zA-Z][a-zA-Z0-9+.-]*):)?&quot;</span>
+    <span class="s4">r&quot;(?://([^\\/?#]*))?&quot;</span>
+    <span class="s4">r&quot;([^?#]*)&quot;</span>
+    <span class="s4">r&quot;(?:\?([^#]*))?&quot;</span>
+    <span class="s4">r&quot;(?:#(.*))?$&quot;</span><span class="s2">,</span>
+    <span class="s1">re</span><span class="s2">.</span><span class="s1">UNICODE </span><span class="s2">| </span><span class="s1">re</span><span class="s2">.</span><span class="s1">DOTALL</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s1">_IPV4_PAT </span><span class="s2">= </span><span class="s4">r&quot;(?:[0-9]{1,3}\.){3}[0-9]{1,3}&quot;</span>
+<span class="s1">_HEX_PAT </span><span class="s2">= </span><span class="s4">&quot;[0-9A-Fa-f]{1,4}&quot;</span>
+<span class="s1">_LS32_PAT </span><span class="s2">= </span><span class="s4">&quot;(?:{hex}:{hex}|{ipv4})&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span><span class="s1">hex</span><span class="s2">=</span><span class="s1">_HEX_PAT</span><span class="s2">, </span><span class="s1">ipv4</span><span class="s2">=</span><span class="s1">_IPV4_PAT</span><span class="s2">)</span>
+<span class="s1">_subs </span><span class="s2">= {</span><span class="s4">&quot;hex&quot;</span><span class="s2">: </span><span class="s1">_HEX_PAT</span><span class="s2">, </span><span class="s4">&quot;ls32&quot;</span><span class="s2">: </span><span class="s1">_LS32_PAT</span><span class="s2">}</span>
+<span class="s1">_variations </span><span class="s2">= [</span>
+    <span class="s3">#                            6( h16 &quot;:&quot; ) ls32</span>
+    <span class="s4">&quot;(?:%(hex)s:){6}%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3">#                       &quot;::&quot; 5( h16 &quot;:&quot; ) ls32</span>
+    <span class="s4">&quot;::(?:%(hex)s:){5}%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [               h16 ] &quot;::&quot; 4( h16 &quot;:&quot; ) ls32</span>
+    <span class="s4">&quot;(?:%(hex)s)?::(?:%(hex)s:){4}%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [ *1( h16 &quot;:&quot; ) h16 ] &quot;::&quot; 3( h16 &quot;:&quot; ) ls32</span>
+    <span class="s4">&quot;(?:(?:%(hex)s:)?%(hex)s)?::(?:%(hex)s:){3}%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [ *2( h16 &quot;:&quot; ) h16 ] &quot;::&quot; 2( h16 &quot;:&quot; ) ls32</span>
+    <span class="s4">&quot;(?:(?:%(hex)s:){0,2}%(hex)s)?::(?:%(hex)s:){2}%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [ *3( h16 &quot;:&quot; ) h16 ] &quot;::&quot;    h16 &quot;:&quot;   ls32</span>
+    <span class="s4">&quot;(?:(?:%(hex)s:){0,3}%(hex)s)?::%(hex)s:%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [ *4( h16 &quot;:&quot; ) h16 ] &quot;::&quot;              ls32</span>
+    <span class="s4">&quot;(?:(?:%(hex)s:){0,4}%(hex)s)?::%(ls32)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [ *5( h16 &quot;:&quot; ) h16 ] &quot;::&quot;              h16</span>
+    <span class="s4">&quot;(?:(?:%(hex)s:){0,5}%(hex)s)?::%(hex)s&quot;</span><span class="s2">,</span>
+    <span class="s3"># [ *6( h16 &quot;:&quot; ) h16 ] &quot;::&quot;</span>
+    <span class="s4">&quot;(?:(?:%(hex)s:){0,6}%(hex)s)?::&quot;</span><span class="s2">,</span>
+<span class="s2">]</span>
+
+<span class="s1">_UNRESERVED_PAT </span><span class="s2">= </span><span class="s4">r&quot;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._\-~&quot;</span>
+<span class="s1">_IPV6_PAT </span><span class="s2">= </span><span class="s4">&quot;(?:&quot; </span><span class="s2">+ </span><span class="s4">&quot;|&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">([</span><span class="s1">x </span><span class="s2">% </span><span class="s1">_subs </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">_variations</span><span class="s2">]) + </span><span class="s4">&quot;)&quot;</span>
+<span class="s1">_ZONE_ID_PAT </span><span class="s2">= </span><span class="s4">&quot;(?:%25|%)(?:[&quot; </span><span class="s2">+ </span><span class="s1">_UNRESERVED_PAT </span><span class="s2">+ </span><span class="s4">&quot;]|%[a-fA-F0-9]{2})+&quot;</span>
+<span class="s1">_IPV6_ADDRZ_PAT </span><span class="s2">= </span><span class="s4">r&quot;\[&quot; </span><span class="s2">+ </span><span class="s1">_IPV6_PAT </span><span class="s2">+ </span><span class="s4">r&quot;(?:&quot; </span><span class="s2">+ </span><span class="s1">_ZONE_ID_PAT </span><span class="s2">+ </span><span class="s4">r&quot;)?\]&quot;</span>
+<span class="s1">_REG_NAME_PAT </span><span class="s2">= </span><span class="s4">r&quot;(?:[^\[\]%:/?#]|%[a-fA-F0-9]{2})*&quot;</span>
+<span class="s1">_TARGET_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">r&quot;^(/[^?#]*)(?:\?([^#]*))?(?:#.*)?$&quot;</span><span class="s2">)</span>
+
+<span class="s1">_IPV4_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">&quot;^&quot; </span><span class="s2">+ </span><span class="s1">_IPV4_PAT </span><span class="s2">+ </span><span class="s4">&quot;$&quot;</span><span class="s2">)</span>
+<span class="s1">_IPV6_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">&quot;^&quot; </span><span class="s2">+ </span><span class="s1">_IPV6_PAT </span><span class="s2">+ </span><span class="s4">&quot;$&quot;</span><span class="s2">)</span>
+<span class="s1">_IPV6_ADDRZ_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">&quot;^&quot; </span><span class="s2">+ </span><span class="s1">_IPV6_ADDRZ_PAT </span><span class="s2">+ </span><span class="s4">&quot;$&quot;</span><span class="s2">)</span>
+<span class="s1">_BRACELESS_IPV6_ADDRZ_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">&quot;^&quot; </span><span class="s2">+ </span><span class="s1">_IPV6_ADDRZ_PAT</span><span class="s2">[</span><span class="s5">2</span><span class="s2">:-</span><span class="s5">2</span><span class="s2">] + </span><span class="s4">&quot;$&quot;</span><span class="s2">)</span>
+<span class="s1">_ZONE_ID_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">&quot;(&quot; </span><span class="s2">+ </span><span class="s1">_ZONE_ID_PAT </span><span class="s2">+ </span><span class="s4">r&quot;)\]$&quot;</span><span class="s2">)</span>
+
+<span class="s1">_HOST_PORT_PAT </span><span class="s2">= (</span><span class="s4">&quot;^(%s|%s|%s)(?::0*?(|0|[1-9][0-9]{0,4}))?$&quot;</span><span class="s2">) % (</span>
+    <span class="s1">_REG_NAME_PAT</span><span class="s2">,</span>
+    <span class="s1">_IPV4_PAT</span><span class="s2">,</span>
+    <span class="s1">_IPV6_ADDRZ_PAT</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s1">_HOST_PORT_RE </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">_HOST_PORT_PAT</span><span class="s2">, </span><span class="s1">re</span><span class="s2">.</span><span class="s1">UNICODE </span><span class="s2">| </span><span class="s1">re</span><span class="s2">.</span><span class="s1">DOTALL</span><span class="s2">)</span>
+
+<span class="s1">_UNRESERVED_CHARS </span><span class="s2">= </span><span class="s1">set</span><span class="s2">(</span>
+    <span class="s4">&quot;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-~&quot;</span>
+<span class="s2">)</span>
+<span class="s1">_SUB_DELIM_CHARS </span><span class="s2">= </span><span class="s1">set</span><span class="s2">(</span><span class="s4">&quot;!$&amp;'()*+,;=&quot;</span><span class="s2">)</span>
+<span class="s1">_USERINFO_CHARS </span><span class="s2">= </span><span class="s1">_UNRESERVED_CHARS </span><span class="s2">| </span><span class="s1">_SUB_DELIM_CHARS </span><span class="s2">| {</span><span class="s4">&quot;:&quot;</span><span class="s2">}</span>
+<span class="s1">_PATH_CHARS </span><span class="s2">= </span><span class="s1">_USERINFO_CHARS </span><span class="s2">| {</span><span class="s4">&quot;@&quot;</span><span class="s2">, </span><span class="s4">&quot;/&quot;</span><span class="s2">}</span>
+<span class="s1">_QUERY_CHARS </span><span class="s2">= </span><span class="s1">_FRAGMENT_CHARS </span><span class="s2">= </span><span class="s1">_PATH_CHARS </span><span class="s2">| {</span><span class="s4">&quot;?&quot;</span><span class="s2">}</span>
+
+
+<span class="s0">class </span><span class="s1">Url</span><span class="s2">(</span>
+    <span class="s1">typing</span><span class="s2">.</span><span class="s1">NamedTuple</span><span class="s2">(</span>
+        <span class="s4">&quot;Url&quot;</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;scheme&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]),</span>
+            <span class="s2">(</span><span class="s4">&quot;auth&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]),</span>
+            <span class="s2">(</span><span class="s4">&quot;host&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]),</span>
+            <span class="s2">(</span><span class="s4">&quot;port&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]),</span>
+            <span class="s2">(</span><span class="s4">&quot;path&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]),</span>
+            <span class="s2">(</span><span class="s4">&quot;query&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]),</span>
+            <span class="s2">(</span><span class="s4">&quot;fragment&quot;</span><span class="s2">, </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Optional</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]),</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+<span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Data structure for representing an HTTP URL. Used as a return value for 
+    :func:`parse_url`. Both the scheme and host are normalized as they are 
+    both case-insensitive according to RFC 3986. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__new__</span><span class="s2">(  </span><span class="s3"># type: ignore[no-untyped-def]</span>
+        <span class="s1">cls</span><span class="s2">,</span>
+        <span class="s1">scheme</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">auth</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">port</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">path</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">query</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">fragment</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s0">if </span><span class="s1">path </span><span class="s0">and not </span><span class="s1">path</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;/&quot;</span><span class="s2">):</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s4">&quot;/&quot; </span><span class="s2">+ </span><span class="s1">path</span>
+        <span class="s0">if </span><span class="s1">scheme </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">scheme </span><span class="s2">= </span><span class="s1">scheme</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+        <span class="s0">return </span><span class="s1">super</span><span class="s2">().</span><span class="s1">__new__</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">, </span><span class="s1">auth</span><span class="s2">, </span><span class="s1">host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">hostname</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;For backwards-compatibility with urlparse. We're nice like that.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">host</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">request_uri</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Absolute path including the query string.&quot;&quot;&quot;</span>
+        <span class="s1">uri </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">path </span><span class="s0">or </span><span class="s4">&quot;/&quot;</span>
+
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">query </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">uri </span><span class="s2">+= </span><span class="s4">&quot;?&quot; </span><span class="s2">+ </span><span class="s1">self</span><span class="s2">.</span><span class="s1">query</span>
+
+        <span class="s0">return </span><span class="s1">uri</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">authority</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot; 
+        Authority component as defined in RFC 3986 3.2. 
+        This includes userinfo (auth), host and port. 
+ 
+        i.e. 
+            userinfo@host:port 
+        &quot;&quot;&quot;</span>
+        <span class="s1">userinfo </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">auth</span>
+        <span class="s1">netloc </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">netloc</span>
+        <span class="s0">if </span><span class="s1">netloc </span><span class="s0">is None or </span><span class="s1">userinfo </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">netloc</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">userinfo</span><span class="s0">}</span><span class="s4">@</span><span class="s0">{</span><span class="s1">netloc</span><span class="s0">}</span><span class="s4">&quot;</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">netloc</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot; 
+        Network location including host and port. 
+ 
+        If you need the equivalent of urllib.parse's ``netloc``, 
+        use the ``authority`` property instead. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">host </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">port</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">host</span><span class="s0">}</span><span class="s4">:</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">port</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">host</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">url</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot; 
+        Convert self into a url 
+ 
+        This function should more or less round-trip with :func:`.parse_url`. The 
+        returned url may not be exactly the same as the url inputted to 
+        :func:`.parse_url`, but it should be equivalent by the RFC (e.g., urls 
+        with a blank port will have : removed). 
+ 
+        Example: 
+ 
+        .. code-block:: python 
+ 
+            import urllib3 
+ 
+            U = urllib3.util.parse_url(&quot;https://google.com/mail/&quot;) 
+ 
+            print(U.url) 
+            # &quot;https://google.com/mail/&quot; 
+ 
+            print( urllib3.util.Url(&quot;https&quot;, &quot;username:password&quot;, 
+                                    &quot;host.com&quot;, 80, &quot;/path&quot;, &quot;query&quot;, &quot;fragment&quot; 
+                                    ).url 
+                ) 
+            # &quot;https://username:password@host.com:80/path?query#fragment&quot; 
+        &quot;&quot;&quot;</span>
+        <span class="s1">scheme</span><span class="s2">, </span><span class="s1">auth</span><span class="s2">, </span><span class="s1">host</span><span class="s2">, </span><span class="s1">port</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment </span><span class="s2">= </span><span class="s1">self</span>
+        <span class="s1">url </span><span class="s2">= </span><span class="s4">&quot;&quot;</span>
+
+        <span class="s3"># We use &quot;is not None&quot; we want things to happen with empty strings (or 0 port)</span>
+        <span class="s0">if </span><span class="s1">scheme </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s1">scheme </span><span class="s2">+ </span><span class="s4">&quot;://&quot;</span>
+        <span class="s0">if </span><span class="s1">auth </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s1">auth </span><span class="s2">+ </span><span class="s4">&quot;@&quot;</span>
+        <span class="s0">if </span><span class="s1">host </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s1">host</span>
+        <span class="s0">if </span><span class="s1">port </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s4">&quot;:&quot; </span><span class="s2">+ </span><span class="s1">str</span><span class="s2">(</span><span class="s1">port</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">path </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s1">path</span>
+        <span class="s0">if </span><span class="s1">query </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s4">&quot;?&quot; </span><span class="s2">+ </span><span class="s1">query</span>
+        <span class="s0">if </span><span class="s1">fragment </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">url </span><span class="s2">+= </span><span class="s4">&quot;#&quot; </span><span class="s2">+ </span><span class="s1">fragment</span>
+
+        <span class="s0">return </span><span class="s1">url</span>
+
+    <span class="s0">def </span><span class="s1">__str__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">url</span>
+
+
+<span class="s2">@</span><span class="s1">typing</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span>
+    <span class="s1">component</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">allowed_chars</span><span class="s2">: </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Container</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]</span>
+<span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:  </span><span class="s3"># Abstract</span>
+    <span class="s2">...</span>
+
+
+<span class="s2">@</span><span class="s1">typing</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span>
+    <span class="s1">component</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s1">allowed_chars</span><span class="s2">: </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Container</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:  </span><span class="s3"># Abstract</span>
+    <span class="s2">...</span>
+
+
+<span class="s0">def </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span>
+    <span class="s1">component</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">, </span><span class="s1">allowed_chars</span><span class="s2">: </span><span class="s1">typing</span><span class="s2">.</span><span class="s1">Container</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]</span>
+<span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Percent-encodes a URI component without reapplying 
+    onto an already percent-encoded component. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">component </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">component</span>
+
+    <span class="s1">component </span><span class="s2">= </span><span class="s1">to_str</span><span class="s2">(</span><span class="s1">component</span><span class="s2">)</span>
+
+    <span class="s3"># Normalize existing percent-encoded bytes.</span>
+    <span class="s3"># Try to see if the component we're encoding is already percent-encoded</span>
+    <span class="s3"># so we can skip all '%' characters but still encode all others.</span>
+    <span class="s1">component</span><span class="s2">, </span><span class="s1">percent_encodings </span><span class="s2">= </span><span class="s1">_PERCENT_RE</span><span class="s2">.</span><span class="s1">subn</span><span class="s2">(</span>
+        <span class="s0">lambda </span><span class="s1">match</span><span class="s2">: </span><span class="s1">match</span><span class="s2">.</span><span class="s1">group</span><span class="s2">(</span><span class="s5">0</span><span class="s2">).</span><span class="s1">upper</span><span class="s2">(), </span><span class="s1">component</span>
+    <span class="s2">)</span>
+
+    <span class="s1">uri_bytes </span><span class="s2">= </span><span class="s1">component</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s4">&quot;surrogatepass&quot;</span><span class="s2">)</span>
+    <span class="s1">is_percent_encoded </span><span class="s2">= </span><span class="s1">percent_encodings </span><span class="s2">== </span><span class="s1">uri_bytes</span><span class="s2">.</span><span class="s1">count</span><span class="s2">(</span><span class="s7">b&quot;%&quot;</span><span class="s2">)</span>
+    <span class="s1">encoded_component </span><span class="s2">= </span><span class="s1">bytearray</span><span class="s2">()</span>
+
+    <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">len</span><span class="s2">(</span><span class="s1">uri_bytes</span><span class="s2">)):</span>
+        <span class="s3"># Will return a single character bytestring</span>
+        <span class="s1">byte </span><span class="s2">= </span><span class="s1">uri_bytes</span><span class="s2">[</span><span class="s1">i </span><span class="s2">: </span><span class="s1">i </span><span class="s2">+ </span><span class="s5">1</span><span class="s2">]</span>
+        <span class="s1">byte_ord </span><span class="s2">= </span><span class="s1">ord</span><span class="s2">(</span><span class="s1">byte</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s2">(</span><span class="s1">is_percent_encoded </span><span class="s0">and </span><span class="s1">byte </span><span class="s2">== </span><span class="s7">b&quot;%&quot;</span><span class="s2">) </span><span class="s0">or </span><span class="s2">(</span>
+            <span class="s1">byte_ord </span><span class="s2">&lt; </span><span class="s5">128 </span><span class="s0">and </span><span class="s1">byte</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">() </span><span class="s0">in </span><span class="s1">allowed_chars</span>
+        <span class="s2">):</span>
+            <span class="s1">encoded_component </span><span class="s2">+= </span><span class="s1">byte</span>
+            <span class="s0">continue</span>
+        <span class="s1">encoded_component</span><span class="s2">.</span><span class="s1">extend</span><span class="s2">(</span><span class="s7">b&quot;%&quot; </span><span class="s2">+ (</span><span class="s1">hex</span><span class="s2">(</span><span class="s1">byte_ord</span><span class="s2">)[</span><span class="s5">2</span><span class="s2">:].</span><span class="s1">encode</span><span class="s2">().</span><span class="s1">zfill</span><span class="s2">(</span><span class="s5">2</span><span class="s2">).</span><span class="s1">upper</span><span class="s2">()))</span>
+
+    <span class="s0">return </span><span class="s1">encoded_component</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">_remove_path_dot_segments</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s3"># See http://tools.ietf.org/html/rfc3986#section-5.2.4 for pseudo-code</span>
+    <span class="s1">segments </span><span class="s2">= </span><span class="s1">path</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;/&quot;</span><span class="s2">)  </span><span class="s3"># Turn the path into a list of segments</span>
+    <span class="s1">output </span><span class="s2">= []  </span><span class="s3"># Initialize the variable to use to store output</span>
+
+    <span class="s0">for </span><span class="s1">segment </span><span class="s0">in </span><span class="s1">segments</span><span class="s2">:</span>
+        <span class="s3"># '.' is the current directory, so ignore it, it is superfluous</span>
+        <span class="s0">if </span><span class="s1">segment </span><span class="s2">== </span><span class="s4">&quot;.&quot;</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+        <span class="s3"># Anything other than '..', should be appended to the output</span>
+        <span class="s0">if </span><span class="s1">segment </span><span class="s2">!= </span><span class="s4">&quot;..&quot;</span><span class="s2">:</span>
+            <span class="s1">output</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">segment</span><span class="s2">)</span>
+        <span class="s3"># In this case segment == '..', if we can, we should pop the last</span>
+        <span class="s3"># element</span>
+        <span class="s0">elif </span><span class="s1">output</span><span class="s2">:</span>
+            <span class="s1">output</span><span class="s2">.</span><span class="s1">pop</span><span class="s2">()</span>
+
+    <span class="s3"># If the path starts with '/' and the output is empty or the first string</span>
+    <span class="s3"># is non-empty</span>
+    <span class="s0">if </span><span class="s1">path</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;/&quot;</span><span class="s2">) </span><span class="s0">and </span><span class="s2">(</span><span class="s0">not </span><span class="s1">output </span><span class="s0">or </span><span class="s1">output</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]):</span>
+        <span class="s1">output</span><span class="s2">.</span><span class="s1">insert</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s2">)</span>
+
+    <span class="s3"># If the path starts with '/.' or '/..' ensure we add one more empty</span>
+    <span class="s3"># string to add a trailing '/'</span>
+    <span class="s0">if </span><span class="s1">path</span><span class="s2">.</span><span class="s1">endswith</span><span class="s2">((</span><span class="s4">&quot;/.&quot;</span><span class="s2">, </span><span class="s4">&quot;/..&quot;</span><span class="s2">)):</span>
+        <span class="s1">output</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">&quot;&quot;</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s4">&quot;/&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">output</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">typing</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">_normalize_host</span><span class="s2">(</span><span class="s1">host</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+
+<span class="s2">@</span><span class="s1">typing</span><span class="s2">.</span><span class="s1">overload</span>
+<span class="s0">def </span><span class="s1">_normalize_host</span><span class="s2">(</span><span class="s1">host</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+
+
+<span class="s0">def </span><span class="s1">_normalize_host</span><span class="s2">(</span><span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">host</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">scheme </span><span class="s0">in </span><span class="s1">_NORMALIZABLE_SCHEMES</span><span class="s2">:</span>
+            <span class="s1">is_ipv6 </span><span class="s2">= </span><span class="s1">_IPV6_ADDRZ_RE</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">host</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">is_ipv6</span><span class="s2">:</span>
+                <span class="s3"># IPv6 hosts of the form 'a::b%zone' are encoded in a URL as</span>
+                <span class="s3"># such per RFC 6874: 'a::b%25zone'. Unquote the ZoneID</span>
+                <span class="s3"># separator as necessary to return a valid RFC 4007 scoped IP.</span>
+                <span class="s1">match </span><span class="s2">= </span><span class="s1">_ZONE_ID_RE</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s1">host</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">match</span><span class="s2">:</span>
+                    <span class="s1">start</span><span class="s2">, </span><span class="s1">end </span><span class="s2">= </span><span class="s1">match</span><span class="s2">.</span><span class="s1">span</span><span class="s2">(</span><span class="s5">1</span><span class="s2">)</span>
+                    <span class="s1">zone_id </span><span class="s2">= </span><span class="s1">host</span><span class="s2">[</span><span class="s1">start</span><span class="s2">:</span><span class="s1">end</span><span class="s2">]</span>
+
+                    <span class="s0">if </span><span class="s1">zone_id</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;%25&quot;</span><span class="s2">) </span><span class="s0">and </span><span class="s1">zone_id </span><span class="s2">!= </span><span class="s4">&quot;%25&quot;</span><span class="s2">:</span>
+                        <span class="s1">zone_id </span><span class="s2">= </span><span class="s1">zone_id</span><span class="s2">[</span><span class="s5">3</span><span class="s2">:]</span>
+                    <span class="s0">else</span><span class="s2">:</span>
+                        <span class="s1">zone_id </span><span class="s2">= </span><span class="s1">zone_id</span><span class="s2">[</span><span class="s5">1</span><span class="s2">:]</span>
+                    <span class="s1">zone_id </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">zone_id</span><span class="s2">, </span><span class="s1">_UNRESERVED_CHARS</span><span class="s2">)</span>
+                    <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">host</span><span class="s2">[:</span><span class="s1">start</span><span class="s2">].</span><span class="s1">lower</span><span class="s2">()</span><span class="s0">}</span><span class="s4">%</span><span class="s0">{</span><span class="s1">zone_id</span><span class="s0">}{</span><span class="s1">host</span><span class="s2">[</span><span class="s1">end</span><span class="s2">:]</span><span class="s0">}</span><span class="s4">&quot;</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s0">return </span><span class="s1">host</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+            <span class="s0">elif not </span><span class="s1">_IPV4_RE</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">host</span><span class="s2">):</span>
+                <span class="s0">return </span><span class="s1">to_str</span><span class="s2">(</span>
+                    <span class="s7">b&quot;.&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">([</span><span class="s1">_idna_encode</span><span class="s2">(</span><span class="s1">label</span><span class="s2">) </span><span class="s0">for </span><span class="s1">label </span><span class="s0">in </span><span class="s1">host</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;.&quot;</span><span class="s2">)]),</span>
+                    <span class="s4">&quot;ascii&quot;</span><span class="s2">,</span>
+                <span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">host</span>
+
+
+<span class="s0">def </span><span class="s1">_idna_encode</span><span class="s2">(</span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+    <span class="s0">if not </span><span class="s1">name</span><span class="s2">.</span><span class="s1">isascii</span><span class="s2">():</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">import </span><span class="s1">idna</span>
+        <span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">LocationParseError</span><span class="s2">(</span>
+                <span class="s4">&quot;Unable to parse URL without the 'idna' module&quot;</span>
+            <span class="s2">) </span><span class="s0">from None</span>
+
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">idna</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s1">name</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">(), </span><span class="s1">strict</span><span class="s2">=</span><span class="s0">True</span><span class="s2">, </span><span class="s1">std3_rules</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">idna</span><span class="s2">.</span><span class="s1">IDNAError</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">LocationParseError</span><span class="s2">(</span>
+                <span class="s4">f&quot;Name '</span><span class="s0">{</span><span class="s1">name</span><span class="s0">}</span><span class="s4">' is not a valid IDNA label&quot;</span>
+            <span class="s2">) </span><span class="s0">from None</span>
+
+    <span class="s0">return </span><span class="s1">name</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">().</span><span class="s1">encode</span><span class="s2">(</span><span class="s4">&quot;ascii&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_encode_target</span><span class="s2">(</span><span class="s1">target</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Percent-encodes a request target so that there are no invalid characters 
+ 
+    Pre-condition for this function is that 'target' must start with '/'. 
+    If that is the case then _TARGET_RE will always produce a match. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">match </span><span class="s2">= </span><span class="s1">_TARGET_RE</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">target</span><span class="s2">)</span>
+    <span class="s0">if not </span><span class="s1">match</span><span class="s2">:  </span><span class="s3"># Defensive:</span>
+        <span class="s0">raise </span><span class="s1">LocationParseError</span><span class="s2">(</span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">target</span><span class="s0">!r} </span><span class="s4">is not a valid request URI&quot;</span><span class="s2">)</span>
+
+    <span class="s1">path</span><span class="s2">, </span><span class="s1">query </span><span class="s2">= </span><span class="s1">match</span><span class="s2">.</span><span class="s1">groups</span><span class="s2">()</span>
+    <span class="s1">encoded_target </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">path</span><span class="s2">, </span><span class="s1">_PATH_CHARS</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">query </span><span class="s0">is not None</span><span class="s2">:</span>
+        <span class="s1">query </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">query</span><span class="s2">, </span><span class="s1">_QUERY_CHARS</span><span class="s2">)</span>
+        <span class="s1">encoded_target </span><span class="s2">+= </span><span class="s4">&quot;?&quot; </span><span class="s2">+ </span><span class="s1">query</span>
+    <span class="s0">return </span><span class="s1">encoded_target</span>
+
+
+<span class="s0">def </span><span class="s1">parse_url</span><span class="s2">(</span><span class="s1">url</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Url</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Given a url, return a parsed :class:`.Url` namedtuple. Best-effort is 
+    performed to parse incomplete urls. Fields not provided will be None. 
+    This parser is RFC 3986 and RFC 6874 compliant. 
+ 
+    The parser logic and helper functions are based heavily on 
+    work done in the ``rfc3986`` module. 
+ 
+    :param str url: URL to parse into a :class:`.Url` namedtuple. 
+ 
+    Partly backwards-compatible with :mod:`urllib.parse`. 
+ 
+    Example: 
+ 
+    .. code-block:: python 
+ 
+        import urllib3 
+ 
+        print( urllib3.util.parse_url('http://google.com/mail/')) 
+        # Url(scheme='http', host='google.com', port=None, path='/mail/', ...) 
+ 
+        print( urllib3.util.parse_url('google.com:80')) 
+        # Url(scheme=None, host='google.com', port=80, path=None, ...) 
+ 
+        print( urllib3.util.parse_url('/foo?bar')) 
+        # Url(scheme=None, host=None, port=None, path='/foo', query='bar', ...) 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">url</span><span class="s2">:</span>
+        <span class="s3"># Empty</span>
+        <span class="s0">return </span><span class="s1">Url</span><span class="s2">()</span>
+
+    <span class="s1">source_url </span><span class="s2">= </span><span class="s1">url</span>
+    <span class="s0">if not </span><span class="s1">_SCHEME_RE</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s1">url</span><span class="s2">):</span>
+        <span class="s1">url </span><span class="s2">= </span><span class="s4">&quot;//&quot; </span><span class="s2">+ </span><span class="s1">url</span>
+
+    <span class="s1">scheme</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">authority</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">auth</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">port</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">port_int</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">path</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">query</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+    <span class="s1">fragment</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">scheme</span><span class="s2">, </span><span class="s1">authority</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment </span><span class="s2">= </span><span class="s1">_URI_RE</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">url</span><span class="s2">).</span><span class="s1">groups</span><span class="s2">()  </span><span class="s3"># type: ignore[union-attr]</span>
+        <span class="s1">normalize_uri </span><span class="s2">= </span><span class="s1">scheme </span><span class="s0">is None or </span><span class="s1">scheme</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">() </span><span class="s0">in </span><span class="s1">_NORMALIZABLE_SCHEMES</span>
+
+        <span class="s0">if </span><span class="s1">scheme</span><span class="s2">:</span>
+            <span class="s1">scheme </span><span class="s2">= </span><span class="s1">scheme</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+
+        <span class="s0">if </span><span class="s1">authority</span><span class="s2">:</span>
+            <span class="s1">auth</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">host_port </span><span class="s2">= </span><span class="s1">authority</span><span class="s2">.</span><span class="s1">rpartition</span><span class="s2">(</span><span class="s4">&quot;@&quot;</span><span class="s2">)</span>
+            <span class="s1">auth </span><span class="s2">= </span><span class="s1">auth </span><span class="s0">or None</span>
+            <span class="s1">host</span><span class="s2">, </span><span class="s1">port </span><span class="s2">= </span><span class="s1">_HOST_PORT_RE</span><span class="s2">.</span><span class="s1">match</span><span class="s2">(</span><span class="s1">host_port</span><span class="s2">).</span><span class="s1">groups</span><span class="s2">()  </span><span class="s3"># type: ignore[union-attr]</span>
+            <span class="s0">if </span><span class="s1">auth </span><span class="s0">and </span><span class="s1">normalize_uri</span><span class="s2">:</span>
+                <span class="s1">auth </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">auth</span><span class="s2">, </span><span class="s1">_USERINFO_CHARS</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">port </span><span class="s2">== </span><span class="s4">&quot;&quot;</span><span class="s2">:</span>
+                <span class="s1">port </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">auth</span><span class="s2">, </span><span class="s1">host</span><span class="s2">, </span><span class="s1">port </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span>
+
+        <span class="s0">if </span><span class="s1">port </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">port_int </span><span class="s2">= </span><span class="s1">int</span><span class="s2">(</span><span class="s1">port</span><span class="s2">)</span>
+            <span class="s0">if not </span><span class="s2">(</span><span class="s5">0 </span><span class="s2">&lt;= </span><span class="s1">port_int </span><span class="s2">&lt;= </span><span class="s5">65535</span><span class="s2">):</span>
+                <span class="s0">raise </span><span class="s1">LocationParseError</span><span class="s2">(</span><span class="s1">url</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">port_int </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s1">host </span><span class="s2">= </span><span class="s1">_normalize_host</span><span class="s2">(</span><span class="s1">host</span><span class="s2">, </span><span class="s1">scheme</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">normalize_uri </span><span class="s0">and </span><span class="s1">path</span><span class="s2">:</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s1">_remove_path_dot_segments</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">path</span><span class="s2">, </span><span class="s1">_PATH_CHARS</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">normalize_uri </span><span class="s0">and </span><span class="s1">query</span><span class="s2">:</span>
+            <span class="s1">query </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">query</span><span class="s2">, </span><span class="s1">_QUERY_CHARS</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">normalize_uri </span><span class="s0">and </span><span class="s1">fragment</span><span class="s2">:</span>
+            <span class="s1">fragment </span><span class="s2">= </span><span class="s1">_encode_invalid_chars</span><span class="s2">(</span><span class="s1">fragment</span><span class="s2">, </span><span class="s1">_FRAGMENT_CHARS</span><span class="s2">)</span>
+
+    <span class="s0">except </span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">AttributeError</span><span class="s2">) </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">LocationParseError</span><span class="s2">(</span><span class="s1">source_url</span><span class="s2">) </span><span class="s0">from </span><span class="s1">e</span>
+
+    <span class="s3"># For the sake of backwards compatibility we put empty</span>
+    <span class="s3"># string values for path if there are any defined values</span>
+    <span class="s3"># beyond the path in the URL.</span>
+    <span class="s3"># TODO: Remove this when we break backwards compatibility.</span>
+    <span class="s0">if not </span><span class="s1">path</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">query </span><span class="s0">is not None or </span><span class="s1">fragment </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s4">&quot;&quot;</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">return </span><span class="s1">Url</span><span class="s2">(</span>
+        <span class="s1">scheme</span><span class="s2">=</span><span class="s1">scheme</span><span class="s2">,</span>
+        <span class="s1">auth</span><span class="s2">=</span><span class="s1">auth</span><span class="s2">,</span>
+        <span class="s1">host</span><span class="s2">=</span><span class="s1">host</span><span class="s2">,</span>
+        <span class="s1">port</span><span class="s2">=</span><span class="s1">port_int</span><span class="s2">,</span>
+        <span class="s1">path</span><span class="s2">=</span><span class="s1">path</span><span class="s2">,</span>
+        <span class="s1">query</span><span class="s2">=</span><span class="s1">query</span><span class="s2">,</span>
+        <span class="s1">fragment</span><span class="s2">=</span><span class="s1">fragment</span><span class="s2">,</span>
+    <span class="s2">)</span>
+</pre>
+</body>
+</html>

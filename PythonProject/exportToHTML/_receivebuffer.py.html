@@ -1,0 +1,177 @@
+<html>
+<head>
+<title>_receivebuffer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #a5c261;}
+.s6 { color: #2aacb8;}
+.s7 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_receivebuffer.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Union</span>
+
+<span class="s1">__all__ </span><span class="s2">= [</span><span class="s3">&quot;ReceiveBuffer&quot;</span><span class="s2">]</span>
+
+
+<span class="s4"># Operations we want to support:</span>
+<span class="s4"># - find next \r\n or \r\n\r\n (\n or \n\n are also acceptable),</span>
+<span class="s4">#   or wait until there is one</span>
+<span class="s4"># - read at-most-N bytes</span>
+<span class="s4"># Goals:</span>
+<span class="s4"># - on average, do this fast</span>
+<span class="s4"># - worst case, do this in O(n) where n is the number of bytes processed</span>
+<span class="s4"># Plan:</span>
+<span class="s4"># - store bytearray, offset, how far we've searched for a separator token</span>
+<span class="s4"># - use the how-far-we've-searched data to avoid rescanning</span>
+<span class="s4"># - while doing a stream of uninterrupted processing, advance offset instead</span>
+<span class="s4">#   of constantly copying</span>
+<span class="s4"># WARNING:</span>
+<span class="s4"># - I haven't benchmarked or profiled any of this yet.</span>
+<span class="s4">#</span>
+<span class="s4"># Note that starting in Python 3.4, deleting the initial n bytes from a</span>
+<span class="s4"># bytearray is amortized O(n), thanks to some excellent work by Antoine</span>
+<span class="s4"># Martin:</span>
+<span class="s4">#</span>
+<span class="s4">#     https://bugs.python.org/issue19087</span>
+<span class="s4">#</span>
+<span class="s4"># This means that if we only supported 3.4+, we could get rid of the code here</span>
+<span class="s4"># involving self._start and self.compress, because it's doing exactly the same</span>
+<span class="s4"># thing that bytearray now does internally.</span>
+<span class="s4">#</span>
+<span class="s4"># BUT unfortunately, we still support 2.7, and reading short segments out of a</span>
+<span class="s4"># long buffer MUST be O(bytes read) to avoid DoS issues, so we can't actually</span>
+<span class="s4"># delete this code. Yet:</span>
+<span class="s4">#</span>
+<span class="s4">#     https://pythonclock.org/</span>
+<span class="s4">#</span>
+<span class="s4"># (Two things to double-check first though: make sure PyPy also has the</span>
+<span class="s4"># optimization, and benchmark to make sure it's a win, since we do have a</span>
+<span class="s4"># slightly clever thing where we delay calling compress() until we've</span>
+<span class="s4"># processed a whole event, which could in theory be slightly more efficient</span>
+<span class="s4"># than the internal bytearray support.)</span>
+<span class="s1">blank_line_regex </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s5">b&quot;</span><span class="s0">\n\r</span><span class="s5">?</span><span class="s0">\n</span><span class="s5">&quot;</span><span class="s2">, </span><span class="s1">re</span><span class="s2">.</span><span class="s1">MULTILINE</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">ReceiveBuffer</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_data </span><span class="s2">= </span><span class="s1">bytearray</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_next_line_search </span><span class="s2">= </span><span class="s6">0</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_multiple_lines_search </span><span class="s2">= </span><span class="s6">0</span>
+
+    <span class="s0">def </span><span class="s1">__iadd__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">byteslike</span><span class="s2">: </span><span class="s1">Union</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytearray</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s3">&quot;ReceiveBuffer&quot;</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_data </span><span class="s2">+= </span><span class="s1">byteslike</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__bool__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">__len__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">)</span>
+
+    <span class="s4"># for @property unprocessed_data</span>
+    <span class="s0">def </span><span class="s1">__bytes__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">bytes</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_extract</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">count</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; bytearray</span><span class="s2">:</span>
+        <span class="s4"># extracting an initial slice of the data buffer and return it</span>
+        <span class="s1">out </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[:</span><span class="s1">count</span><span class="s2">]</span>
+        <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[:</span><span class="s1">count</span><span class="s2">]</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_next_line_search </span><span class="s2">= </span><span class="s6">0</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_multiple_lines_search </span><span class="s2">= </span><span class="s6">0</span>
+
+        <span class="s0">return </span><span class="s1">out</span>
+
+    <span class="s0">def </span><span class="s1">maybe_extract_at_most</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">count</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; Optional</span><span class="s2">[</span><span class="s1">bytearray</span><span class="s2">]:</span>
+        <span class="s7">&quot;&quot;&quot; 
+        Extract a fixed number of bytes from the buffer. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">out </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[:</span><span class="s1">count</span><span class="s2">]</span>
+        <span class="s0">if not </span><span class="s1">out</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_extract</span><span class="s2">(</span><span class="s1">count</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">maybe_extract_next_line</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Optional</span><span class="s2">[</span><span class="s1">bytearray</span><span class="s2">]:</span>
+        <span class="s7">&quot;&quot;&quot; 
+        Extract the first line, if it is completed in the buffer. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># Only search in buffer space that we've not already looked at.</span>
+        <span class="s1">search_start_index </span><span class="s2">= </span><span class="s1">max</span><span class="s2">(</span><span class="s6">0</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_next_line_search </span><span class="s2">- </span><span class="s6">1</span><span class="s2">)</span>
+        <span class="s1">partial_idx </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">.</span><span class="s1">find</span><span class="s2">(</span><span class="s5">b&quot;</span><span class="s0">\r\n</span><span class="s5">&quot;</span><span class="s2">, </span><span class="s1">search_start_index</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">partial_idx </span><span class="s2">== -</span><span class="s6">1</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_next_line_search </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">)</span>
+            <span class="s0">return None</span>
+
+        <span class="s4"># + 2 is to compensate len(b&quot;\r\n&quot;)</span>
+        <span class="s1">idx </span><span class="s2">= </span><span class="s1">partial_idx </span><span class="s2">+ </span><span class="s6">2</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_extract</span><span class="s2">(</span><span class="s1">idx</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">maybe_extract_lines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Optional</span><span class="s2">[</span><span class="s1">List</span><span class="s2">[</span><span class="s1">bytearray</span><span class="s2">]]:</span>
+        <span class="s7">&quot;&quot;&quot; 
+        Extract everything up to the first blank line, and return a list of lines. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># Handle the case where we have an immediate empty line.</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[:</span><span class="s6">1</span><span class="s2">] == </span><span class="s5">b&quot;</span><span class="s0">\n</span><span class="s5">&quot;</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_extract</span><span class="s2">(</span><span class="s6">1</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s2">[]</span>
+
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[:</span><span class="s6">2</span><span class="s2">] == </span><span class="s5">b&quot;</span><span class="s0">\r\n</span><span class="s5">&quot;</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_extract</span><span class="s2">(</span><span class="s6">2</span><span class="s2">)</span>
+            <span class="s0">return </span><span class="s2">[]</span>
+
+        <span class="s4"># Only search in buffer space that we've not already looked at.</span>
+        <span class="s1">match </span><span class="s2">= </span><span class="s1">blank_line_regex</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_multiple_lines_search</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">match </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_multiple_lines_search </span><span class="s2">= </span><span class="s1">max</span><span class="s2">(</span><span class="s6">0</span><span class="s2">, </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">) - </span><span class="s6">2</span><span class="s2">)</span>
+            <span class="s0">return None</span>
+
+        <span class="s4"># Truncate the buffer and return it.</span>
+        <span class="s1">idx </span><span class="s2">= </span><span class="s1">match</span><span class="s2">.</span><span class="s1">span</span><span class="s2">(</span><span class="s6">0</span><span class="s2">)[-</span><span class="s6">1</span><span class="s2">]</span>
+        <span class="s1">out </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_extract</span><span class="s2">(</span><span class="s1">idx</span><span class="s2">)</span>
+        <span class="s1">lines </span><span class="s2">= </span><span class="s1">out</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s5">b&quot;</span><span class="s0">\n</span><span class="s5">&quot;</span><span class="s2">)</span>
+
+        <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">lines</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">line</span><span class="s2">.</span><span class="s1">endswith</span><span class="s2">(</span><span class="s5">b&quot;</span><span class="s0">\r</span><span class="s5">&quot;</span><span class="s2">):</span>
+                <span class="s0">del </span><span class="s1">line</span><span class="s2">[-</span><span class="s6">1</span><span class="s2">]</span>
+
+        <span class="s0">assert </span><span class="s1">lines</span><span class="s2">[-</span><span class="s6">2</span><span class="s2">] == </span><span class="s1">lines</span><span class="s2">[-</span><span class="s6">1</span><span class="s2">] == </span><span class="s5">b&quot;&quot;</span>
+
+        <span class="s0">del </span><span class="s1">lines</span><span class="s2">[-</span><span class="s6">2</span><span class="s2">:]</span>
+
+        <span class="s0">return </span><span class="s1">lines</span>
+
+    <span class="s4"># In theory we should wait until `\r\n` before starting to validate</span>
+    <span class="s4"># incoming data. However it's interesting to detect (very) invalid data</span>
+    <span class="s4"># early given they might not even contain `\r\n` at all (hence only</span>
+    <span class="s4"># timeout will get rid of them).</span>
+    <span class="s4"># This is not a 100% effective detection but more of a cheap sanity check</span>
+    <span class="s4"># allowing for early abort in some useful cases.</span>
+    <span class="s4"># This is especially interesting when peer is messing up with HTTPS and</span>
+    <span class="s4"># sent us a TLS stream where we were expecting plain HTTP given all</span>
+    <span class="s4"># versions of TLS so far start handshake with a 0x16 message type code.</span>
+    <span class="s0">def </span><span class="s1">is_next_line_obviously_invalid_request_line</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s4"># HTTP header line must not contain non-printable characters</span>
+            <span class="s4"># and should not start with a space</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[</span><span class="s6">0</span><span class="s2">] &lt; </span><span class="s6">0x21</span>
+        <span class="s0">except </span><span class="s1">IndexError</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+</pre>
+</body>
+</html>

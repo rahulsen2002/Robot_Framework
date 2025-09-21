@@ -1,0 +1,360 @@
+<html>
+<head>
+<title>unpacking.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+unpacking.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Utilities related archives.&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">shutil</span>
+<span class="s2">import </span><span class="s1">stat</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">tarfile</span>
+<span class="s2">import </span><span class="s1">zipfile</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Iterable</span>
+<span class="s2">from </span><span class="s1">zipfile </span><span class="s2">import </span><span class="s1">ZipInfo</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s1">InstallationError</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">filetypes </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">BZ2_EXTENSIONS</span><span class="s3">,</span>
+    <span class="s1">TAR_EXTENSIONS</span><span class="s3">,</span>
+    <span class="s1">XZ_EXTENSIONS</span><span class="s3">,</span>
+    <span class="s1">ZIP_EXTENSIONS</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">misc </span><span class="s2">import </span><span class="s1">ensure_dir</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s1">SUPPORTED_EXTENSIONS </span><span class="s3">= </span><span class="s1">ZIP_EXTENSIONS </span><span class="s3">+ </span><span class="s1">TAR_EXTENSIONS</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s2">import </span><span class="s1">bz2  </span><span class="s4"># noqa</span>
+
+    <span class="s1">SUPPORTED_EXTENSIONS </span><span class="s3">+= </span><span class="s1">BZ2_EXTENSIONS</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;bz2 module is not available&quot;</span><span class="s3">)</span>
+
+<span class="s2">try</span><span class="s3">:</span>
+    <span class="s4"># Only for Python 3.3+</span>
+    <span class="s2">import </span><span class="s1">lzma  </span><span class="s4"># noqa</span>
+
+    <span class="s1">SUPPORTED_EXTENSIONS </span><span class="s3">+= </span><span class="s1">XZ_EXTENSIONS</span>
+<span class="s2">except </span><span class="s1">ImportError</span><span class="s3">:</span>
+    <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">&quot;lzma module is not available&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">current_umask</span><span class="s3">() </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Get the current umask which involves having to set it temporarily.&quot;&quot;&quot;</span>
+    <span class="s1">mask </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">umask</span><span class="s3">(</span><span class="s6">0</span><span class="s3">)</span>
+    <span class="s1">os</span><span class="s3">.</span><span class="s1">umask</span><span class="s3">(</span><span class="s1">mask</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">mask</span>
+
+
+<span class="s2">def </span><span class="s1">split_leading_dir</span><span class="s3">(</span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s1">path </span><span class="s3">= </span><span class="s1">path</span><span class="s3">.</span><span class="s1">lstrip</span><span class="s3">(</span><span class="s5">&quot;/&quot;</span><span class="s3">).</span><span class="s1">lstrip</span><span class="s3">(</span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot;</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s5">&quot;/&quot; </span><span class="s2">in </span><span class="s1">path </span><span class="s2">and </span><span class="s3">(</span>
+        <span class="s3">(</span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot; </span><span class="s2">in </span><span class="s1">path </span><span class="s2">and </span><span class="s1">path</span><span class="s3">.</span><span class="s1">find</span><span class="s3">(</span><span class="s5">&quot;/&quot;</span><span class="s3">) &lt; </span><span class="s1">path</span><span class="s3">.</span><span class="s1">find</span><span class="s3">(</span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot;</span><span class="s3">)) </span><span class="s2">or </span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot; </span><span class="s2">not in </span><span class="s1">path</span>
+    <span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;/&quot;</span><span class="s3">, </span><span class="s6">1</span><span class="s3">)</span>
+    <span class="s2">elif </span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot; </span><span class="s2">in </span><span class="s1">path</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">path</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot;</span><span class="s3">, </span><span class="s6">1</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s3">[</span><span class="s1">path</span><span class="s3">, </span><span class="s5">&quot;&quot;</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">has_leading_dir</span><span class="s3">(</span><span class="s1">paths</span><span class="s3">: </span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Returns true if all the paths have the same leading path name 
+    (i.e., everything is in one subdirectory in an archive)&quot;&quot;&quot;</span>
+    <span class="s1">common_prefix </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">paths</span><span class="s3">:</span>
+        <span class="s1">prefix</span><span class="s3">, </span><span class="s1">rest </span><span class="s3">= </span><span class="s1">split_leading_dir</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">prefix</span><span class="s3">:</span>
+            <span class="s2">return False</span>
+        <span class="s2">elif </span><span class="s1">common_prefix </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">common_prefix </span><span class="s3">= </span><span class="s1">prefix</span>
+        <span class="s2">elif </span><span class="s1">prefix </span><span class="s3">!= </span><span class="s1">common_prefix</span><span class="s3">:</span>
+            <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">is_within_directory</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">target</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return true if the absolute path of target is within the directory 
+    &quot;&quot;&quot;</span>
+    <span class="s1">abs_directory </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">)</span>
+    <span class="s1">abs_target </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">target</span><span class="s3">)</span>
+
+    <span class="s1">prefix </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">commonprefix</span><span class="s3">([</span><span class="s1">abs_directory</span><span class="s3">, </span><span class="s1">abs_target</span><span class="s3">])</span>
+    <span class="s2">return </span><span class="s1">prefix </span><span class="s3">== </span><span class="s1">abs_directory</span>
+
+
+<span class="s2">def </span><span class="s1">_get_default_mode_plus_executable</span><span class="s3">() </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s6">0o777 </span><span class="s3">&amp; ~</span><span class="s1">current_umask</span><span class="s3">() | </span><span class="s6">0o111</span>
+
+
+<span class="s2">def </span><span class="s1">set_extracted_file_to_default_mode_plus_executable</span><span class="s3">(</span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Make file present at path have execute for user/group/world 
+    (chmod +x) is no-op on windows per python docs 
+    &quot;&quot;&quot;</span>
+    <span class="s1">os</span><span class="s3">.</span><span class="s1">chmod</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">_get_default_mode_plus_executable</span><span class="s3">())</span>
+
+
+<span class="s2">def </span><span class="s1">zip_item_is_executable</span><span class="s3">(</span><span class="s1">info</span><span class="s3">: </span><span class="s1">ZipInfo</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s1">mode </span><span class="s3">= </span><span class="s1">info</span><span class="s3">.</span><span class="s1">external_attr </span><span class="s3">&gt;&gt; </span><span class="s6">16</span>
+    <span class="s4"># if mode and regular file and any execute permissions for</span>
+    <span class="s4"># user/group/world?</span>
+    <span class="s2">return </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">mode </span><span class="s2">and </span><span class="s1">stat</span><span class="s3">.</span><span class="s1">S_ISREG</span><span class="s3">(</span><span class="s1">mode</span><span class="s3">) </span><span class="s2">and </span><span class="s1">mode </span><span class="s3">&amp; </span><span class="s6">0o111</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">unzip_file</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">location</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">flatten</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Unzip the file (with path `filename`) to the destination `location`.  All 
+    files are written based on system defaults and umask (i.e. permissions are 
+    not preserved), except that regular file members with any execute 
+    permissions (user, group, or world) have &quot;chmod +x&quot; applied after being 
+    written. Note that for windows, any execute changes using os.chmod are 
+    no-ops per the python docs. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ensure_dir</span><span class="s3">(</span><span class="s1">location</span><span class="s3">)</span>
+    <span class="s1">zipfp </span><span class="s3">= </span><span class="s1">open</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s5">&quot;rb&quot;</span><span class="s3">)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">zip </span><span class="s3">= </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">zipfp</span><span class="s3">, </span><span class="s1">allowZip64</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s1">leading </span><span class="s3">= </span><span class="s1">has_leading_dir</span><span class="s3">(</span><span class="s1">zip</span><span class="s3">.</span><span class="s1">namelist</span><span class="s3">()) </span><span class="s2">and </span><span class="s1">flatten</span>
+        <span class="s2">for </span><span class="s1">info </span><span class="s2">in </span><span class="s1">zip</span><span class="s3">.</span><span class="s1">infolist</span><span class="s3">():</span>
+            <span class="s1">name </span><span class="s3">= </span><span class="s1">info</span><span class="s3">.</span><span class="s1">filename</span>
+            <span class="s1">fn </span><span class="s3">= </span><span class="s1">name</span>
+            <span class="s2">if </span><span class="s1">leading</span><span class="s3">:</span>
+                <span class="s1">fn </span><span class="s3">= </span><span class="s1">split_leading_dir</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)[</span><span class="s6">1</span><span class="s3">]</span>
+            <span class="s1">fn </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">)</span>
+            <span class="s1">dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">is_within_directory</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">):</span>
+                <span class="s1">message </span><span class="s3">= (</span>
+                    <span class="s5">&quot;The zip file ({}) has a file ({}) trying to install &quot;</span>
+                    <span class="s5">&quot;outside target directory ({})&quot;</span>
+                <span class="s3">)</span>
+                <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s1">message</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">, </span><span class="s1">location</span><span class="s3">))</span>
+            <span class="s2">if </span><span class="s1">fn</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">((</span><span class="s5">&quot;/&quot;</span><span class="s3">, </span><span class="s5">&quot;</span><span class="s2">\\</span><span class="s5">&quot;</span><span class="s3">)):</span>
+                <span class="s4"># A directory</span>
+                <span class="s1">ensure_dir</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">ensure_dir</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">)</span>
+                <span class="s4"># Don't use read() to avoid allocating an arbitrarily large</span>
+                <span class="s4"># chunk of memory for the file's content</span>
+                <span class="s1">fp </span><span class="s3">= </span><span class="s1">zip</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">, </span><span class="s5">&quot;wb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">destfp</span><span class="s3">:</span>
+                        <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copyfileobj</span><span class="s3">(</span><span class="s1">fp</span><span class="s3">, </span><span class="s1">destfp</span><span class="s3">)</span>
+                <span class="s2">finally</span><span class="s3">:</span>
+                    <span class="s1">fp</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+                    <span class="s2">if </span><span class="s1">zip_item_is_executable</span><span class="s3">(</span><span class="s1">info</span><span class="s3">):</span>
+                        <span class="s1">set_extracted_file_to_default_mode_plus_executable</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">zipfp</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">untar_file</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">location</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Untar the file (with path `filename`) to the destination `location`. 
+    All files are written based on system defaults and umask (i.e. permissions 
+    are not preserved), except that regular file members with any execute 
+    permissions (user, group, or world) have &quot;chmod +x&quot; applied on top of the 
+    default.  Note that for windows, any execute changes using os.chmod are 
+    no-ops per the python docs. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ensure_dir</span><span class="s3">(</span><span class="s1">location</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;.gz&quot;</span><span class="s3">) </span><span class="s2">or </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;.tgz&quot;</span><span class="s3">):</span>
+        <span class="s1">mode </span><span class="s3">= </span><span class="s5">&quot;r:gz&quot;</span>
+    <span class="s2">elif </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">BZ2_EXTENSIONS</span><span class="s3">):</span>
+        <span class="s1">mode </span><span class="s3">= </span><span class="s5">&quot;r:bz2&quot;</span>
+    <span class="s2">elif </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">XZ_EXTENSIONS</span><span class="s3">):</span>
+        <span class="s1">mode </span><span class="s3">= </span><span class="s5">&quot;r:xz&quot;</span>
+    <span class="s2">elif </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;.tar&quot;</span><span class="s3">):</span>
+        <span class="s1">mode </span><span class="s3">= </span><span class="s5">&quot;r&quot;</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+            <span class="s5">&quot;Cannot determine compression type for file %s&quot;</span><span class="s3">,</span>
+            <span class="s1">filename</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s1">mode </span><span class="s3">= </span><span class="s5">&quot;r:*&quot;</span>
+
+    <span class="s1">tar </span><span class="s3">= </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">)  </span><span class="s4"># type: ignore</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">leading </span><span class="s3">= </span><span class="s1">has_leading_dir</span><span class="s3">([</span><span class="s1">member</span><span class="s3">.</span><span class="s1">name </span><span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">tar</span><span class="s3">.</span><span class="s1">getmembers</span><span class="s3">()])</span>
+
+        <span class="s4"># PEP 706 added `tarfile.data_filter`, and made some other changes to</span>
+        <span class="s4"># Python's tarfile module (see below). The features were backported to</span>
+        <span class="s4"># security releases.</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">data_filter </span><span class="s3">= </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">data_filter</span>
+        <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+            <span class="s1">_untar_without_filter</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">location</span><span class="s3">, </span><span class="s1">tar</span><span class="s3">, </span><span class="s1">leading</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">default_mode_plus_executable </span><span class="s3">= </span><span class="s1">_get_default_mode_plus_executable</span><span class="s3">()</span>
+
+            <span class="s2">if </span><span class="s1">leading</span><span class="s3">:</span>
+                <span class="s4"># Strip the leading directory from all files in the archive,</span>
+                <span class="s4"># including hardlink targets (which are relative to the</span>
+                <span class="s4"># unpack location).</span>
+                <span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">tar</span><span class="s3">.</span><span class="s1">getmembers</span><span class="s3">():</span>
+                    <span class="s1">name_lead</span><span class="s3">, </span><span class="s1">name_rest </span><span class="s3">= </span><span class="s1">split_leading_dir</span><span class="s3">(</span><span class="s1">member</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+                    <span class="s1">member</span><span class="s3">.</span><span class="s1">name </span><span class="s3">= </span><span class="s1">name_rest</span>
+                    <span class="s2">if </span><span class="s1">member</span><span class="s3">.</span><span class="s1">islnk</span><span class="s3">():</span>
+                        <span class="s1">lnk_lead</span><span class="s3">, </span><span class="s1">lnk_rest </span><span class="s3">= </span><span class="s1">split_leading_dir</span><span class="s3">(</span><span class="s1">member</span><span class="s3">.</span><span class="s1">linkname</span><span class="s3">)</span>
+                        <span class="s2">if </span><span class="s1">lnk_lead </span><span class="s3">== </span><span class="s1">name_lead</span><span class="s3">:</span>
+                            <span class="s1">member</span><span class="s3">.</span><span class="s1">linkname </span><span class="s3">= </span><span class="s1">lnk_rest</span>
+
+            <span class="s2">def </span><span class="s1">pip_filter</span><span class="s3">(</span><span class="s1">member</span><span class="s3">: </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">TarInfo</span><span class="s3">, </span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; tarfile</span><span class="s3">.</span><span class="s1">TarInfo</span><span class="s3">:</span>
+                <span class="s1">orig_mode </span><span class="s3">= </span><span class="s1">member</span><span class="s3">.</span><span class="s1">mode</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s2">try</span><span class="s3">:</span>
+                        <span class="s1">member </span><span class="s3">= </span><span class="s1">data_filter</span><span class="s3">(</span><span class="s1">member</span><span class="s3">, </span><span class="s1">location</span><span class="s3">)</span>
+                    <span class="s2">except </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">LinkOutsideDestinationError</span><span class="s3">:</span>
+                        <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">[:</span><span class="s6">3</span><span class="s3">] </span><span class="s2">in </span><span class="s3">{</span>
+                            <span class="s3">(</span><span class="s6">3</span><span class="s3">, </span><span class="s6">9</span><span class="s3">, </span><span class="s6">17</span><span class="s3">),</span>
+                            <span class="s3">(</span><span class="s6">3</span><span class="s3">, </span><span class="s6">10</span><span class="s3">, </span><span class="s6">12</span><span class="s3">),</span>
+                            <span class="s3">(</span><span class="s6">3</span><span class="s3">, </span><span class="s6">11</span><span class="s3">, </span><span class="s6">4</span><span class="s3">),</span>
+                        <span class="s3">}:</span>
+                            <span class="s4"># The tarfile filter in specific Python versions</span>
+                            <span class="s4"># raises LinkOutsideDestinationError on valid input</span>
+                            <span class="s4"># (https://github.com/python/cpython/issues/107845)</span>
+                            <span class="s4"># Ignore the error there, but do use the</span>
+                            <span class="s4"># more lax `tar_filter`</span>
+                            <span class="s1">member </span><span class="s3">= </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">tar_filter</span><span class="s3">(</span><span class="s1">member</span><span class="s3">, </span><span class="s1">location</span><span class="s3">)</span>
+                        <span class="s2">else</span><span class="s3">:</span>
+                            <span class="s2">raise</span>
+                <span class="s2">except </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">TarError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+                    <span class="s1">message </span><span class="s3">= </span><span class="s5">&quot;Invalid member in the tar file {}: {}&quot;</span>
+                    <span class="s4"># Filter error messages mention the member name.</span>
+                    <span class="s4"># No need to add it here.</span>
+                    <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span>
+                        <span class="s1">message</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                            <span class="s1">filename</span><span class="s3">,</span>
+                            <span class="s1">exc</span><span class="s3">,</span>
+                        <span class="s3">)</span>
+                    <span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">member</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">() </span><span class="s2">and </span><span class="s1">orig_mode </span><span class="s3">&amp; </span><span class="s6">0o111</span><span class="s3">:</span>
+                    <span class="s1">member</span><span class="s3">.</span><span class="s1">mode </span><span class="s3">= </span><span class="s1">default_mode_plus_executable</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s4"># See PEP 706 note above.</span>
+                    <span class="s4"># The PEP changed this from `int` to `Optional[int]`,</span>
+                    <span class="s4"># where None means &quot;use the default&quot;. Mypy doesn't</span>
+                    <span class="s4"># know this yet.</span>
+                    <span class="s1">member</span><span class="s3">.</span><span class="s1">mode </span><span class="s3">= </span><span class="s2">None  </span><span class="s4"># type: ignore [assignment]</span>
+                <span class="s2">return </span><span class="s1">member</span>
+
+            <span class="s1">tar</span><span class="s3">.</span><span class="s1">extractall</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s1">filter</span><span class="s3">=</span><span class="s1">pip_filter</span><span class="s3">)</span>
+
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">tar</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">_untar_without_filter</span><span class="s3">(</span>
+    <span class="s1">filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">location</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">tar</span><span class="s3">: </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">TarFile</span><span class="s3">,</span>
+    <span class="s1">leading</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Fallback for Python without tarfile.data_filter&quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">tar</span><span class="s3">.</span><span class="s1">getmembers</span><span class="s3">():</span>
+        <span class="s1">fn </span><span class="s3">= </span><span class="s1">member</span><span class="s3">.</span><span class="s1">name</span>
+        <span class="s2">if </span><span class="s1">leading</span><span class="s3">:</span>
+            <span class="s1">fn </span><span class="s3">= </span><span class="s1">split_leading_dir</span><span class="s3">(</span><span class="s1">fn</span><span class="s3">)[</span><span class="s6">1</span><span class="s3">]</span>
+        <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">is_within_directory</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s1">path</span><span class="s3">):</span>
+            <span class="s1">message </span><span class="s3">= (</span>
+                <span class="s5">&quot;The tar file ({}) has a file ({}) trying to install &quot;</span>
+                <span class="s5">&quot;outside target directory ({})&quot;</span>
+            <span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s1">message</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">location</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">member</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">():</span>
+            <span class="s1">ensure_dir</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">member</span><span class="s3">.</span><span class="s1">issym</span><span class="s3">():</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">tar</span><span class="s3">.</span><span class="s1">_extract_member</span><span class="s3">(</span><span class="s1">member</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+                <span class="s4"># Some corrupt tar files seem to produce this</span>
+                <span class="s4"># (specifically bad symlinks)</span>
+                <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                    <span class="s5">&quot;In the tar file %s the member %s is invalid: %s&quot;</span><span class="s3">,</span>
+                    <span class="s1">filename</span><span class="s3">,</span>
+                    <span class="s1">member</span><span class="s3">.</span><span class="s1">name</span><span class="s3">,</span>
+                    <span class="s1">exc</span><span class="s3">,</span>
+                <span class="s3">)</span>
+                <span class="s2">continue</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">fp </span><span class="s3">= </span><span class="s1">tar</span><span class="s3">.</span><span class="s1">extractfile</span><span class="s3">(</span><span class="s1">member</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s3">(</span><span class="s1">KeyError</span><span class="s3">, </span><span class="s1">AttributeError</span><span class="s3">) </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+                <span class="s4"># Some corrupt tar files seem to produce this</span>
+                <span class="s4"># (specifically bad symlinks)</span>
+                <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+                    <span class="s5">&quot;In the tar file %s the member %s is invalid: %s&quot;</span><span class="s3">,</span>
+                    <span class="s1">filename</span><span class="s3">,</span>
+                    <span class="s1">member</span><span class="s3">.</span><span class="s1">name</span><span class="s3">,</span>
+                    <span class="s1">exc</span><span class="s3">,</span>
+                <span class="s3">)</span>
+                <span class="s2">continue</span>
+            <span class="s1">ensure_dir</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">path</span><span class="s3">))</span>
+            <span class="s2">assert </span><span class="s1">fp </span><span class="s2">is not None</span>
+            <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s5">&quot;wb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">destfp</span><span class="s3">:</span>
+                <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copyfileobj</span><span class="s3">(</span><span class="s1">fp</span><span class="s3">, </span><span class="s1">destfp</span><span class="s3">)</span>
+            <span class="s1">fp</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+            <span class="s4"># Update the timestamp (useful for cython compiled files)</span>
+            <span class="s1">tar</span><span class="s3">.</span><span class="s1">utime</span><span class="s3">(</span><span class="s1">member</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+            <span class="s4"># member have any execute permissions for user/group/world?</span>
+            <span class="s2">if </span><span class="s1">member</span><span class="s3">.</span><span class="s1">mode </span><span class="s3">&amp; </span><span class="s6">0o111</span><span class="s3">:</span>
+                <span class="s1">set_extracted_file_to_default_mode_plus_executable</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">unpack_file</span><span class="s3">(</span>
+    <span class="s1">filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">location</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">content_type</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s1">filename </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">realpath</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s3">(</span>
+        <span class="s1">content_type </span><span class="s3">== </span><span class="s5">&quot;application/zip&quot;</span>
+        <span class="s2">or </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">ZIP_EXTENSIONS</span><span class="s3">)</span>
+        <span class="s2">or </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">is_zipfile</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)</span>
+    <span class="s3">):</span>
+        <span class="s1">unzip_file</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">location</span><span class="s3">, </span><span class="s1">flatten</span><span class="s3">=</span><span class="s2">not </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;.whl&quot;</span><span class="s3">))</span>
+    <span class="s2">elif </span><span class="s3">(</span>
+        <span class="s1">content_type </span><span class="s3">== </span><span class="s5">&quot;application/x-gzip&quot;</span>
+        <span class="s2">or </span><span class="s1">tarfile</span><span class="s3">.</span><span class="s1">is_tarfile</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)</span>
+        <span class="s2">or </span><span class="s1">filename</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">endswith</span><span class="s3">(</span><span class="s1">TAR_EXTENSIONS </span><span class="s3">+ </span><span class="s1">BZ2_EXTENSIONS </span><span class="s3">+ </span><span class="s1">XZ_EXTENSIONS</span><span class="s3">)</span>
+    <span class="s3">):</span>
+        <span class="s1">untar_file</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">location</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s4"># FIXME: handle?</span>
+        <span class="s4"># FIXME: magic signatures?</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">critical</span><span class="s3">(</span>
+            <span class="s5">&quot;Cannot unpack file %s (downloaded from %s, content-type: %s); &quot;</span>
+            <span class="s5">&quot;cannot detect archive format&quot;</span><span class="s3">,</span>
+            <span class="s1">filename</span><span class="s3">,</span>
+            <span class="s1">location</span><span class="s3">,</span>
+            <span class="s1">content_type</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s5">f&quot;Cannot determine archive format of </span><span class="s2">{</span><span class="s1">location</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

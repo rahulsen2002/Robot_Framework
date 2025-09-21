@@ -1,0 +1,261 @@
+<html>
+<head>
+<title>install_lib.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+install_lib.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.install_lib 
+ 
+Implements the Distutils 'install_lib' command 
+(install all Python modules).&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">importlib</span><span class="s3">.</span><span class="s1">util</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">ClassVar</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">DistutilsOptionError</span>
+
+<span class="s4"># Extension for Python source files.</span>
+<span class="s1">PYTHON_SOURCE_EXTENSION </span><span class="s3">= </span><span class="s5">&quot;.py&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">install_lib</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s1">description </span><span class="s3">= </span><span class="s5">&quot;install all Python modules (extensions and pure Python)&quot;</span>
+
+    <span class="s4"># The byte-compilation options are a tad confusing.  Here are the</span>
+    <span class="s4"># possible scenarios:</span>
+    <span class="s4">#   1) no compilation at all (--no-compile --no-optimize)</span>
+    <span class="s4">#   2) compile .pyc only (--compile --no-optimize; default)</span>
+    <span class="s4">#   3) compile .pyc and &quot;opt-1&quot; .pyc (--compile --optimize)</span>
+    <span class="s4">#   4) compile &quot;opt-1&quot; .pyc only (--no-compile --optimize)</span>
+    <span class="s4">#   5) compile .pyc and &quot;opt-2&quot; .pyc (--compile --optimize-more)</span>
+    <span class="s4">#   6) compile &quot;opt-2&quot; .pyc only (--no-compile --optimize-more)</span>
+    <span class="s4">#</span>
+    <span class="s4"># The UI for this is two options, 'compile' and 'optimize'.</span>
+    <span class="s4"># 'compile' is strictly boolean, and only decides whether to</span>
+    <span class="s4"># generate .pyc files.  'optimize' is three-way (0, 1, or 2), and</span>
+    <span class="s4"># decides both whether to generate .pyc files and what level of</span>
+    <span class="s4"># optimization to use.</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s5">'install-dir='</span><span class="s3">, </span><span class="s5">'d'</span><span class="s3">, </span><span class="s5">&quot;directory to install to&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'build-dir='</span><span class="s3">, </span><span class="s5">'b'</span><span class="s3">, </span><span class="s5">&quot;build directory (where to install from)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'force'</span><span class="s3">, </span><span class="s5">'f'</span><span class="s3">, </span><span class="s5">&quot;force installation (overwrite existing files)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'compile'</span><span class="s3">, </span><span class="s5">'c'</span><span class="s3">, </span><span class="s5">&quot;compile .py to .pyc [default]&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'no-compile'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s5">&quot;don't compile .py files&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">'optimize='</span><span class="s3">,</span>
+            <span class="s5">'O'</span><span class="s3">,</span>
+            <span class="s5">&quot;also compile with optimization: -O1 for </span><span class="s2">\&quot;</span><span class="s5">python -O</span><span class="s2">\&quot;</span><span class="s5">, &quot;</span>
+            <span class="s5">&quot;-O2 for </span><span class="s2">\&quot;</span><span class="s5">python -OO</span><span class="s2">\&quot;</span><span class="s5">, and -O0 to disable [default: -O0]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">'skip-build'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s5">&quot;skip the build steps&quot;</span><span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">boolean_options</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = [</span><span class="s5">'force'</span><span class="s3">, </span><span class="s5">'compile'</span><span class="s3">, </span><span class="s5">'skip-build'</span><span class="s3">]</span>
+    <span class="s1">negative_opt</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]] = {</span><span class="s5">'no-compile'</span><span class="s3">: </span><span class="s5">'compile'</span><span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s4"># let the 'install' command dictate our installation directory</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">install_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">build_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">force </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">compile </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># Get all the information we need to install pure Python modules</span>
+        <span class="s4"># from the umbrella 'install' command -- build (source) directory,</span>
+        <span class="s4"># install (target) directory, and whether to compile .py files.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_undefined_options</span><span class="s3">(</span>
+            <span class="s5">'install'</span><span class="s3">,</span>
+            <span class="s3">(</span><span class="s5">'build_lib'</span><span class="s3">, </span><span class="s5">'build_dir'</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">'install_lib'</span><span class="s3">, </span><span class="s5">'install_dir'</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">'force'</span><span class="s3">, </span><span class="s5">'force'</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">'compile'</span><span class="s3">, </span><span class="s5">'compile'</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">'optimize'</span><span class="s3">, </span><span class="s5">'optimize'</span><span class="s3">),</span>
+            <span class="s3">(</span><span class="s5">'skip_build'</span><span class="s3">, </span><span class="s5">'skip_build'</span><span class="s3">),</span>
+        <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compile </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">compile </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize</span><span class="s3">, </span><span class="s1">int</span><span class="s3">):</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s2">not in </span><span class="s3">(</span><span class="s6">0</span><span class="s3">, </span><span class="s6">1</span><span class="s3">, </span><span class="s6">2</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">DistutilsOptionError</span><span class="s3">(</span><span class="s5">&quot;optimize must be 0, 1, or 2&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># Make sure we have built everything we need first</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">build</span><span class="s3">()</span>
+
+        <span class="s4"># Install everything: simply dump the entire contents of the build</span>
+        <span class="s4"># directory to the installation directory (that's the beauty of</span>
+        <span class="s4"># having a build directory!)</span>
+        <span class="s1">outfiles </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">install</span><span class="s3">()</span>
+
+        <span class="s4"># (Optionally) compile .py to .pyc</span>
+        <span class="s2">if </span><span class="s1">outfiles </span><span class="s2">is not None and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_pure_modules</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">byte_compile</span><span class="s3">(</span><span class="s1">outfiles</span><span class="s3">)</span>
+
+    <span class="s4"># -- Top-level worker functions ------------------------------------</span>
+    <span class="s4"># (called from 'run()')</span>
+
+    <span class="s2">def </span><span class="s1">build</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_pure_modules</span><span class="s3">():</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s5">'build_py'</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s5">'build_ext'</span><span class="s3">)</span>
+
+    <span class="s4"># Any: https://typing.readthedocs.io/en/latest/guides/writing_stubs.html#the-any-trick</span>
+    <span class="s2">def </span><span class="s1">install</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s1">Any</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_dir</span><span class="s3">):</span>
+            <span class="s1">outfiles </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">copy_tree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_dir</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">install_dir</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s5">f&quot;'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_dir</span><span class="s2">}</span><span class="s5">' does not exist -- no Python modules to install&quot;</span>
+            <span class="s3">)</span>
+            <span class="s2">return</span>
+        <span class="s2">return </span><span class="s1">outfiles</span>
+
+    <span class="s2">def </span><span class="s1">byte_compile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">files</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">dont_write_bytecode</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s5">'byte-compiling is disabled, skipping.'</span><span class="s3">)</span>
+            <span class="s2">return</span>
+
+        <span class="s2">from </span><span class="s3">..</span><span class="s1">util </span><span class="s2">import </span><span class="s1">byte_compile</span>
+
+        <span class="s4"># Get the &quot;--root&quot; directory supplied to the &quot;install&quot; command,</span>
+        <span class="s4"># and use it as a prefix to strip off the purported filename</span>
+        <span class="s4"># encoded in bytecode files.  This is far from complete, but it</span>
+        <span class="s4"># should at least generate usable bytecode in RPM distributions.</span>
+        <span class="s1">install_root </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'install'</span><span class="s3">).</span><span class="s1">root</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">:</span>
+            <span class="s1">byte_compile</span><span class="s3">(</span>
+                <span class="s1">files</span><span class="s3">,</span>
+                <span class="s1">optimize</span><span class="s3">=</span><span class="s6">0</span><span class="s3">,</span>
+                <span class="s1">force</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">force</span><span class="s3">,</span>
+                <span class="s1">prefix</span><span class="s3">=</span><span class="s1">install_root</span><span class="s3">,</span>
+                <span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s3">&gt; </span><span class="s6">0</span><span class="s3">:</span>
+            <span class="s1">byte_compile</span><span class="s3">(</span>
+                <span class="s1">files</span><span class="s3">,</span>
+                <span class="s1">optimize</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize</span><span class="s3">,</span>
+                <span class="s1">force</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">force</span><span class="s3">,</span>
+                <span class="s1">prefix</span><span class="s3">=</span><span class="s1">install_root</span><span class="s3">,</span>
+                <span class="s1">verbose</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">verbose</span><span class="s3">,</span>
+                <span class="s1">dry_run</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">,</span>
+            <span class="s3">)</span>
+
+    <span class="s4"># -- Utility methods -----------------------------------------------</span>
+
+    <span class="s2">def </span><span class="s1">_mutate_outputs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">has_any</span><span class="s3">, </span><span class="s1">build_cmd</span><span class="s3">, </span><span class="s1">cmd_option</span><span class="s3">, </span><span class="s1">output_dir</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">has_any</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s3">[]</span>
+
+        <span class="s1">build_cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s1">build_cmd</span><span class="s3">)</span>
+        <span class="s1">build_files </span><span class="s3">= </span><span class="s1">build_cmd</span><span class="s3">.</span><span class="s1">get_outputs</span><span class="s3">()</span>
+        <span class="s1">build_dir </span><span class="s3">= </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">build_cmd</span><span class="s3">, </span><span class="s1">cmd_option</span><span class="s3">)</span>
+
+        <span class="s1">prefix_len </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">build_dir</span><span class="s3">) + </span><span class="s1">len</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">)</span>
+        <span class="s1">outputs </span><span class="s3">= [</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">output_dir</span><span class="s3">, </span><span class="s1">file</span><span class="s3">[</span><span class="s1">prefix_len</span><span class="s3">:]) </span><span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">build_files</span><span class="s3">]</span>
+
+        <span class="s2">return </span><span class="s1">outputs</span>
+
+    <span class="s2">def </span><span class="s1">_bytecode_filenames</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">py_filenames</span><span class="s3">):</span>
+        <span class="s1">bytecode_files </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">py_file </span><span class="s2">in </span><span class="s1">py_filenames</span><span class="s3">:</span>
+            <span class="s4"># Since build_py handles package data installation, the</span>
+            <span class="s4"># list of outputs can contain more than just .py files.</span>
+            <span class="s4"># Make sure we only report bytecode for the .py files.</span>
+            <span class="s1">ext </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitext</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normcase</span><span class="s3">(</span><span class="s1">py_file</span><span class="s3">))[</span><span class="s6">1</span><span class="s3">]</span>
+            <span class="s2">if </span><span class="s1">ext </span><span class="s3">!= </span><span class="s1">PYTHON_SOURCE_EXTENSION</span><span class="s3">:</span>
+                <span class="s2">continue</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">:</span>
+                <span class="s1">bytecode_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                    <span class="s1">importlib</span><span class="s3">.</span><span class="s1">util</span><span class="s3">.</span><span class="s1">cache_from_source</span><span class="s3">(</span><span class="s1">py_file</span><span class="s3">, </span><span class="s1">optimization</span><span class="s3">=</span><span class="s5">''</span><span class="s3">)</span>
+                <span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize </span><span class="s3">&gt; </span><span class="s6">0</span><span class="s3">:</span>
+                <span class="s1">bytecode_files</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span>
+                    <span class="s1">importlib</span><span class="s3">.</span><span class="s1">util</span><span class="s3">.</span><span class="s1">cache_from_source</span><span class="s3">(</span>
+                        <span class="s1">py_file</span><span class="s3">, </span><span class="s1">optimization</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">optimize</span>
+                    <span class="s3">)</span>
+                <span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">bytecode_files</span>
+
+    <span class="s4"># -- External interface --------------------------------------------</span>
+    <span class="s4"># (called by outsiders)</span>
+
+    <span class="s2">def </span><span class="s1">get_outputs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Return the list of files that would be installed if this command 
+        were actually run.  Not affected by the &quot;dry-run&quot; flag or whether 
+        modules have actually been built yet. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pure_outputs </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_mutate_outputs</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_pure_modules</span><span class="s3">(),</span>
+            <span class="s5">'build_py'</span><span class="s3">,</span>
+            <span class="s5">'build_lib'</span><span class="s3">,</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">install_dir</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">:</span>
+            <span class="s1">bytecode_outputs </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_bytecode_filenames</span><span class="s3">(</span><span class="s1">pure_outputs</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">bytecode_outputs </span><span class="s3">= []</span>
+
+        <span class="s1">ext_outputs </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_mutate_outputs</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">(),</span>
+            <span class="s5">'build_ext'</span><span class="s3">,</span>
+            <span class="s5">'build_lib'</span><span class="s3">,</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">install_dir</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">pure_outputs </span><span class="s3">+ </span><span class="s1">bytecode_outputs </span><span class="s3">+ </span><span class="s1">ext_outputs</span>
+
+    <span class="s2">def </span><span class="s1">get_inputs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Get the list of files that are input to this command, ie. the 
+        files that get installed as they are named in the build tree. 
+        The files in this list correspond one-to-one to the output 
+        filenames returned by 'get_outputs()'. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">inputs </span><span class="s3">= []</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_pure_modules</span><span class="s3">():</span>
+            <span class="s1">build_py </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'build_py'</span><span class="s3">)</span>
+            <span class="s1">inputs</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">build_py</span><span class="s3">.</span><span class="s1">get_outputs</span><span class="s3">())</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">():</span>
+            <span class="s1">build_ext </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">'build_ext'</span><span class="s3">)</span>
+            <span class="s1">inputs</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">build_ext</span><span class="s3">.</span><span class="s1">get_outputs</span><span class="s3">())</span>
+
+        <span class="s2">return </span><span class="s1">inputs</span>
+</pre>
+</body>
+</html>

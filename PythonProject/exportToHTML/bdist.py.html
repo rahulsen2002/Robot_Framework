@@ -1,0 +1,190 @@
+<html>
+<head>
+<title>bdist.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bdist.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.bdist 
+ 
+Implements the Distutils 'bdist' command (create a built [binary] 
+distribution).&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Callable</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">ClassVar</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">DistutilsOptionError</span><span class="s3">, </span><span class="s1">DistutilsPlatformError</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">util </span><span class="s2">import </span><span class="s1">get_platform</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">deprecated</span>
+<span class="s2">else</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">deprecated</span><span class="s3">(</span><span class="s1">message</span><span class="s3">):</span>
+        <span class="s2">return lambda </span><span class="s1">fn</span><span class="s3">: </span><span class="s1">fn</span>
+
+
+<span class="s2">def </span><span class="s1">show_formats</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot;Print list of available formats (arguments to &quot;--format&quot; option).&quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s3">..</span><span class="s1">fancy_getopt </span><span class="s2">import </span><span class="s1">FancyGetopt</span>
+
+    <span class="s1">formats </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s4">&quot;formats=&quot; </span><span class="s3">+ </span><span class="s1">format</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">bdist</span><span class="s3">.</span><span class="s1">format_commands</span><span class="s3">[</span><span class="s1">format</span><span class="s3">][</span><span class="s5">1</span><span class="s3">])</span>
+        <span class="s2">for </span><span class="s1">format </span><span class="s2">in </span><span class="s1">bdist</span><span class="s3">.</span><span class="s1">format_commands</span>
+    <span class="s3">]</span>
+    <span class="s1">pretty_printer </span><span class="s3">= </span><span class="s1">FancyGetopt</span><span class="s3">(</span><span class="s1">formats</span><span class="s3">)</span>
+    <span class="s1">pretty_printer</span><span class="s3">.</span><span class="s1">print_help</span><span class="s3">(</span><span class="s4">&quot;List of available distribution formats:&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ListCompat</span><span class="s3">(</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]):</span>
+    <span class="s6"># adapter to allow for Setuptools compatibility in format_commands</span>
+    <span class="s3">@</span><span class="s1">deprecated</span><span class="s3">(</span><span class="s4">&quot;format_commands is now a dict. append is deprecated.&quot;</span><span class="s3">)</span>
+    <span class="s2">def </span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">: </span><span class="s1">object</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+            <span class="s4">&quot;format_commands is now a dict. append is deprecated.&quot;</span><span class="s3">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s3">,</span>
+            <span class="s1">stacklevel</span><span class="s3">=</span><span class="s5">2</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">bdist</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s1">description </span><span class="s3">= </span><span class="s4">&quot;create a built (binary) distribution&quot;</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s4">'bdist-base='</span><span class="s3">, </span><span class="s4">'b'</span><span class="s3">, </span><span class="s4">&quot;temporary directory for creating built distributions&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'plat-name='</span><span class="s3">,</span>
+            <span class="s4">'p'</span><span class="s3">,</span>
+            <span class="s4">&quot;platform name to embed in generated filenames &quot;</span>
+            <span class="s4">f&quot;[default: </span><span class="s2">{</span><span class="s1">get_platform</span><span class="s3">()</span><span class="s2">}</span><span class="s4">]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'formats='</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;formats for distribution (comma-separated list)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'dist-dir='</span><span class="s3">,</span>
+            <span class="s4">'d'</span><span class="s3">,</span>
+            <span class="s4">&quot;directory to put final built distributions in [default: dist]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s4">'skip-build'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;skip rebuilding everything (for testing/debugging)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'owner='</span><span class="s3">,</span>
+            <span class="s4">'u'</span><span class="s3">,</span>
+            <span class="s4">&quot;Owner name used when creating a tar file [default: current user]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s4">'group='</span><span class="s3">,</span>
+            <span class="s4">'g'</span><span class="s3">,</span>
+            <span class="s4">&quot;Group name used when creating a tar file [default: current group]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">boolean_options</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] = [</span><span class="s4">'skip-build'</span><span class="s3">]</span>
+
+    <span class="s1">help_options</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">list</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">[[], </span><span class="s1">object</span><span class="s3">]]]] = [</span>
+        <span class="s3">(</span><span class="s4">'help-formats'</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s4">&quot;lists available distribution formats&quot;</span><span class="s3">, </span><span class="s1">show_formats</span><span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s6"># The following commands do not take a format option from bdist</span>
+    <span class="s1">no_format_option</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, ...]] = (</span><span class="s4">'bdist_rpm'</span><span class="s3">,)</span>
+
+    <span class="s6"># This won't do in reality: will need to distinguish RPM-ish Linux,</span>
+    <span class="s6"># Debian-ish Linux, Solaris, FreeBSD, ..., Windows, Mac OS.</span>
+    <span class="s1">default_format</span><span class="s3">: </span><span class="s1">ClassVar</span><span class="s3">[</span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]] = {</span><span class="s4">'posix'</span><span class="s3">: </span><span class="s4">'gztar'</span><span class="s3">, </span><span class="s4">'nt'</span><span class="s3">: </span><span class="s4">'zip'</span><span class="s3">}</span>
+
+    <span class="s6"># Define commands in preferred order for the --help-formats option</span>
+    <span class="s1">format_commands </span><span class="s3">= </span><span class="s1">ListCompat</span><span class="s3">({</span>
+        <span class="s4">'rpm'</span><span class="s3">: (</span><span class="s4">'bdist_rpm'</span><span class="s3">, </span><span class="s4">&quot;RPM distribution&quot;</span><span class="s3">),</span>
+        <span class="s4">'gztar'</span><span class="s3">: (</span><span class="s4">'bdist_dumb'</span><span class="s3">, </span><span class="s4">&quot;gzip'ed tar file&quot;</span><span class="s3">),</span>
+        <span class="s4">'bztar'</span><span class="s3">: (</span><span class="s4">'bdist_dumb'</span><span class="s3">, </span><span class="s4">&quot;bzip2'ed tar file&quot;</span><span class="s3">),</span>
+        <span class="s4">'xztar'</span><span class="s3">: (</span><span class="s4">'bdist_dumb'</span><span class="s3">, </span><span class="s4">&quot;xz'ed tar file&quot;</span><span class="s3">),</span>
+        <span class="s4">'ztar'</span><span class="s3">: (</span><span class="s4">'bdist_dumb'</span><span class="s3">, </span><span class="s4">&quot;compressed tar file&quot;</span><span class="s3">),</span>
+        <span class="s4">'tar'</span><span class="s3">: (</span><span class="s4">'bdist_dumb'</span><span class="s3">, </span><span class="s4">&quot;tar file&quot;</span><span class="s3">),</span>
+        <span class="s4">'zip'</span><span class="s3">: (</span><span class="s4">'bdist_dumb'</span><span class="s3">, </span><span class="s4">&quot;ZIP file&quot;</span><span class="s3">),</span>
+    <span class="s3">})</span>
+
+    <span class="s6"># for compatibility until consumers only reference format_commands</span>
+    <span class="s1">format_command </span><span class="s3">= </span><span class="s1">format_commands</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_base </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">formats </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">group </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">owner </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s6"># have to finalize 'plat_name' before 'bdist_base'</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s3">= </span><span class="s1">get_platform</span><span class="s3">()</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build'</span><span class="s3">).</span><span class="s1">plat_name</span>
+
+        <span class="s6"># 'bdist_base' -- parent of per-built-distribution-format</span>
+        <span class="s6"># temporary directories (eg. we'll probably have</span>
+        <span class="s6"># &quot;build/bdist.&lt;plat&gt;/dumb&quot;, &quot;build/bdist.&lt;plat&gt;/rpm&quot;, etc.)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_base </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">build_base </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s4">'build'</span><span class="s3">).</span><span class="s1">build_base</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_base </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">build_base</span><span class="s3">, </span><span class="s4">'bdist.' </span><span class="s3">+ </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ensure_string_list</span><span class="s3">(</span><span class="s4">'formats'</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">formats </span><span class="s3">= [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">default_format</span><span class="s3">[</span><span class="s1">os</span><span class="s3">.</span><span class="s1">name</span><span class="s3">]]</span>
+            <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsPlatformError</span><span class="s3">(</span>
+                    <span class="s4">&quot;don't know how to create built distributions &quot;</span>
+                    <span class="s4">f&quot;on platform </span><span class="s2">{</span><span class="s1">os</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">&quot;</span>
+                <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir </span><span class="s3">= </span><span class="s4">&quot;dist&quot;</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s6"># Figure out which sub-commands we need to run.</span>
+        <span class="s1">commands </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">format </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">commands</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_commands</span><span class="s3">[</span><span class="s1">format</span><span class="s3">][</span><span class="s5">0</span><span class="s3">])</span>
+            <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsOptionError</span><span class="s3">(</span><span class="s4">f&quot;invalid format '</span><span class="s2">{</span><span class="s1">format</span><span class="s2">}</span><span class="s4">'&quot;</span><span class="s3">)</span>
+
+        <span class="s6"># Reinitialize and run each command.</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">)):</span>
+            <span class="s1">cmd_name </span><span class="s3">= </span><span class="s1">commands</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+            <span class="s1">sub_cmd </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s1">cmd_name</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">cmd_name </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">no_format_option</span><span class="s3">:</span>
+                <span class="s1">sub_cmd</span><span class="s3">.</span><span class="s1">format </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">formats</span><span class="s3">[</span><span class="s1">i</span><span class="s3">]</span>
+
+            <span class="s6"># passing the owner and group names for tar archiving</span>
+            <span class="s2">if </span><span class="s1">cmd_name </span><span class="s3">== </span><span class="s4">'bdist_dumb'</span><span class="s3">:</span>
+                <span class="s1">sub_cmd</span><span class="s3">.</span><span class="s1">owner </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">owner</span>
+                <span class="s1">sub_cmd</span><span class="s3">.</span><span class="s1">group </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">group</span>
+
+            <span class="s6"># If we're going to need to run this command again, tell it to</span>
+            <span class="s6"># keep its temporary files around so subsequent runs go faster.</span>
+            <span class="s2">if </span><span class="s1">cmd_name </span><span class="s2">in </span><span class="s1">commands</span><span class="s3">[</span><span class="s1">i </span><span class="s3">+ </span><span class="s5">1 </span><span class="s3">:]:</span>
+                <span class="s1">sub_cmd</span><span class="s3">.</span><span class="s1">keep_temp </span><span class="s3">= </span><span class="s2">True</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s1">cmd_name</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<html>
+<head>
+<title>_windows_pipes.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_windows_pipes.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">ReceiveStream</span><span class="s2">, </span><span class="s1">SendStream</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_windows_cffi </span><span class="s0">import </span><span class="s1">_handle</span><span class="s2">, </span><span class="s1">kernel32</span><span class="s2">, </span><span class="s1">raise_winerror</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">ConflictDetector</span><span class="s2">, </span><span class="s1">final</span>
+
+<span class="s0">assert </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;win32&quot; </span><span class="s0">or not </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s4"># XX TODO: don't just make this up based on nothing.</span>
+<span class="s1">DEFAULT_RECEIVE_SIZE </span><span class="s2">= </span><span class="s5">65536</span>
+
+
+<span class="s4"># See the comments on _unix_pipes._FdHolder for discussion of why we set the</span>
+<span class="s4"># handle to -1 when it's closed.</span>
+<span class="s0">class </span><span class="s1">_HandleHolder</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">handle</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">handle </span><span class="s2">= -</span><span class="s5">1</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s3">&quot;handle must be an int&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">handle </span><span class="s2">= </span><span class="s1">handle</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">register_with_iocp</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">closed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">handle </span><span class="s2">== -</span><span class="s5">1</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s1">handle </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">handle</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">handle </span><span class="s2">= -</span><span class="s5">1</span>
+        <span class="s0">if not </span><span class="s1">kernel32</span><span class="s2">.</span><span class="s1">CloseHandle</span><span class="s2">(</span><span class="s1">_handle</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">)):</span>
+            <span class="s1">raise_winerror</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">__del__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">PipeSendStream</span><span class="s2">(</span><span class="s1">SendStream</span><span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot;Represents a send stream over a Windows named pipe that has been 
+    opened in OVERLAPPED mode. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">handle</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder </span><span class="s2">= </span><span class="s1">_HandleHolder</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector </span><span class="s2">= </span><span class="s1">ConflictDetector</span><span class="s2">(</span>
+            <span class="s3">&quot;another task is currently using this pipe&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span><span class="s3">&quot;this pipe is already closed&quot;</span><span class="s2">)</span>
+
+            <span class="s0">if not </span><span class="s1">data</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+                <span class="s0">return</span>
+
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">written </span><span class="s2">= </span><span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">write_overlapped</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">, </span><span class="s1">data</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">BrokenPipeError </span><span class="s0">as </span><span class="s1">ex</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BrokenResourceError </span><span class="s0">from </span><span class="s1">ex</span>
+            <span class="s4"># By my reading of MSDN, this assert is guaranteed to pass so long</span>
+            <span class="s4"># as the pipe isn't in nonblocking mode, but... let's just</span>
+            <span class="s4"># double-check.</span>
+            <span class="s0">assert </span><span class="s1">written </span><span class="s2">== </span><span class="s1">len</span><span class="s2">(</span><span class="s1">data</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">wait_send_all_might_not_block</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span><span class="s3">&quot;This pipe is already closed&quot;</span><span class="s2">)</span>
+
+            <span class="s4"># not implemented yet, and probably not needed</span>
+            <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">PipeReceiveStream</span><span class="s2">(</span><span class="s1">ReceiveStream</span><span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot;Represents a receive stream over an os.pipe object.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">handle</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder </span><span class="s2">= </span><span class="s1">_HandleHolder</span><span class="s2">(</span><span class="s1">handle</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector </span><span class="s2">= </span><span class="s1">ConflictDetector</span><span class="s2">(</span>
+            <span class="s3">&quot;another task is currently using this pipe&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">receive_some</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">max_bytes</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_conflict_detector</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span><span class="s3">&quot;this pipe is already closed&quot;</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">max_bytes </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s1">max_bytes </span><span class="s2">= </span><span class="s1">DEFAULT_RECEIVE_SIZE</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">max_bytes</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+                    <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s3">&quot;max_bytes must be integer &gt;= 1&quot;</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">max_bytes </span><span class="s2">&lt; </span><span class="s5">1</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s3">&quot;max_bytes must be integer &gt;= 1&quot;</span><span class="s2">)</span>
+
+            <span class="s1">buffer </span><span class="s2">= </span><span class="s1">bytearray</span><span class="s2">(</span><span class="s1">max_bytes</span><span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">size </span><span class="s2">= </span><span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">readinto_overlapped</span><span class="s2">(</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">handle</span><span class="s2">,</span>
+                    <span class="s1">buffer</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">BrokenPipeError</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span>
+                        <span class="s3">&quot;another task closed this pipe&quot;</span><span class="s2">,</span>
+                    <span class="s2">) </span><span class="s0">from None</span>
+
+                <span class="s4"># Windows raises BrokenPipeError on one end of a pipe</span>
+                <span class="s4"># whenever the other end closes, regardless of direction.</span>
+                <span class="s4"># Convert this to the Unix behavior of returning EOF to the</span>
+                <span class="s4"># reader when the writer closes.</span>
+                <span class="s4">#</span>
+                <span class="s4"># And since we're not raising an exception, we have to</span>
+                <span class="s4"># checkpoint. But readinto_overlapped did raise an exception,</span>
+                <span class="s4"># so it might not have checkpointed for us. So we have to</span>
+                <span class="s4"># checkpoint manually.</span>
+                <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+                <span class="s0">return </span><span class="s7">b&quot;&quot;</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">del </span><span class="s1">buffer</span><span class="s2">[</span><span class="s1">size</span><span class="s2">:]</span>
+                <span class="s0">return </span><span class="s1">buffer</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_handle_holder</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<html>
+<head>
+<title>_repl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_repl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">ast</span>
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">types</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+<span class="s0">from </span><span class="s1">code </span><span class="s0">import </span><span class="s1">InteractiveConsole</span>
+
+<span class="s0">import </span><span class="s1">outcome</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+<span class="s0">import </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">final</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">InteractiveConsole</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">repl_locals</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">object</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">locals</span><span class="s2">=</span><span class="s1">repl_locals</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">.</span><span class="s1">compiler</span><span class="s2">.</span><span class="s1">flags </span><span class="s2">|= </span><span class="s1">ast</span><span class="s2">.</span><span class="s1">PyCF_ALLOW_TOP_LEVEL_AWAIT</span>
+
+    <span class="s0">def </span><span class="s1">runcode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">code</span><span class="s2">: </span><span class="s1">types</span><span class="s2">.</span><span class="s1">CodeType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># https://github.com/python/typeshed/issues/13768</span>
+        <span class="s1">func </span><span class="s2">= </span><span class="s1">types</span><span class="s2">.</span><span class="s1">FunctionType</span><span class="s2">(</span><span class="s1">code</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">locals</span><span class="s2">)  </span><span class="s3"># type: ignore[arg-type]</span>
+        <span class="s0">if </span><span class="s1">inspect</span><span class="s2">.</span><span class="s1">iscoroutinefunction</span><span class="s2">(</span><span class="s1">func</span><span class="s2">):</span>
+            <span class="s1">result </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">from_thread</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">acapture</span><span class="s2">, </span><span class="s1">func</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">result </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">from_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">capture</span><span class="s2">, </span><span class="s1">func</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">result</span><span class="s2">, </span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">Error</span><span class="s2">):</span>
+            <span class="s3"># If it is SystemExit, quit the repl. Otherwise, print the traceback.</span>
+            <span class="s3"># If there is a SystemExit inside a BaseExceptionGroup, it probably isn't</span>
+            <span class="s3"># the user trying to quit the repl, but rather an error in the code. So, we</span>
+            <span class="s3"># don't try to inspect groups for SystemExit. Instead, we just print and</span>
+            <span class="s3"># return to the REPL.</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">result</span><span class="s2">.</span><span class="s1">error</span><span class="s2">, </span><span class="s1">SystemExit</span><span class="s2">):</span>
+                <span class="s0">raise </span><span class="s1">result</span><span class="s2">.</span><span class="s1">error</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s3"># Inline our own version of self.showtraceback that can use</span>
+                <span class="s3"># outcome.Error.error directly to print clean tracebacks.</span>
+                <span class="s3"># This also means overriding self.showtraceback does nothing.</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">last_type</span><span class="s2">, </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">last_value </span><span class="s2">= </span><span class="s1">type</span><span class="s2">(</span><span class="s1">result</span><span class="s2">.</span><span class="s1">error</span><span class="s2">), </span><span class="s1">result</span><span class="s2">.</span><span class="s1">error</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">last_traceback </span><span class="s2">= </span><span class="s1">result</span><span class="s2">.</span><span class="s1">error</span><span class="s2">.</span><span class="s1">__traceback__</span>
+                <span class="s3"># see https://docs.python.org/3/library/sys.html#sys.last_exc</span>
+                <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&gt;= (</span><span class="s4">3</span><span class="s2">, </span><span class="s4">12</span><span class="s2">):</span>
+                    <span class="s1">sys</span><span class="s2">.</span><span class="s1">last_exc </span><span class="s2">= </span><span class="s1">result</span><span class="s2">.</span><span class="s1">error</span>
+
+                <span class="s3"># We always use sys.excepthook, unlike other implementations.</span>
+                <span class="s3"># This means that overriding self.write also does nothing to tbs.</span>
+                <span class="s1">sys</span><span class="s2">.</span><span class="s1">excepthook</span><span class="s2">(</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">last_type</span><span class="s2">, </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">last_value</span><span class="s2">, </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">last_traceback</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">run_repl</span><span class="s2">(</span><span class="s1">console</span><span class="s2">: </span><span class="s1">TrioInteractiveConsole</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">banner </span><span class="s2">= (</span>
+        <span class="s5">f&quot;trio REPL </span><span class="s0">{</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version</span><span class="s0">} </span><span class="s5">on </span><span class="s0">{</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform</span><span class="s0">}\n</span><span class="s5">&quot;</span>
+        <span class="s5">f'Use &quot;await&quot; directly instead of &quot;trio.run()&quot;.</span><span class="s0">\n</span><span class="s5">'</span>
+        <span class="s5">f'Type &quot;help&quot;, &quot;copyright&quot;, &quot;credits&quot; or &quot;license&quot; '</span>
+        <span class="s5">f&quot;for more information.</span><span class="s0">\n</span><span class="s5">&quot;</span>
+        <span class="s5">f'</span><span class="s0">{</span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">sys</span><span class="s2">, </span><span class="s5">&quot;ps1&quot;</span><span class="s2">, </span><span class="s5">&quot;&gt;&gt;&gt; &quot;</span><span class="s2">)</span><span class="s0">}</span><span class="s5">import trio'</span>
+    <span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span><span class="s1">console</span><span class="s2">.</span><span class="s1">interact</span><span class="s2">, </span><span class="s1">banner</span><span class="s2">)</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">warnings</span><span class="s2">.</span><span class="s1">filterwarnings</span><span class="s2">(</span>
+            <span class="s5">&quot;ignore&quot;</span><span class="s2">,</span>
+            <span class="s1">message</span><span class="s2">=</span><span class="s5">r&quot;^coroutine .* was never awaited$&quot;</span><span class="s2">,</span>
+            <span class="s1">category</span><span class="s2">=</span><span class="s1">RuntimeWarning</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">main</span><span class="s2">(</span><span class="s1">original_locals</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">object</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">suppress</span><span class="s2">(</span><span class="s1">ImportError</span><span class="s2">):</span>
+        <span class="s0">import </span><span class="s1">readline  </span><span class="s3"># noqa: F401</span>
+
+    <span class="s1">repl_locals</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">object</span><span class="s2">] = {</span><span class="s5">&quot;trio&quot;</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">}</span>
+    <span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s2">{</span>
+        <span class="s5">&quot;__name__&quot;</span><span class="s2">,</span>
+        <span class="s5">&quot;__package__&quot;</span><span class="s2">,</span>
+        <span class="s5">&quot;__loader__&quot;</span><span class="s2">,</span>
+        <span class="s5">&quot;__spec__&quot;</span><span class="s2">,</span>
+        <span class="s5">&quot;__builtins__&quot;</span><span class="s2">,</span>
+        <span class="s5">&quot;__file__&quot;</span><span class="s2">,</span>
+    <span class="s2">}:</span>
+        <span class="s1">repl_locals</span><span class="s2">[</span><span class="s1">key</span><span class="s2">] = </span><span class="s1">original_locals</span><span class="s2">[</span><span class="s1">key</span><span class="s2">]</span>
+
+    <span class="s1">console </span><span class="s2">= </span><span class="s1">TrioInteractiveConsole</span><span class="s2">(</span><span class="s1">repl_locals</span><span class="s2">)</span>
+    <span class="s1">trio</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">run_repl</span><span class="s2">, </span><span class="s1">console</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

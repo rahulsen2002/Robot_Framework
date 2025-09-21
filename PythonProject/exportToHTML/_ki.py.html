@@ -1,0 +1,294 @@
+<html>
+<head>
+<title>_ki.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_ki.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">types</span>
+<span class="s0">import </span><span class="s1">weakref</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">Generic</span><span class="s2">, </span><span class="s1">Protocol</span><span class="s2">, </span><span class="s1">TypeVar</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">is_main_thread</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_run_context </span><span class="s0">import </span><span class="s1">GLOBAL_RUN_CONTEXT</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">import </span><span class="s1">types</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Self</span><span class="s2">, </span><span class="s1">TypeGuard</span>
+<span class="s3"># In ordinary single-threaded Python code, when you hit control-C, it raises</span>
+<span class="s3"># an exception and automatically does all the regular unwinding stuff.</span>
+<span class="s3">#</span>
+<span class="s3"># In Trio code, we would like hitting control-C to raise an exception and</span>
+<span class="s3"># automatically do all the regular unwinding stuff. In particular, we would</span>
+<span class="s3"># like to maintain our invariant that all tasks always run to completion (one</span>
+<span class="s3"># way or another), by unwinding all of them.</span>
+<span class="s3">#</span>
+<span class="s3"># But it's basically impossible to write the core task running code in such a</span>
+<span class="s3"># way that it can maintain this invariant in the face of KeyboardInterrupt</span>
+<span class="s3"># exceptions arising at arbitrary bytecode positions. Similarly, if a</span>
+<span class="s3"># KeyboardInterrupt happened at the wrong moment inside pretty much any of our</span>
+<span class="s3"># inter-task synchronization or I/O primitives, then the system state could</span>
+<span class="s3"># get corrupted and prevent our being able to clean up properly.</span>
+<span class="s3">#</span>
+<span class="s3"># So, we need a way to defer KeyboardInterrupt processing from these critical</span>
+<span class="s3"># sections.</span>
+<span class="s3">#</span>
+<span class="s3"># Things that don't work:</span>
+<span class="s3">#</span>
+<span class="s3"># - Listen for SIGINT and process it in a system task: works fine for</span>
+<span class="s3">#   well-behaved programs that regularly pass through the event loop, but if</span>
+<span class="s3">#   user-code goes into an infinite loop then it can't be interrupted. Which</span>
+<span class="s3">#   is unfortunate, since dealing with infinite loops is what</span>
+<span class="s3">#   KeyboardInterrupt is for!</span>
+<span class="s3">#</span>
+<span class="s3"># - Use pthread_sigmask to disable signal delivery during critical section:</span>
+<span class="s3">#   (a) windows has no pthread_sigmask, (b) python threads start with all</span>
+<span class="s3">#   signals unblocked, so if there are any threads around they'll receive the</span>
+<span class="s3">#   signal and then tell the main thread to run the handler, even if the main</span>
+<span class="s3">#   thread has that signal blocked.</span>
+<span class="s3">#</span>
+<span class="s3"># - Install a signal handler which checks a global variable to decide whether</span>
+<span class="s3">#   to raise the exception immediately (if we're in a non-critical section),</span>
+<span class="s3">#   or to schedule it on the event loop (if we're in a critical section). The</span>
+<span class="s3">#   problem here is that it's impossible to transition safely out of user code:</span>
+<span class="s3">#</span>
+<span class="s3">#     with keyboard_interrupt_enabled:</span>
+<span class="s3">#         msg = coro.send(value)</span>
+<span class="s3">#</span>
+<span class="s3">#   If this raises a KeyboardInterrupt, it might be because the coroutine got</span>
+<span class="s3">#   interrupted and has unwound... or it might be the KeyboardInterrupt</span>
+<span class="s3">#   arrived just *after* 'send' returned, so the coroutine is still running,</span>
+<span class="s3">#   but we just lost the message it sent. (And worse, in our actual task</span>
+<span class="s3">#   runner, the send is hidden inside a utility function etc.)</span>
+<span class="s3">#</span>
+<span class="s3"># Solution:</span>
+<span class="s3">#</span>
+<span class="s3"># Mark *stack frames* as being interrupt-safe or interrupt-unsafe, and from</span>
+<span class="s3"># the signal handler check which kind of frame we're currently in when</span>
+<span class="s3"># deciding whether to raise or schedule the exception.</span>
+<span class="s3">#</span>
+<span class="s3"># There are still some cases where this can fail, like if someone hits</span>
+<span class="s3"># control-C while the process is in the event loop, and then it immediately</span>
+<span class="s3"># enters an infinite loop in user code. In this case the user has to hit</span>
+<span class="s3"># control-C a second time. And of course if the user code is written so that</span>
+<span class="s3"># it doesn't actually exit after a task crashes and everything gets cancelled,</span>
+<span class="s3"># then there's not much to be done. (Hitting control-C repeatedly might help,</span>
+<span class="s3"># but in general the solution is to kill the process some other way, just like</span>
+<span class="s3"># for any Python program that's written to catch and ignore</span>
+<span class="s3"># KeyboardInterrupt.)</span>
+
+<span class="s1">_T </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;_T&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">_IdRef</span><span class="s2">(</span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">[</span><span class="s1">_T</span><span class="s2">]):</span>
+    <span class="s1">__slots__ </span><span class="s2">= (</span><span class="s4">&quot;_hash&quot;</span><span class="s2">,)</span>
+    <span class="s1">_hash</span><span class="s2">: </span><span class="s1">int</span>
+
+    <span class="s0">def </span><span class="s1">__new__</span><span class="s2">(</span>
+        <span class="s1">cls</span><span class="s2">,</span>
+        <span class="s1">ob</span><span class="s2">: </span><span class="s1">_T</span><span class="s2">,</span>
+        <span class="s1">callback</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Self</span><span class="s2">], </span><span class="s1">object</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s2">/,</span>
+    <span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">Self </span><span class="s2">= </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">.</span><span class="s1">__new__</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">ob</span><span class="s2">, </span><span class="s1">callback</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_hash </span><span class="s2">= </span><span class="s1">object</span><span class="s2">.</span><span class="s1">__hash__</span><span class="s2">(</span><span class="s1">ob</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self </span><span class="s0">is </span><span class="s1">other</span><span class="s2">:</span>
+            <span class="s0">return True</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">_IdRef</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s1">my_obj </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">my_obj </span><span class="s2">= </span><span class="s1">self</span><span class="s2">()</span>
+            <span class="s0">return </span><span class="s1">my_obj </span><span class="s0">is not None and </span><span class="s1">my_obj </span><span class="s0">is </span><span class="s1">other</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">del </span><span class="s1">my_obj</span>
+
+    <span class="s3"># we're overriding a builtin so we do need this</span>
+    <span class="s0">def </span><span class="s1">__ne__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return not </span><span class="s1">self </span><span class="s2">== </span><span class="s1">other</span>
+
+    <span class="s0">def </span><span class="s1">__hash__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_hash</span>
+
+
+<span class="s1">_KT </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;_KT&quot;</span><span class="s2">)</span>
+<span class="s1">_VT </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;_VT&quot;</span><span class="s2">)</span>
+
+
+<span class="s3"># see also: https://github.com/python/cpython/issues/88306</span>
+<span class="s0">class </span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">(</span><span class="s1">Generic</span><span class="s2">[</span><span class="s1">_KT</span><span class="s2">, </span><span class="s1">_VT</span><span class="s2">]):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">_IdRef</span><span class="s2">[</span><span class="s1">_KT</span><span class="s2">], </span><span class="s1">_VT</span><span class="s2">] = {}</span>
+
+        <span class="s0">def </span><span class="s1">remove</span><span class="s2">(</span>
+            <span class="s1">k</span><span class="s2">: </span><span class="s1">_IdRef</span><span class="s2">[</span><span class="s1">_KT</span><span class="s2">],</span>
+            <span class="s1">selfref</span><span class="s2">: </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">[</span>
+                <span class="s1">WeakKeyIdentityDictionary</span><span class="s2">[</span><span class="s1">_KT</span><span class="s2">, </span><span class="s1">_VT</span><span class="s2">]</span>
+            <span class="s2">] = </span><span class="s1">weakref</span><span class="s2">.</span><span class="s1">ref</span><span class="s2">(  </span><span class="s3"># noqa: B008  # function-call-in-default-argument</span>
+                <span class="s1">self</span><span class="s2">,</span>
+            <span class="s2">),</span>
+        <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">self </span><span class="s2">= </span><span class="s1">selfref</span><span class="s2">()</span>
+            <span class="s0">if </span><span class="s1">self </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s0">try</span><span class="s2">:  </span><span class="s3"># noqa: SIM105  # suppressible-exception</span>
+                    <span class="s0">del </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[</span><span class="s1">k</span><span class="s2">]</span>
+                <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+                    <span class="s0">pass</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_remove </span><span class="s2">= </span><span class="s1">remove</span>
+
+    <span class="s0">def </span><span class="s1">__getitem__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">k</span><span class="s2">: </span><span class="s1">_KT</span><span class="s2">) </span><span class="s1">-&gt; _VT</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[</span><span class="s1">_IdRef</span><span class="s2">(</span><span class="s1">k</span><span class="s2">)]</span>
+
+    <span class="s0">def </span><span class="s1">__setitem__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">k</span><span class="s2">: </span><span class="s1">_KT</span><span class="s2">, </span><span class="s1">v</span><span class="s2">: </span><span class="s1">_VT</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_data</span><span class="s2">[</span><span class="s1">_IdRef</span><span class="s2">(</span><span class="s1">k</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_remove</span><span class="s2">)] = </span><span class="s1">v</span>
+
+
+<span class="s1">_CODE_KI_PROTECTION_STATUS_WMAP</span><span class="s2">: </span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">[</span>
+    <span class="s1">types</span><span class="s2">.</span><span class="s1">CodeType</span><span class="s2">,</span>
+    <span class="s1">bool</span><span class="s2">,</span>
+<span class="s2">] = </span><span class="s1">WeakKeyIdentityDictionary</span><span class="s2">()</span>
+
+
+<span class="s3"># This is to support the async_generator package necessary for aclosing on &lt;3.10</span>
+<span class="s3"># functions decorated @async_generator are given this magic property that's a</span>
+<span class="s3"># reference to the object itself</span>
+<span class="s3"># see python-trio/async_generator/async_generator/_impl.py</span>
+<span class="s0">def </span><span class="s1">legacy_isasyncgenfunction</span><span class="s2">(</span>
+    <span class="s1">obj</span><span class="s2">: </span><span class="s1">object</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">types</span><span class="s2">.</span><span class="s1">AsyncGeneratorType</span><span class="s2">[</span><span class="s1">object</span><span class="s2">, </span><span class="s1">object</span><span class="s2">]]]:</span>
+    <span class="s0">return </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">obj</span><span class="s2">, </span><span class="s4">&quot;_async_gen_function&quot;</span><span class="s2">, </span><span class="s0">None</span><span class="s2">) == </span><span class="s1">id</span><span class="s2">(</span><span class="s1">obj</span><span class="s2">)</span>
+
+
+<span class="s3"># NB: according to the signal.signal docs, 'frame' can be None on entry to</span>
+<span class="s3"># this function:</span>
+<span class="s0">def </span><span class="s1">ki_protection_enabled</span><span class="s2">(</span><span class="s1">frame</span><span class="s2">: </span><span class="s1">types</span><span class="s2">.</span><span class="s1">FrameType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">task </span><span class="s2">= </span><span class="s1">GLOBAL_RUN_CONTEXT</span><span class="s2">.</span><span class="s1">task</span>
+    <span class="s0">except </span><span class="s1">AttributeError</span><span class="s2">:</span>
+        <span class="s1">task_ki_protected </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">task_frame </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">task_ki_protected </span><span class="s2">= </span><span class="s1">task</span><span class="s2">.</span><span class="s1">_ki_protected</span>
+        <span class="s1">task_frame </span><span class="s2">= </span><span class="s1">task</span><span class="s2">.</span><span class="s1">coro</span><span class="s2">.</span><span class="s1">cr_frame</span>
+
+    <span class="s0">while </span><span class="s1">frame </span><span class="s0">is not None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">v </span><span class="s2">= </span><span class="s1">_CODE_KI_PROTECTION_STATUS_WMAP</span><span class="s2">[</span><span class="s1">frame</span><span class="s2">.</span><span class="s1">f_code</span><span class="s2">]</span>
+        <span class="s0">except </span><span class="s1">KeyError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">v</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">f_code</span><span class="s2">.</span><span class="s1">co_name </span><span class="s2">== </span><span class="s4">&quot;__del__&quot;</span><span class="s2">:</span>
+            <span class="s0">return True</span>
+        <span class="s0">if </span><span class="s1">frame </span><span class="s0">is </span><span class="s1">task_frame</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">task_ki_protected</span>
+        <span class="s1">frame </span><span class="s2">= </span><span class="s1">frame</span><span class="s2">.</span><span class="s1">f_back</span>
+    <span class="s0">return True</span>
+
+
+<span class="s0">def </span><span class="s1">currently_ki_protected</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s5">r&quot;&quot;&quot;Check whether the calling code has :exc:`KeyboardInterrupt` protection 
+    enabled. 
+ 
+    It's surprisingly easy to think that one's :exc:`KeyboardInterrupt` 
+    protection is enabled when it isn't, or vice-versa. This function tells 
+    you what Trio thinks of the matter, which makes it useful for ``assert``\s 
+    and unit tests. 
+ 
+    Returns: 
+      bool: True if protection is enabled, and False otherwise. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">ki_protection_enabled</span><span class="s2">(</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">_getframe</span><span class="s2">())</span>
+
+
+<span class="s0">class </span><span class="s1">_SupportsCode</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+    <span class="s1">__code__</span><span class="s2">: </span><span class="s1">types</span><span class="s2">.</span><span class="s1">CodeType</span>
+
+
+<span class="s1">_T_supports_code </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;_T_supports_code&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">_SupportsCode</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">enable_ki_protection</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">_T_supports_code</span><span class="s2">, /) </span><span class="s1">-&gt; _T_supports_code</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Decorator to enable KI protection.&quot;&quot;&quot;</span>
+    <span class="s1">orig </span><span class="s2">= </span><span class="s1">f</span>
+
+    <span class="s0">if </span><span class="s1">legacy_isasyncgenfunction</span><span class="s2">(</span><span class="s1">f</span><span class="s2">):</span>
+        <span class="s1">f </span><span class="s2">= </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__wrapped__  </span><span class="s3"># type: ignore</span>
+
+    <span class="s1">_CODE_KI_PROTECTION_STATUS_WMAP</span><span class="s2">[</span><span class="s1">f</span><span class="s2">.</span><span class="s1">__code__</span><span class="s2">] = </span><span class="s0">True</span>
+    <span class="s0">return </span><span class="s1">orig</span>
+
+
+<span class="s0">def </span><span class="s1">disable_ki_protection</span><span class="s2">(</span><span class="s1">f</span><span class="s2">: </span><span class="s1">_T_supports_code</span><span class="s2">, /) </span><span class="s1">-&gt; _T_supports_code</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Decorator to disable KI protection.&quot;&quot;&quot;</span>
+    <span class="s1">orig </span><span class="s2">= </span><span class="s1">f</span>
+
+    <span class="s0">if </span><span class="s1">legacy_isasyncgenfunction</span><span class="s2">(</span><span class="s1">f</span><span class="s2">):</span>
+        <span class="s1">f </span><span class="s2">= </span><span class="s1">f</span><span class="s2">.</span><span class="s1">__wrapped__  </span><span class="s3"># type: ignore</span>
+
+    <span class="s1">_CODE_KI_PROTECTION_STATUS_WMAP</span><span class="s2">[</span><span class="s1">f</span><span class="s2">.</span><span class="s1">__code__</span><span class="s2">] = </span><span class="s0">False</span>
+    <span class="s0">return </span><span class="s1">orig</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">KIManager</span><span class="s2">:</span>
+    <span class="s1">handler</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">types</span><span class="s2">.</span><span class="s1">FrameType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">], </span><span class="s0">None</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">install</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">deliver_cb</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[], </span><span class="s1">object</span><span class="s2">],</span>
+        <span class="s1">restrict_keyboard_interrupt_to_checkpoints</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">handler </span><span class="s0">is None</span>
+        <span class="s0">if </span><span class="s2">(</span>
+            <span class="s0">not </span><span class="s1">is_main_thread</span><span class="s2">()</span>
+            <span class="s0">or </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">getsignal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">) != </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">default_int_handler</span>
+        <span class="s2">):</span>
+            <span class="s0">return</span>
+
+        <span class="s0">def </span><span class="s1">handler</span><span class="s2">(</span><span class="s1">signum</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">: </span><span class="s1">types</span><span class="s2">.</span><span class="s1">FrameType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">signum </span><span class="s2">== </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span>
+            <span class="s1">protection_enabled </span><span class="s2">= </span><span class="s1">ki_protection_enabled</span><span class="s2">(</span><span class="s1">frame</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">protection_enabled </span><span class="s0">or </span><span class="s1">restrict_keyboard_interrupt_to_checkpoints</span><span class="s2">:</span>
+                <span class="s1">deliver_cb</span><span class="s2">()</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">KeyboardInterrupt</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">handler </span><span class="s2">= </span><span class="s1">handler</span>
+        <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">, </span><span class="s1">handler</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">handler </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">getsignal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">) </span><span class="s0">is </span><span class="s1">self</span><span class="s2">.</span><span class="s1">handler</span><span class="s2">:</span>
+                <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGINT</span><span class="s2">, </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">default_int_handler</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">handler </span><span class="s2">= </span><span class="s0">None</span>
+</pre>
+</body>
+</html>

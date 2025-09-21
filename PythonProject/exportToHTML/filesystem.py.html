@@ -1,0 +1,175 @@
+<html>
+<head>
+<title>filesystem.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+filesystem.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">fnmatch</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span>
+<span class="s0">import </span><span class="s1">random</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Generator</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span>
+<span class="s0">from </span><span class="s1">tempfile </span><span class="s0">import </span><span class="s1">NamedTemporaryFile</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s1">cast</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">compat </span><span class="s0">import </span><span class="s1">get_path_uid</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">misc </span><span class="s0">import </span><span class="s1">format_size</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">retry </span><span class="s0">import </span><span class="s1">retry</span>
+
+
+<span class="s0">def </span><span class="s1">check_path_owner</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s3"># If we don't have a way to check the effective uid of this process, then</span>
+    <span class="s3"># we'll just assume that we own the directory.</span>
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">&quot;win32&quot; </span><span class="s0">or not </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">os</span><span class="s2">, </span><span class="s4">&quot;geteuid&quot;</span><span class="s2">):</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">assert </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">isabs</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+
+    <span class="s1">previous </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s0">while </span><span class="s1">path </span><span class="s2">!= </span><span class="s1">previous</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">lexists</span><span class="s2">(</span><span class="s1">path</span><span class="s2">):</span>
+            <span class="s3"># Check if path is writable by current user.</span>
+            <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">geteuid</span><span class="s2">() == </span><span class="s5">0</span><span class="s2">:</span>
+                <span class="s3"># Special handling for root user in order to handle properly</span>
+                <span class="s3"># cases where users use sudo without -H flag.</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">path_uid </span><span class="s2">= </span><span class="s1">get_path_uid</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+                    <span class="s0">return False</span>
+                <span class="s0">return </span><span class="s1">path_uid </span><span class="s2">== </span><span class="s5">0</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s1">os</span><span class="s2">.</span><span class="s1">access</span><span class="s2">(</span><span class="s1">path</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">W_OK</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">previous</span><span class="s2">, </span><span class="s1">path </span><span class="s2">= </span><span class="s1">path</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">dirname</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+    <span class="s0">return False  </span><span class="s3"># assume we don't own the path</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">adjacent_tmp_file</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;Return a file-like object pointing to a tmp file next to path. 
+ 
+    The file is created securely and is ensured to be written to disk 
+    after the context reaches its end. 
+ 
+    kwargs will be passed to tempfile.NamedTemporaryFile to control 
+    the way the temporary file will be opened. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">with </span><span class="s1">NamedTemporaryFile</span><span class="s2">(</span>
+        <span class="s1">delete</span><span class="s2">=</span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">dir</span><span class="s2">=</span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">dirname</span><span class="s2">(</span><span class="s1">path</span><span class="s2">),</span>
+        <span class="s1">prefix</span><span class="s2">=</span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">basename</span><span class="s2">(</span><span class="s1">path</span><span class="s2">),</span>
+        <span class="s1">suffix</span><span class="s2">=</span><span class="s4">&quot;.tmp&quot;</span><span class="s2">,</span>
+        <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s0">as </span><span class="s1">f</span><span class="s2">:</span>
+        <span class="s1">result </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s1">f</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield </span><span class="s1">result</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">result</span><span class="s2">.</span><span class="s1">flush</span><span class="s2">()</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">fsync</span><span class="s2">(</span><span class="s1">result</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+
+
+<span class="s1">replace </span><span class="s2">= </span><span class="s1">retry</span><span class="s2">(</span><span class="s1">stop_after_delay</span><span class="s2">=</span><span class="s5">1</span><span class="s2">, </span><span class="s1">wait</span><span class="s2">=</span><span class="s5">0.25</span><span class="s2">)(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">)</span>
+
+
+<span class="s3"># test_writable_dir and _test_writable_dir_win are copied from Flit,</span>
+<span class="s3"># with the author's agreement to also place them under pip's license.</span>
+<span class="s0">def </span><span class="s1">test_writable_dir</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Check if a directory is writable. 
+ 
+    Uses os.access() on POSIX, tries creating files on Windows. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># If the directory doesn't exist, find the closest parent that does.</span>
+    <span class="s0">while not </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">isdir</span><span class="s2">(</span><span class="s1">path</span><span class="s2">):</span>
+        <span class="s1">parent </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">dirname</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">parent </span><span class="s2">== </span><span class="s1">path</span><span class="s2">:</span>
+            <span class="s0">break  </span><span class="s3"># Should never get here, but infinite loops are bad</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">parent</span>
+
+    <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">&quot;posix&quot;</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">os</span><span class="s2">.</span><span class="s1">access</span><span class="s2">(</span><span class="s1">path</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">W_OK</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">_test_writable_dir_win</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_test_writable_dir_win</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s3"># os.access doesn't work on Windows: http://bugs.python.org/issue2528</span>
+    <span class="s3"># and we can't use tempfile: http://bugs.python.org/issue22107</span>
+    <span class="s1">basename </span><span class="s2">= </span><span class="s4">&quot;accesstest_deleteme_fishfingers_custard_&quot;</span>
+    <span class="s1">alphabet </span><span class="s2">= </span><span class="s4">&quot;abcdefghijklmnopqrstuvwxyz0123456789&quot;</span>
+    <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">10</span><span class="s2">):</span>
+        <span class="s1">name </span><span class="s2">= </span><span class="s1">basename </span><span class="s2">+ </span><span class="s4">&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">random</span><span class="s2">.</span><span class="s1">choice</span><span class="s2">(</span><span class="s1">alphabet</span><span class="s2">) </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">6</span><span class="s2">))</span>
+        <span class="s1">file </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">path</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">fd </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">open</span><span class="s2">(</span><span class="s1">file</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">O_RDWR </span><span class="s2">| </span><span class="s1">os</span><span class="s2">.</span><span class="s1">O_CREAT </span><span class="s2">| </span><span class="s1">os</span><span class="s2">.</span><span class="s1">O_EXCL</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">FileExistsError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+        <span class="s0">except </span><span class="s1">PermissionError</span><span class="s2">:</span>
+            <span class="s3"># This could be because there's a directory with the same name.</span>
+            <span class="s3"># But it's highly unlikely there's a directory called that,</span>
+            <span class="s3"># so we'll assume it's because the parent dir is not writable.</span>
+            <span class="s3"># This could as well be because the parent dir is not readable,</span>
+            <span class="s3"># due to non-privileged user access.</span>
+            <span class="s0">return False</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">)</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">unlink</span><span class="s2">(</span><span class="s1">file</span><span class="s2">)</span>
+            <span class="s0">return True</span>
+
+    <span class="s3"># This should never be reached</span>
+    <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s4">&quot;Unexpected condition testing for writable directory&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">find_files</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">pattern</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;Returns a list of absolute paths of files beneath path, recursively, 
+    with filenames which match the UNIX-style shell glob pattern.&quot;&quot;&quot;</span>
+    <span class="s1">result</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+    <span class="s0">for </span><span class="s1">root</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">os</span><span class="s2">.</span><span class="s1">walk</span><span class="s2">(</span><span class="s1">path</span><span class="s2">):</span>
+        <span class="s1">matches </span><span class="s2">= </span><span class="s1">fnmatch</span><span class="s2">.</span><span class="s1">filter</span><span class="s2">(</span><span class="s1">files</span><span class="s2">, </span><span class="s1">pattern</span><span class="s2">)</span>
+        <span class="s1">result</span><span class="s2">.</span><span class="s1">extend</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">root</span><span class="s2">, </span><span class="s1">f</span><span class="s2">) </span><span class="s0">for </span><span class="s1">f </span><span class="s0">in </span><span class="s1">matches</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">file_size</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; int </span><span class="s2">| </span><span class="s1">float</span><span class="s2">:</span>
+    <span class="s3"># If it's a symlink, return 0.</span>
+    <span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">islink</span><span class="s2">(</span><span class="s1">path</span><span class="s2">):</span>
+        <span class="s0">return </span><span class="s5">0</span>
+    <span class="s0">return </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">getsize</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">format_file_size</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">format_size</span><span class="s2">(</span><span class="s1">file_size</span><span class="s2">(</span><span class="s1">path</span><span class="s2">))</span>
+
+
+<span class="s0">def </span><span class="s1">directory_size</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; int </span><span class="s2">| </span><span class="s1">float</span><span class="s2">:</span>
+    <span class="s1">size </span><span class="s2">= </span><span class="s5">0.0</span>
+    <span class="s0">for </span><span class="s1">root</span><span class="s2">, </span><span class="s1">_dirs</span><span class="s2">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">os</span><span class="s2">.</span><span class="s1">walk</span><span class="s2">(</span><span class="s1">path</span><span class="s2">):</span>
+        <span class="s0">for </span><span class="s1">filename </span><span class="s0">in </span><span class="s1">files</span><span class="s2">:</span>
+            <span class="s1">file_path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">root</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">)</span>
+            <span class="s1">size </span><span class="s2">+= </span><span class="s1">file_size</span><span class="s2">(</span><span class="s1">file_path</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">size</span>
+
+
+<span class="s0">def </span><span class="s1">format_directory_size</span><span class="s2">(</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">format_size</span><span class="s2">(</span><span class="s1">directory_size</span><span class="s2">(</span><span class="s1">path</span><span class="s2">))</span>
+</pre>
+</body>
+</html>

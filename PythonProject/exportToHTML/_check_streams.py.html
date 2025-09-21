@@ -1,0 +1,593 @@
+<html>
+<head>
+<title>_check_streams.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_check_streams.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Generic stream tests</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">random</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Awaitable</span><span class="s3">, </span><span class="s1">Callable</span><span class="s3">, </span><span class="s1">Generator</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span><span class="s3">, </span><span class="s1">suppress</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s3">,</span>
+    <span class="s1">Generic</span><span class="s3">,</span>
+    <span class="s1">TypeVar</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s2">from </span><span class="s3">.. </span><span class="s2">import </span><span class="s1">CancelScope</span><span class="s3">, </span><span class="s1">_core</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_abc </span><span class="s2">import </span><span class="s1">AsyncResource</span><span class="s3">, </span><span class="s1">HalfCloseableStream</span><span class="s3">, </span><span class="s1">ReceiveStream</span><span class="s3">, </span><span class="s1">SendStream</span><span class="s3">, </span><span class="s1">Stream</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_highlevel_generic </span><span class="s2">import </span><span class="s1">aclose_forcefully</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_checkpoints </span><span class="s2">import </span><span class="s1">assert_checkpoints</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">TracebackType</span>
+
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">ParamSpec</span><span class="s3">, </span><span class="s1">TypeAlias</span>
+
+    <span class="s1">ArgsT </span><span class="s3">= </span><span class="s1">ParamSpec</span><span class="s3">(</span><span class="s4">&quot;ArgsT&quot;</span><span class="s3">)</span>
+
+<span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info </span><span class="s3">&lt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">11</span><span class="s3">):</span>
+    <span class="s2">from </span><span class="s1">exceptiongroup </span><span class="s2">import </span><span class="s1">BaseExceptionGroup</span>
+
+<span class="s1">Res1 </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;Res1&quot;</span><span class="s3">, </span><span class="s1">bound</span><span class="s3">=</span><span class="s1">AsyncResource</span><span class="s3">)</span>
+<span class="s1">Res2 </span><span class="s3">= </span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;Res2&quot;</span><span class="s3">, </span><span class="s1">bound</span><span class="s3">=</span><span class="s1">AsyncResource</span><span class="s3">)</span>
+<span class="s1">StreamMaker</span><span class="s3">: </span><span class="s1">TypeAlias </span><span class="s3">= </span><span class="s1">Callable</span><span class="s3">[[], </span><span class="s1">Awaitable</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">Res1</span><span class="s3">, </span><span class="s1">Res2</span><span class="s3">]]]</span>
+
+
+<span class="s2">class </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s1">Generic</span><span class="s3">[</span><span class="s1">Res1</span><span class="s3">, </span><span class="s1">Res2</span><span class="s3">]):</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">both</span><span class="s3">: </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">Res1</span><span class="s3">, </span><span class="s1">Res2</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_first</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_second </span><span class="s3">= </span><span class="s1">both</span>
+
+    <span class="s2">async def </span><span class="s1">__aenter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">Res1</span><span class="s3">, </span><span class="s1">Res2</span><span class="s3">]:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_first</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_second</span>
+
+    <span class="s2">async def </span><span class="s1">__aexit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">exc_type</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">BaseException</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">exc_value</span><span class="s3">: </span><span class="s1">BaseException </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">traceback</span><span class="s3">: </span><span class="s1">TracebackType </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_first</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_second</span><span class="s3">)</span>
+
+
+<span class="s0"># This is used in this file instead of pytest.raises in order to avoid a dependency</span>
+<span class="s0"># on pytest, as the check_* functions are publicly exported.</span>
+<span class="s3">@</span><span class="s1">contextmanager</span>
+<span class="s2">def </span><span class="s1">_assert_raises</span><span class="s3">(</span>
+    <span class="s1">expected_exc</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">BaseException</span><span class="s3">],</span>
+    <span class="s1">wrapped</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+    <span class="s1">__tracebackhide__ </span><span class="s3">= </span><span class="s2">True</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+    <span class="s2">except </span><span class="s1">BaseExceptionGroup </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s2">assert </span><span class="s1">wrapped</span><span class="s3">, </span><span class="s4">&quot;caught exceptiongroup, but expected an unwrapped exception&quot;</span>
+        <span class="s0"># assert in except block ignored below</span>
+        <span class="s2">assert </span><span class="s1">len</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">.</span><span class="s1">exceptions</span><span class="s3">) == </span><span class="s5">1  </span><span class="s0"># noqa: PT017</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">.</span><span class="s1">exceptions</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], </span><span class="s1">expected_exc</span><span class="s3">)  </span><span class="s0"># noqa: PT017</span>
+    <span class="s2">except </span><span class="s1">expected_exc</span><span class="s3">:</span>
+        <span class="s2">assert not </span><span class="s1">wrapped</span><span class="s3">, </span><span class="s4">&quot;caught exception, but expected an exceptiongroup&quot;</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">AssertionError</span><span class="s3">(</span><span class="s4">f&quot;expected exception: </span><span class="s2">{</span><span class="s1">expected_exc</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">async def </span><span class="s1">check_one_way_stream</span><span class="s3">(</span>
+    <span class="s1">stream_maker</span><span class="s3">: </span><span class="s1">StreamMaker</span><span class="s3">[</span><span class="s1">SendStream</span><span class="s3">, </span><span class="s1">ReceiveStream</span><span class="s3">],</span>
+    <span class="s1">clogged_stream_maker</span><span class="s3">: </span><span class="s1">StreamMaker</span><span class="s3">[</span><span class="s1">SendStream</span><span class="s3">, </span><span class="s1">ReceiveStream</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot;Perform a number of generic tests on a custom one-way stream 
+    implementation. 
+ 
+    Args: 
+      stream_maker: An async (!) function which returns a connected 
+          (:class:`~trio.abc.SendStream`, :class:`~trio.abc.ReceiveStream`) 
+          pair. 
+      clogged_stream_maker: Either None, or an async function similar to 
+          stream_maker, but with the extra property that the returned stream 
+          is in a state where ``send_all`` and 
+          ``wait_send_all_might_not_block`` will block until ``receive_some`` 
+          has been called. This allows for more thorough testing of some edge 
+          cases, especially around ``wait_send_all_might_not_block``. 
+ 
+    Raises: 
+      AssertionError: if a test fails. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">SendStream</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">r</span><span class="s3">, </span><span class="s1">ReceiveStream</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">bytearray </span><span class="s3">| </span><span class="s1">memoryview</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():  </span><span class="s0"># We're testing that it doesn't return anything.</span>
+                <span class="s2">assert await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) </span><span class="s2">is None  </span><span class="s0"># type: ignore[func-returns-value]</span>
+
+        <span class="s2">async def </span><span class="s1">do_receive_some</span><span class="s3">(</span><span class="s1">max_bytes</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; bytes </span><span class="s3">| </span><span class="s1">bytearray</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                <span class="s2">return await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s1">max_bytes</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">checked_receive_1</span><span class="s3">(</span><span class="s1">expected</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">assert await </span><span class="s1">do_receive_some</span><span class="s3">(</span><span class="s5">1</span><span class="s3">) == </span><span class="s1">expected</span>
+
+        <span class="s2">async def </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">resource</span><span class="s3">: </span><span class="s1">AsyncResource</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                <span class="s2">await </span><span class="s1">resource</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">()</span>
+
+        <span class="s0"># Simple sending/receiving</span>
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_send_all</span><span class="s3">, </span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">checked_receive_1</span><span class="s3">, </span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">send_empty_then_y</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s0"># Streams should tolerate sending b&quot;&quot; without giving it any</span>
+            <span class="s0"># special meaning.</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;&quot;</span><span class="s3">)</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;y&quot;</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">send_empty_then_y</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">checked_receive_1</span><span class="s3">, </span><span class="s7">b&quot;y&quot;</span><span class="s3">)</span>
+
+        <span class="s0"># ---- Checking various argument types ----</span>
+
+        <span class="s0"># send_all accepts bytearray and memoryview</span>
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_send_all</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">(</span><span class="s7">b&quot;1&quot;</span><span class="s3">))</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">checked_receive_1</span><span class="s3">, </span><span class="s7">b&quot;1&quot;</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_send_all</span><span class="s3">, </span><span class="s1">memoryview</span><span class="s3">(</span><span class="s7">b&quot;2&quot;</span><span class="s3">))</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">checked_receive_1</span><span class="s3">, </span><span class="s7">b&quot;2&quot;</span><span class="s3">)</span>
+
+        <span class="s0"># max_bytes must be a positive integer</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">ValueError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(-</span><span class="s5">1</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">ValueError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">0</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">TypeError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">1.5</span><span class="s3">)  </span><span class="s0"># type: ignore[arg-type]</span>
+        <span class="s0"># it can also be missing or None</span>
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_send_all</span><span class="s3">, </span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+            <span class="s2">assert await </span><span class="s1">do_receive_some</span><span class="s3">() == </span><span class="s7">b&quot;x&quot;</span>
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_send_all</span><span class="s3">, </span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+            <span class="s2">assert await </span><span class="s1">do_receive_some</span><span class="s3">(</span><span class="s2">None</span><span class="s3">) == </span><span class="s7">b&quot;x&quot;</span>
+
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BusyResourceError</span><span class="s3">, </span><span class="s1">wrapped</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+            <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_receive_some</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_receive_some</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+
+        <span class="s0"># Method always has to exist, and an empty stream with a blocked</span>
+        <span class="s0"># receive_some should *always* allow send_all. (Technically it's legal</span>
+        <span class="s0"># for send_all to wait until receive_some is called to run, though; a</span>
+        <span class="s0"># stream doesn't *have* to have any internal buffering. That's why we</span>
+        <span class="s0"># start a concurrent receive_some call, then cancel it.)</span>
+        <span class="s2">async def </span><span class="s1">simple_check_wait_send_all_might_not_block</span><span class="s3">(</span>
+            <span class="s1">scope</span><span class="s3">: </span><span class="s1">CancelScope</span><span class="s3">,</span>
+        <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">()</span>
+            <span class="s1">scope</span><span class="s3">.</span><span class="s1">cancel</span><span class="s3">()</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span>
+                <span class="s1">simple_check_wait_send_all_might_not_block</span><span class="s3">,</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">cancel_scope</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_receive_some</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+
+        <span class="s0"># closing the r side leads to BrokenResourceError on the s side</span>
+        <span class="s0"># (eventually)</span>
+        <span class="s2">async def </span><span class="s1">expect_broken_stream_on_send</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">):</span>
+                <span class="s2">while True</span><span class="s3">:</span>
+                    <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;x&quot; </span><span class="s3">* </span><span class="s5">100</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">expect_broken_stream_on_send</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_aclose</span><span class="s3">, </span><span class="s1">r</span><span class="s3">)</span>
+
+        <span class="s0"># once detected, the stream stays broken</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;x&quot; </span><span class="s3">* </span><span class="s5">100</span><span class="s3">)</span>
+
+        <span class="s0"># r closed -&gt; ClosedResourceError on the receive side</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_receive_some</span><span class="s3">(</span><span class="s5">4096</span><span class="s3">)</span>
+
+        <span class="s0"># we can close the same stream repeatedly, it's fine</span>
+        <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+        <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+        <span class="s0"># closing the sender side</span>
+        <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">s</span><span class="s3">)</span>
+
+        <span class="s0"># now trying to send raises ClosedResourceError</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;x&quot; </span><span class="s3">* </span><span class="s5">100</span><span class="s3">)</span>
+
+        <span class="s0"># even if it's an empty send</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;&quot;</span><span class="s3">)</span>
+
+        <span class="s0"># ditto for wait_send_all_might_not_block</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">()</span>
+
+        <span class="s0"># and again, repeated closing is fine</span>
+        <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">s</span><span class="s3">)</span>
+        <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">s</span><span class="s3">)</span>
+
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+        <span class="s0"># if send-then-graceful-close, receiver gets data then b&quot;&quot;</span>
+        <span class="s2">async def </span><span class="s1">send_then_close</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;y&quot;</span><span class="s3">)</span>
+            <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">s</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">receive_send_then_close</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s0"># We want to make sure that if the sender closes the stream before</span>
+            <span class="s0"># we read anything, then we still get all the data. But some</span>
+            <span class="s0"># streams might block on the do_send_all call. So we let the</span>
+            <span class="s0"># sender get as far as it can, then we receive.</span>
+            <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+            <span class="s2">await </span><span class="s1">checked_receive_1</span><span class="s3">(</span><span class="s7">b&quot;y&quot;</span><span class="s3">)</span>
+            <span class="s2">await </span><span class="s1">checked_receive_1</span><span class="s3">(</span><span class="s7">b&quot;&quot;</span><span class="s3">)</span>
+            <span class="s2">await </span><span class="s1">do_aclose</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">send_then_close</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">receive_send_then_close</span><span class="s3">)</span>
+
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+        <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">):</span>
+            <span class="s2">while True</span><span class="s3">:</span>
+                <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;x&quot; </span><span class="s3">* </span><span class="s5">100</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_receive_some</span><span class="s3">(</span><span class="s5">4096</span><span class="s3">)</span>
+
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+        <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">s</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;123&quot;</span><span class="s3">)</span>
+
+        <span class="s0"># after the sender does a forceful close, the receiver might either</span>
+        <span class="s0"># get BrokenResourceError or a clean b&quot;&quot;; either is OK. Not OK would be</span>
+        <span class="s0"># if it freezes, or returns data.</span>
+        <span class="s2">with </span><span class="s1">suppress</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">checked_receive_1</span><span class="s3">(</span><span class="s7">b&quot;&quot;</span><span class="s3">)</span>
+
+    <span class="s0"># cancelled aclose still closes</span>
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+        <span class="s2">with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">CancelScope</span><span class="s3">() </span><span class="s2">as </span><span class="s1">scope</span><span class="s3">:</span>
+            <span class="s1">scope</span><span class="s3">.</span><span class="s1">cancel</span><span class="s3">()</span>
+            <span class="s2">await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">()</span>
+
+        <span class="s2">with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">CancelScope</span><span class="s3">() </span><span class="s2">as </span><span class="s1">scope</span><span class="s3">:</span>
+            <span class="s1">scope</span><span class="s3">.</span><span class="s1">cancel</span><span class="s3">()</span>
+            <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">()</span>
+
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_send_all</span><span class="s3">(</span><span class="s7">b&quot;123&quot;</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">do_receive_some</span><span class="s3">(</span><span class="s5">4096</span><span class="s3">)</span>
+
+    <span class="s0"># Check that we can still gracefully close a stream after an operation has</span>
+    <span class="s0"># been cancelled. This can be challenging if cancellation can leave the</span>
+    <span class="s0"># stream internals in an inconsistent state, e.g. for</span>
+    <span class="s0"># SSLStream. Unfortunately this test isn't very thorough; the really</span>
+    <span class="s0"># challenging case for something like SSLStream is it gets cancelled</span>
+    <span class="s0"># *while* it's sending data on the underlying, not before. But testing</span>
+    <span class="s0"># that requires some special-case handling of the particular stream setup;</span>
+    <span class="s0"># we can't do it here. Maybe we could do a bit better with</span>
+    <span class="s0">#     https://github.com/python-trio/trio/issues/77</span>
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+
+        <span class="s2">async def </span><span class="s1">expect_cancelled</span><span class="s3">(</span>
+            <span class="s1">afn</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">[</span><span class="s1">ArgsT</span><span class="s3">, </span><span class="s1">Awaitable</span><span class="s3">[</span><span class="s1">object</span><span class="s3">]],</span>
+            <span class="s3">*</span><span class="s1">args</span><span class="s3">: </span><span class="s1">ArgsT</span><span class="s3">.</span><span class="s1">args</span><span class="s3">,</span>
+            <span class="s3">**</span><span class="s1">kwargs</span><span class="s3">: </span><span class="s1">ArgsT</span><span class="s3">.</span><span class="s1">kwargs</span><span class="s3">,</span>
+        <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">Cancelled</span><span class="s3">):</span>
+                <span class="s2">await </span><span class="s1">afn</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+        <span class="s2">with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">CancelScope</span><span class="s3">() </span><span class="s2">as </span><span class="s1">scope</span><span class="s3">:</span>
+            <span class="s1">scope</span><span class="s3">.</span><span class="s1">cancel</span><span class="s3">()</span>
+            <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">expect_cancelled</span><span class="s3">, </span><span class="s1">do_send_all</span><span class="s3">, </span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">expect_cancelled</span><span class="s3">, </span><span class="s1">do_receive_some</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_aclose</span><span class="s3">, </span><span class="s1">s</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">do_aclose</span><span class="s3">, </span><span class="s1">r</span><span class="s3">)</span>
+
+    <span class="s0"># Check that if a task is blocked in receive_some, then closing the</span>
+    <span class="s0"># receive stream causes it to wake up.</span>
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+
+        <span class="s2">async def </span><span class="s1">receive_expecting_closed</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+                <span class="s2">await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">10</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">receive_expecting_closed</span><span class="s3">)</span>
+            <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+            <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+    <span class="s0"># check wait_send_all_might_not_block, if we can</span>
+    <span class="s2">if </span><span class="s1">clogged_stream_maker </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+            <span class="s1">record</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = []</span>
+
+            <span class="s2">async def </span><span class="s1">waiter</span><span class="s3">(</span><span class="s1">cancel_scope</span><span class="s3">: </span><span class="s1">CancelScope</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+                <span class="s1">record</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;waiter sleeping&quot;</span><span class="s3">)</span>
+                <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                    <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">()</span>
+                <span class="s1">record</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;waiter wokeup&quot;</span><span class="s3">)</span>
+                <span class="s1">cancel_scope</span><span class="s3">.</span><span class="s1">cancel</span><span class="s3">()</span>
+
+            <span class="s2">async def </span><span class="s1">receiver</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+                <span class="s0"># give wait_send_all_might_not_block a chance to block</span>
+                <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+                <span class="s1">record</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;receiver starting&quot;</span><span class="s3">)</span>
+                <span class="s2">while True</span><span class="s3">:</span>
+                    <span class="s2">await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">16834</span><span class="s3">)</span>
+
+            <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">waiter</span><span class="s3">, </span><span class="s1">nursery</span><span class="s3">.</span><span class="s1">cancel_scope</span><span class="s3">)</span>
+                <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">receiver</span><span class="s3">)</span>
+
+            <span class="s2">assert </span><span class="s1">record </span><span class="s3">== [</span>
+                <span class="s4">&quot;waiter sleeping&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;receiver starting&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;waiter wokeup&quot;</span><span class="s3">,</span>
+            <span class="s3">]</span>
+
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+            <span class="s0"># simultaneous wait_send_all_might_not_block fails</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BusyResourceError</span><span class="s3">, </span><span class="s1">wrapped</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">)</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">)</span>
+
+            <span class="s0"># and simultaneous send_all and wait_send_all_might_not_block (NB</span>
+            <span class="s0"># this test might destroy the stream b/c we end up cancelling</span>
+            <span class="s0"># send_all and e.g. SSLStream can't handle that, so we have to</span>
+            <span class="s0"># recreate afterwards)</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BusyResourceError</span><span class="s3">, </span><span class="s1">wrapped</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">)</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">, </span><span class="s7">b&quot;123&quot;</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+            <span class="s0"># send_all and send_all blocked simultaneously should also raise</span>
+            <span class="s0"># (but again this might destroy the stream)</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BusyResourceError</span><span class="s3">, </span><span class="s1">wrapped</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">, </span><span class="s7">b&quot;123&quot;</span><span class="s3">)</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">, </span><span class="s7">b&quot;123&quot;</span><span class="s3">)</span>
+
+        <span class="s0"># closing the receiver causes wait_send_all_might_not_block to return,</span>
+        <span class="s0"># with or without an exception</span>
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+
+            <span class="s2">async def </span><span class="s1">sender</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                        <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">()</span>
+                <span class="s2">except </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">:  </span><span class="s0"># pragma: no cover</span>
+                    <span class="s2">pass</span>
+
+            <span class="s2">async def </span><span class="s1">receiver</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+                <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+                <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+
+            <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">sender</span><span class="s3">)</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">receiver</span><span class="s3">)</span>
+
+        <span class="s0"># and again with the call starting after the close</span>
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">r</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                    <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">()</span>
+            <span class="s2">except </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BrokenResourceError</span><span class="s3">:  </span><span class="s0"># pragma: no cover</span>
+                <span class="s2">pass</span>
+
+        <span class="s0"># Check that if a task is blocked in a send-side method, then closing</span>
+        <span class="s0"># the send stream causes it to wake up.</span>
+        <span class="s2">async def </span><span class="s1">close_soon</span><span class="s3">(</span><span class="s1">s</span><span class="s3">: </span><span class="s1">SendStream</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+            <span class="s2">await </span><span class="s1">aclose_forcefully</span><span class="s3">(</span><span class="s1">s</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+            <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">close_soon</span><span class="s3">, </span><span class="s1">s</span><span class="s3">)</span>
+                <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+                    <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">(</span><span class="s7">b&quot;xyzzy&quot;</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s</span><span class="s3">, </span><span class="s1">r</span><span class="s3">):</span>
+            <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">close_soon</span><span class="s3">, </span><span class="s1">s</span><span class="s3">)</span>
+                <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+                    <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">()</span>
+
+
+<span class="s2">async def </span><span class="s1">check_two_way_stream</span><span class="s3">(</span>
+    <span class="s1">stream_maker</span><span class="s3">: </span><span class="s1">StreamMaker</span><span class="s3">[</span><span class="s1">Stream</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">],</span>
+    <span class="s1">clogged_stream_maker</span><span class="s3">: </span><span class="s1">StreamMaker</span><span class="s3">[</span><span class="s1">Stream</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot;Perform a number of generic tests on a custom two-way stream 
+    implementation. 
+ 
+    This is similar to :func:`check_one_way_stream`, except that the maker 
+    functions are expected to return objects implementing the 
+    :class:`~trio.abc.Stream` interface. 
+ 
+    This function tests a *superset* of what :func:`check_one_way_stream` 
+    checks – if you call this, then you don't need to also call 
+    :func:`check_one_way_stream`. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">await </span><span class="s1">check_one_way_stream</span><span class="s3">(</span><span class="s1">stream_maker</span><span class="s3">, </span><span class="s1">clogged_stream_maker</span><span class="s3">)</span>
+
+    <span class="s2">async def </span><span class="s1">flipped_stream_maker</span><span class="s3">() </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">Stream</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">]:</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">())[::-</span><span class="s5">1</span><span class="s3">]</span>
+
+    <span class="s1">flipped_clogged_stream_maker</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">[[], </span><span class="s1">Awaitable</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">Stream</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">]]] | </span><span class="s2">None</span>
+
+    <span class="s2">if </span><span class="s1">clogged_stream_maker </span><span class="s2">is not None</span><span class="s3">:</span>
+
+        <span class="s2">async def </span><span class="s1">flipped_clogged_stream_maker</span><span class="s3">() </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">Stream</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">]:</span>
+            <span class="s2">return </span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">())[::-</span><span class="s5">1</span><span class="s3">]</span>
+
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">flipped_clogged_stream_maker </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">await </span><span class="s1">check_one_way_stream</span><span class="s3">(</span><span class="s1">flipped_stream_maker</span><span class="s3">, </span><span class="s1">flipped_clogged_stream_maker</span><span class="s3">)</span>
+
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s1</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">s2</span><span class="s3">, </span><span class="s1">Stream</span><span class="s3">)</span>
+
+        <span class="s0"># Duplex can be a bit tricky, might as well check it as well</span>
+        <span class="s1">DUPLEX_TEST_SIZE </span><span class="s3">= </span><span class="s5">2</span><span class="s3">**</span><span class="s5">20</span>
+        <span class="s1">CHUNK_SIZE_MAX </span><span class="s3">= </span><span class="s5">2</span><span class="s3">**</span><span class="s5">14</span>
+
+        <span class="s1">r </span><span class="s3">= </span><span class="s1">random</span><span class="s3">.</span><span class="s1">Random</span><span class="s3">(</span><span class="s5">0</span><span class="s3">)</span>
+        <span class="s1">i </span><span class="s3">= </span><span class="s1">r</span><span class="s3">.</span><span class="s1">getrandbits</span><span class="s3">(</span><span class="s5">8 </span><span class="s3">* </span><span class="s1">DUPLEX_TEST_SIZE</span><span class="s3">)</span>
+        <span class="s1">test_data </span><span class="s3">= </span><span class="s1">i</span><span class="s3">.</span><span class="s1">to_bytes</span><span class="s3">(</span><span class="s1">DUPLEX_TEST_SIZE</span><span class="s3">, </span><span class="s4">&quot;little&quot;</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">sender</span><span class="s3">(</span>
+            <span class="s1">s</span><span class="s3">: </span><span class="s1">Stream</span><span class="s3">,</span>
+            <span class="s1">data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">bytearray </span><span class="s3">| </span><span class="s1">memoryview</span><span class="s3">,</span>
+            <span class="s1">seed</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s1">r </span><span class="s3">= </span><span class="s1">random</span><span class="s3">.</span><span class="s1">Random</span><span class="s3">(</span><span class="s1">seed</span><span class="s3">)</span>
+            <span class="s1">m </span><span class="s3">= </span><span class="s1">memoryview</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">while </span><span class="s1">m</span><span class="s3">:</span>
+                <span class="s1">chunk_size </span><span class="s3">= </span><span class="s1">r</span><span class="s3">.</span><span class="s1">randint</span><span class="s3">(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">CHUNK_SIZE_MAX</span><span class="s3">)</span>
+                <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">(</span><span class="s1">m</span><span class="s3">[:</span><span class="s1">chunk_size</span><span class="s3">])</span>
+                <span class="s1">m </span><span class="s3">= </span><span class="s1">m</span><span class="s3">[</span><span class="s1">chunk_size</span><span class="s3">:]</span>
+
+        <span class="s2">async def </span><span class="s1">receiver</span><span class="s3">(</span><span class="s1">s</span><span class="s3">: </span><span class="s1">Stream</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">bytearray</span><span class="s3">, </span><span class="s1">seed</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s1">r </span><span class="s3">= </span><span class="s1">random</span><span class="s3">.</span><span class="s1">Random</span><span class="s3">(</span><span class="s1">seed</span><span class="s3">)</span>
+            <span class="s1">got </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">()</span>
+            <span class="s2">while </span><span class="s1">len</span><span class="s3">(</span><span class="s1">got</span><span class="s3">) &lt; </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">):</span>
+                <span class="s1">chunk </span><span class="s3">= </span><span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s1">r</span><span class="s3">.</span><span class="s1">randint</span><span class="s3">(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">CHUNK_SIZE_MAX</span><span class="s3">))</span>
+                <span class="s2">assert </span><span class="s1">chunk</span>
+                <span class="s1">got </span><span class="s3">+= </span><span class="s1">chunk</span>
+            <span class="s2">assert </span><span class="s1">got </span><span class="s3">== </span><span class="s1">data</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">sender</span><span class="s3">, </span><span class="s1">s1</span><span class="s3">, </span><span class="s1">test_data</span><span class="s3">, </span><span class="s5">0</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">sender</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">, </span><span class="s1">test_data</span><span class="s3">[::-</span><span class="s5">1</span><span class="s3">], </span><span class="s5">1</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">receiver</span><span class="s3">, </span><span class="s1">s1</span><span class="s3">, </span><span class="s1">test_data</span><span class="s3">[::-</span><span class="s5">1</span><span class="s3">], </span><span class="s5">2</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">receiver</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">, </span><span class="s1">test_data</span><span class="s3">, </span><span class="s5">3</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">expect_receive_some_empty</span><span class="s3">() </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">assert await </span><span class="s1">s2</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">10</span><span class="s3">) == </span><span class="s7">b&quot;&quot;</span>
+            <span class="s2">await </span><span class="s1">s2</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">()</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">expect_receive_some_empty</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">.</span><span class="s1">aclose</span><span class="s3">)</span>
+
+
+<span class="s2">async def </span><span class="s1">check_half_closeable_stream</span><span class="s3">(</span>
+    <span class="s1">stream_maker</span><span class="s3">: </span><span class="s1">StreamMaker</span><span class="s3">[</span><span class="s1">HalfCloseableStream</span><span class="s3">, </span><span class="s1">HalfCloseableStream</span><span class="s3">],</span>
+    <span class="s1">clogged_stream_maker</span><span class="s3">: </span><span class="s1">StreamMaker</span><span class="s3">[</span><span class="s1">HalfCloseableStream</span><span class="s3">, </span><span class="s1">HalfCloseableStream</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s6">&quot;&quot;&quot;Perform a number of generic tests on a custom half-closeable stream 
+    implementation. 
+ 
+    This is similar to :func:`check_two_way_stream`, except that the maker 
+    functions are expected to return objects that implement the 
+    :class:`~trio.abc.HalfCloseableStream` interface. 
+ 
+    This function tests a *superset* of what :func:`check_two_way_stream` 
+    checks – if you call this, then you don't need to also call 
+    :func:`check_two_way_stream`. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">await </span><span class="s1">check_two_way_stream</span><span class="s3">(</span><span class="s1">stream_maker</span><span class="s3">, </span><span class="s1">clogged_stream_maker</span><span class="s3">)</span>
+
+    <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s1</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">, </span><span class="s1">HalfCloseableStream</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">s2</span><span class="s3">, </span><span class="s1">HalfCloseableStream</span><span class="s3">)</span>
+
+        <span class="s2">async def </span><span class="s1">send_x_then_eof</span><span class="s3">(</span><span class="s1">s</span><span class="s3">: </span><span class="s1">HalfCloseableStream</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">(</span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+            <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+                <span class="s2">await </span><span class="s1">s</span><span class="s3">.</span><span class="s1">send_eof</span><span class="s3">()</span>
+
+        <span class="s2">async def </span><span class="s1">expect_x_then_eof</span><span class="s3">(</span><span class="s1">r</span><span class="s3">: </span><span class="s1">HalfCloseableStream</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+            <span class="s2">assert await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">10</span><span class="s3">) == </span><span class="s7">b&quot;x&quot;</span>
+            <span class="s2">assert await </span><span class="s1">r</span><span class="s3">.</span><span class="s1">receive_some</span><span class="s3">(</span><span class="s5">10</span><span class="s3">) == </span><span class="s7">b&quot;&quot;</span>
+
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">send_x_then_eof</span><span class="s3">, </span><span class="s1">s1</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">expect_x_then_eof</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">)</span>
+
+        <span class="s0"># now sending is disallowed</span>
+        <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">ClosedResourceError</span><span class="s3">):</span>
+            <span class="s2">await </span><span class="s1">s1</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">(</span><span class="s7">b&quot;y&quot;</span><span class="s3">)</span>
+
+        <span class="s0"># but we can do send_eof again</span>
+        <span class="s2">with </span><span class="s1">assert_checkpoints</span><span class="s3">():</span>
+            <span class="s2">await </span><span class="s1">s1</span><span class="s3">.</span><span class="s1">send_eof</span><span class="s3">()</span>
+
+        <span class="s0"># and we can still send stuff back the other way</span>
+        <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">send_x_then_eof</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">)</span>
+            <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">expect_x_then_eof</span><span class="s3">, </span><span class="s1">s1</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">clogged_stream_maker </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s1</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">):</span>
+            <span class="s0"># send_all and send_eof simultaneously is not ok</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BusyResourceError</span><span class="s3">, </span><span class="s1">wrapped</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">.</span><span class="s1">send_all</span><span class="s3">, </span><span class="s7">b&quot;x&quot;</span><span class="s3">)</span>
+                    <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">.</span><span class="s1">send_eof</span><span class="s3">)</span>
+
+        <span class="s2">async with </span><span class="s1">_ForceCloseBoth</span><span class="s3">(</span><span class="s2">await </span><span class="s1">clogged_stream_maker</span><span class="s3">()) </span><span class="s2">as </span><span class="s3">(</span><span class="s1">s1</span><span class="s3">, </span><span class="s1">s2</span><span class="s3">):</span>
+            <span class="s0"># wait_send_all_might_not_block and send_eof simultaneously is not</span>
+            <span class="s0"># ok either</span>
+            <span class="s2">with </span><span class="s1">_assert_raises</span><span class="s3">(</span><span class="s1">_core</span><span class="s3">.</span><span class="s1">BusyResourceError</span><span class="s3">, </span><span class="s1">wrapped</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+                <span class="s2">async with </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">open_nursery</span><span class="s3">() </span><span class="s2">as </span><span class="s1">nursery</span><span class="s3">:</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">.</span><span class="s1">wait_send_all_might_not_block</span><span class="s3">)</span>
+                    <span class="s2">await </span><span class="s1">_core</span><span class="s3">.</span><span class="s1">wait_all_tasks_blocked</span><span class="s3">()</span>
+                    <span class="s1">nursery</span><span class="s3">.</span><span class="s1">start_soon</span><span class="s3">(</span><span class="s1">s1</span><span class="s3">.</span><span class="s1">send_eof</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

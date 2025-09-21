@@ -1,0 +1,172 @@
+<html>
+<head>
+<title>hashes.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+hashes.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">hashlib</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Iterable</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">BinaryIO</span><span class="s2">, </span><span class="s1">NoReturn</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">exceptions </span><span class="s0">import </span><span class="s1">HashMismatch</span><span class="s2">, </span><span class="s1">HashMissing</span><span class="s2">, </span><span class="s1">InstallationError</span>
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">misc </span><span class="s0">import </span><span class="s1">read_chunks</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">hashlib </span><span class="s0">import </span><span class="s1">_Hash</span>
+
+
+<span class="s3"># The recommended hash algo of the moment. Change this whenever the state of</span>
+<span class="s3"># the art changes; it won't hurt backward compatibility.</span>
+<span class="s1">FAVORITE_HASH </span><span class="s2">= </span><span class="s4">&quot;sha256&quot;</span>
+
+
+<span class="s3"># Names of hashlib algorithms allowed by the --hash option and ``pip hash``</span>
+<span class="s3"># Currently, those are the ones at least as collision-resistant as sha256.</span>
+<span class="s1">STRONG_HASHES </span><span class="s2">= [</span><span class="s4">&quot;sha256&quot;</span><span class="s2">, </span><span class="s4">&quot;sha384&quot;</span><span class="s2">, </span><span class="s4">&quot;sha512&quot;</span><span class="s2">]</span>
+
+
+<span class="s0">class </span><span class="s1">Hashes</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;A wrapper that builds multiple hashes at once and checks them against 
+    known-good values 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">hashes</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        :param hashes: A dict of algorithm names pointing to lists of allowed 
+            hex digests 
+        &quot;&quot;&quot;</span>
+        <span class="s1">allowed </span><span class="s2">= {}</span>
+        <span class="s0">if </span><span class="s1">hashes </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">alg</span><span class="s2">, </span><span class="s1">keys </span><span class="s0">in </span><span class="s1">hashes</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+                <span class="s3"># Make sure values are always sorted (to ease equality checks)</span>
+                <span class="s1">allowed</span><span class="s2">[</span><span class="s1">alg</span><span class="s2">] = [</span><span class="s1">k</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">() </span><span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">keys</span><span class="s2">)]</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed </span><span class="s2">= </span><span class="s1">allowed</span>
+
+    <span class="s0">def </span><span class="s1">__and__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">Hashes</span><span class="s2">) </span><span class="s1">-&gt; Hashes</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">Hashes</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s3"># If either of the Hashes object is entirely empty (i.e. no hash</span>
+        <span class="s3"># specified at all), all hashes from the other object are allowed.</span>
+        <span class="s0">if not </span><span class="s1">other</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">self</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">other</span>
+
+        <span class="s3"># Otherwise only hashes that present in both objects are allowed.</span>
+        <span class="s1">new </span><span class="s2">= {}</span>
+        <span class="s0">for </span><span class="s1">alg</span><span class="s2">, </span><span class="s1">values </span><span class="s0">in </span><span class="s1">other</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">alg </span><span class="s0">not in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">:</span>
+                <span class="s0">continue</span>
+            <span class="s1">new</span><span class="s2">[</span><span class="s1">alg</span><span class="s2">] = [</span><span class="s1">v </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">values </span><span class="s0">if </span><span class="s1">v </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">[</span><span class="s1">alg</span><span class="s2">]]</span>
+        <span class="s0">return </span><span class="s1">Hashes</span><span class="s2">(</span><span class="s1">new</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">digest_count</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">sum</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">digests</span><span class="s2">) </span><span class="s0">for </span><span class="s1">digests </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">.</span><span class="s1">values</span><span class="s2">())</span>
+
+    <span class="s0">def </span><span class="s1">is_hash_allowed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">hash_name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">hex_digest</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Return whether the given hex digest is allowed.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">hex_digest </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">hash_name</span><span class="s2">, [])</span>
+
+    <span class="s0">def </span><span class="s1">check_against_chunks</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">chunks</span><span class="s2">: </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">bytes</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Check good hashes against ones built from iterable of chunks of 
+        data. 
+ 
+        Raise HashMismatch if none match. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">gots </span><span class="s2">= {}</span>
+        <span class="s0">for </span><span class="s1">hash_name </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">.</span><span class="s1">keys</span><span class="s2">():</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">gots</span><span class="s2">[</span><span class="s1">hash_name</span><span class="s2">] = </span><span class="s1">hashlib</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s1">hash_name</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">TypeError</span><span class="s2">):</span>
+                <span class="s0">raise </span><span class="s1">InstallationError</span><span class="s2">(</span><span class="s4">f&quot;Unknown hash name: </span><span class="s0">{</span><span class="s1">hash_name</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+
+        <span class="s0">for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">chunks</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">hash </span><span class="s0">in </span><span class="s1">gots</span><span class="s2">.</span><span class="s1">values</span><span class="s2">():</span>
+                <span class="s1">hash</span><span class="s2">.</span><span class="s1">update</span><span class="s2">(</span><span class="s1">chunk</span><span class="s2">)</span>
+
+        <span class="s0">for </span><span class="s1">hash_name</span><span class="s2">, </span><span class="s1">got </span><span class="s0">in </span><span class="s1">gots</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">got</span><span class="s2">.</span><span class="s1">hexdigest</span><span class="s2">() </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">[</span><span class="s1">hash_name</span><span class="s2">]:</span>
+                <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_raise</span><span class="s2">(</span><span class="s1">gots</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_raise</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">gots</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">_Hash</span><span class="s2">]) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">HashMismatch</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">, </span><span class="s1">gots</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">check_against_file</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">file</span><span class="s2">: </span><span class="s1">BinaryIO</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Check good hashes against a file-like object 
+ 
+        Raise HashMismatch if none match. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check_against_chunks</span><span class="s2">(</span><span class="s1">read_chunks</span><span class="s2">(</span><span class="s1">file</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">check_against_path</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">open</span><span class="s2">(</span><span class="s1">path</span><span class="s2">, </span><span class="s4">&quot;rb&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">file</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check_against_file</span><span class="s2">(</span><span class="s1">file</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">has_one_of</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">hashes</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Return whether any of the given hashes are allowed.&quot;&quot;&quot;</span>
+        <span class="s0">for </span><span class="s1">hash_name</span><span class="s2">, </span><span class="s1">hex_digest </span><span class="s0">in </span><span class="s1">hashes</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">is_hash_allowed</span><span class="s2">(</span><span class="s1">hash_name</span><span class="s2">, </span><span class="s1">hex_digest</span><span class="s2">):</span>
+                <span class="s0">return True</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">def </span><span class="s1">__bool__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Return whether I know any known-good hashes.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">bool</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">Hashes</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed </span><span class="s2">== </span><span class="s1">other</span><span class="s2">.</span><span class="s1">_allowed</span>
+
+    <span class="s0">def </span><span class="s1">__hash__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">hash</span><span class="s2">(</span>
+            <span class="s4">&quot;,&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span>
+                <span class="s1">sorted</span><span class="s2">(</span>
+                    <span class="s4">&quot;:&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">((</span><span class="s1">alg</span><span class="s2">, </span><span class="s1">digest</span><span class="s2">))</span>
+                    <span class="s0">for </span><span class="s1">alg</span><span class="s2">, </span><span class="s1">digest_list </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_allowed</span><span class="s2">.</span><span class="s1">items</span><span class="s2">()</span>
+                    <span class="s0">for </span><span class="s1">digest </span><span class="s0">in </span><span class="s1">digest_list</span>
+                <span class="s2">)</span>
+            <span class="s2">)</span>
+        <span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">MissingHashes</span><span class="s2">(</span><span class="s1">Hashes</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot;A workalike for Hashes used when we're missing a hash for a requirement 
+ 
+    It computes the actual hash of the requirement and raises a HashMissing 
+    exception showing it to the user. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Don't offer the ``hashes`` kwarg.&quot;&quot;&quot;</span>
+        <span class="s3"># Pass our favorite hash in to generate a &quot;gotten hash&quot;. With the</span>
+        <span class="s3"># empty list, it will never match, so an error will always raise.</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">hashes</span><span class="s2">={</span><span class="s1">FAVORITE_HASH</span><span class="s2">: []})</span>
+
+    <span class="s0">def </span><span class="s1">_raise</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">gots</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">_Hash</span><span class="s2">]) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">HashMissing</span><span class="s2">(</span><span class="s1">gots</span><span class="s2">[</span><span class="s1">FAVORITE_HASH</span><span class="s2">].</span><span class="s1">hexdigest</span><span class="s2">())</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<html>
+<head>
+<title>test_thread_cache.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #2aacb8;}
+.s5 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_thread_cache.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">contextmanager</span>
+<span class="s0">from </span><span class="s1">queue </span><span class="s0">import </span><span class="s1">Queue</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">NoReturn</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_thread_cache</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_thread_cache </span><span class="s0">import </span><span class="s1">ThreadCache</span><span class="s2">, </span><span class="s1">start_thread_soon</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">tutil </span><span class="s0">import </span><span class="s1">gc_collect_harder</span><span class="s2">, </span><span class="s1">slow</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Iterator</span>
+
+    <span class="s0">from </span><span class="s1">outcome </span><span class="s0">import </span><span class="s1">Outcome</span>
+
+
+<span class="s0">def </span><span class="s1">test_thread_cache_basics</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]] = </span><span class="s1">Queue</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">fn</span><span class="s2">() </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s3">&quot;hi&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">deliver</span><span class="s2">(</span><span class="s1">outcome</span><span class="s2">: </span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s1">outcome</span><span class="s2">)</span>
+
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">fn</span><span class="s2">, </span><span class="s1">deliver</span><span class="s2">)</span>
+
+    <span class="s1">outcome </span><span class="s2">= </span><span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">&quot;hi&quot;</span><span class="s2">):</span>
+        <span class="s1">outcome</span><span class="s2">.</span><span class="s1">unwrap</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">test_thread_cache_deref</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">res </span><span class="s2">= [</span><span class="s0">False</span><span class="s2">]</span>
+
+    <span class="s0">class </span><span class="s1">del_me</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">__call__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s4">42</span>
+
+        <span class="s0">def </span><span class="s1">__del__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">res</span><span class="s2">[</span><span class="s4">0</span><span class="s2">] = </span><span class="s0">True</span>
+
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]] = </span><span class="s1">Queue</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">deliver</span><span class="s2">(</span><span class="s1">outcome</span><span class="s2">: </span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s1">outcome</span><span class="s2">)</span>
+
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">del_me</span><span class="s2">(), </span><span class="s1">deliver</span><span class="s2">)</span>
+    <span class="s1">outcome </span><span class="s2">= </span><span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">outcome</span><span class="s2">.</span><span class="s1">unwrap</span><span class="s2">() == </span><span class="s4">42</span>
+
+    <span class="s1">gc_collect_harder</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">res</span><span class="s2">[</span><span class="s4">0</span><span class="s2">]</span>
+
+
+<span class="s2">@</span><span class="s1">slow</span>
+<span class="s0">def </span><span class="s1">test_spawning_new_thread_from_deliver_reuses_starting_thread</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># We know that no-one else is using the thread cache, so if we keep</span>
+    <span class="s5"># submitting new jobs the instant the previous one is finished, we should</span>
+    <span class="s5"># keep getting the same thread over and over. This tests both that the</span>
+    <span class="s5"># thread cache is LIFO, and that threads can be assigned new work *before*</span>
+    <span class="s5"># deliver exits.</span>
+
+    <span class="s5"># Make sure there are a few threads running, so if we weren't LIFO then we</span>
+    <span class="s5"># could grab the wrong one.</span>
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">Outcome</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]] = </span><span class="s1">Queue</span><span class="s2">()</span>
+    <span class="s1">COUNT </span><span class="s2">= </span><span class="s4">5</span>
+    <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">COUNT</span><span class="s2">):</span>
+        <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s4">1</span><span class="s2">), </span><span class="s0">lambda </span><span class="s1">result</span><span class="s2">: </span><span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s1">result</span><span class="s2">))</span>
+    <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">COUNT</span><span class="s2">):</span>
+        <span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">().</span><span class="s1">unwrap</span><span class="s2">()</span>
+
+    <span class="s1">seen_threads </span><span class="s2">= </span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s1">done </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">deliver</span><span class="s2">(</span><span class="s1">n</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">_</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">print</span><span class="s2">(</span><span class="s1">n</span><span class="s2">)</span>
+        <span class="s1">seen_threads</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">())</span>
+        <span class="s0">if </span><span class="s1">n </span><span class="s2">== </span><span class="s4">0</span><span class="s2">:</span>
+            <span class="s1">done</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">deliver</span><span class="s2">(</span><span class="s1">n </span><span class="s2">- </span><span class="s4">1</span><span class="s2">, </span><span class="s1">_</span><span class="s2">))</span>
+
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">deliver</span><span class="s2">(</span><span class="s4">5</span><span class="s2">, </span><span class="s1">_</span><span class="s2">))</span>
+
+    <span class="s1">done</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+
+    <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">seen_threads</span><span class="s2">) == </span><span class="s4">1</span>
+
+
+<span class="s2">@</span><span class="s1">slow</span>
+<span class="s0">def </span><span class="s1">test_idle_threads_exit</span><span class="s2">(</span><span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># Temporarily set the idle timeout to something tiny, to speed up the</span>
+    <span class="s5"># test. (But non-zero, so that the worker loop will at least yield the</span>
+    <span class="s5"># CPU.)</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_thread_cache</span><span class="s2">, </span><span class="s3">&quot;IDLE_TIMEOUT&quot;</span><span class="s2">, </span><span class="s4">0.0001</span><span class="s2">)</span>
+
+    <span class="s1">q</span><span class="s2">: </span><span class="s1">Queue</span><span class="s2">[</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Thread</span><span class="s2">] = </span><span class="s1">Queue</span><span class="s2">()</span>
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">q</span><span class="s2">.</span><span class="s1">put</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">()))</span>
+    <span class="s1">seen_thread </span><span class="s2">= </span><span class="s1">q</span><span class="s2">.</span><span class="s1">get</span><span class="s2">()</span>
+    <span class="s5"># Since the idle timeout is 0, after sleeping for 1 second, the thread</span>
+    <span class="s5"># should have exited</span>
+    <span class="s1">time</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s4">1</span><span class="s2">)</span>
+    <span class="s0">assert not </span><span class="s1">seen_thread</span><span class="s2">.</span><span class="s1">is_alive</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">_join_started_threads</span><span class="s2">() </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s1">before </span><span class="s2">= </span><span class="s1">frozenset</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">enumerate</span><span class="s2">())</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">yield</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">thread </span><span class="s0">in </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">enumerate</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">thread </span><span class="s0">not in </span><span class="s1">before</span><span class="s2">:</span>
+                <span class="s1">thread</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s4">1.0</span><span class="s2">)</span>
+                <span class="s0">assert not </span><span class="s1">thread</span><span class="s2">.</span><span class="s1">is_alive</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">test_race_between_idle_exit_and_job_assignment</span><span class="s2">(</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># This is a lock where the first few times you try to acquire it with a</span>
+    <span class="s5"># timeout, it waits until the lock is available and then pretends to time</span>
+    <span class="s5"># out. Using this in our thread cache implementation causes the following</span>
+    <span class="s5"># sequence:</span>
+    <span class="s5">#</span>
+    <span class="s5"># 1. start_thread_soon grabs the worker thread, assigns it a job, and</span>
+    <span class="s5">#    releases its lock.</span>
+    <span class="s5"># 2. The worker thread wakes up (because the lock has been released), but</span>
+    <span class="s5">#    the JankyLock lies to it and tells it that the lock timed out. So the</span>
+    <span class="s5">#    worker thread tries to exit.</span>
+    <span class="s5"># 3. The worker thread checks for the race between exiting and being</span>
+    <span class="s5">#    assigned a job, and discovers that it *is* in the process of being</span>
+    <span class="s5">#    assigned a job, so it loops around and tries to acquire the lock</span>
+    <span class="s5">#    again.</span>
+    <span class="s5"># 4. Eventually the JankyLock admits that the lock is available, and</span>
+    <span class="s5">#    everything proceeds as normal.</span>
+
+    <span class="s0">class </span><span class="s1">JankyLock</span><span class="s2">:</span>
+        <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_lock </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Lock</span><span class="s2">()</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_counter </span><span class="s2">= </span><span class="s4">3</span>
+
+        <span class="s0">def </span><span class="s1">acquire</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">timeout</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s4">1</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+            <span class="s1">got_it </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_lock</span><span class="s2">.</span><span class="s1">acquire</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s1">timeout</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">timeout </span><span class="s2">== -</span><span class="s4">1</span><span class="s2">:</span>
+                <span class="s0">return True</span>
+            <span class="s0">elif </span><span class="s1">got_it</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_counter </span><span class="s2">&gt; </span><span class="s4">0</span><span class="s2">:</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_counter </span><span class="s2">-= </span><span class="s4">1</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_lock</span><span class="s2">.</span><span class="s1">release</span><span class="s2">()</span>
+                    <span class="s0">return False</span>
+                <span class="s0">return True</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">return False</span>
+
+        <span class="s0">def </span><span class="s1">release</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_lock</span><span class="s2">.</span><span class="s1">release</span><span class="s2">()</span>
+
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_thread_cache</span><span class="s2">, </span><span class="s3">&quot;Lock&quot;</span><span class="s2">, </span><span class="s1">JankyLock</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">_join_started_threads</span><span class="s2">():</span>
+        <span class="s1">tc </span><span class="s2">= </span><span class="s1">ThreadCache</span><span class="s2">()</span>
+        <span class="s1">done </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+        <span class="s1">tc</span><span class="s2">.</span><span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">done</span><span class="s2">.</span><span class="s1">set</span><span class="s2">())</span>
+        <span class="s1">done</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s5"># Let's kill the thread we started, so it doesn't hang around until the</span>
+        <span class="s5"># test suite finishes. Doesn't really do any harm, but it can be confusing</span>
+        <span class="s5"># to see it in debug output.</span>
+        <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_thread_cache</span><span class="s2">, </span><span class="s3">&quot;IDLE_TIMEOUT&quot;</span><span class="s2">, </span><span class="s4">0.0001</span><span class="s2">)</span>
+        <span class="s1">tc</span><span class="s2">.</span><span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s0">lambda</span><span class="s2">: </span><span class="s0">None</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s0">None</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_raise_in_deliver</span><span class="s2">(</span><span class="s1">capfd</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">CaptureFixture</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">seen_threads </span><span class="s2">= </span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">track_threads</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">seen_threads</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">threading</span><span class="s2">.</span><span class="s1">current_thread</span><span class="s2">())</span>
+
+    <span class="s0">def </span><span class="s1">deliver</span><span class="s2">(</span><span class="s1">_</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s1">done</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+        <span class="s0">raise </span><span class="s1">RuntimeError</span><span class="s2">(</span><span class="s3">&quot;don't do this&quot;</span><span class="s2">)</span>
+
+    <span class="s1">done </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">track_threads</span><span class="s2">, </span><span class="s1">deliver</span><span class="s2">)</span>
+    <span class="s1">done</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+    <span class="s1">done </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">track_threads</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">done</span><span class="s2">.</span><span class="s1">set</span><span class="s2">())</span>
+    <span class="s1">done</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">seen_threads</span><span class="s2">) == </span><span class="s4">1</span>
+    <span class="s1">err </span><span class="s2">= </span><span class="s1">capfd</span><span class="s2">.</span><span class="s1">readouterr</span><span class="s2">().</span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;don't do this&quot; </span><span class="s0">in </span><span class="s1">err</span>
+    <span class="s0">assert </span><span class="s3">&quot;delivering result&quot; </span><span class="s0">in </span><span class="s1">err</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s0">not </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">os</span><span class="s2">, </span><span class="s3">&quot;fork&quot;</span><span class="s2">), </span><span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;os.fork isn't supported&quot;</span><span class="s2">)</span>
+<span class="s0">def </span><span class="s1">test_clear_thread_cache_after_fork</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">assert </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">os</span><span class="s2">, </span><span class="s3">&quot;fork&quot;</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">foo</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">pass</span>
+
+    <span class="s5"># ensure the thread cache exists</span>
+    <span class="s1">done </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">foo</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">done</span><span class="s2">.</span><span class="s1">set</span><span class="s2">())</span>
+    <span class="s1">done</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+
+    <span class="s1">child_pid </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">fork</span><span class="s2">()</span>
+
+    <span class="s5"># try using it</span>
+    <span class="s1">done </span><span class="s2">= </span><span class="s1">threading</span><span class="s2">.</span><span class="s1">Event</span><span class="s2">()</span>
+    <span class="s1">start_thread_soon</span><span class="s2">(</span><span class="s1">foo</span><span class="s2">, </span><span class="s0">lambda </span><span class="s1">_</span><span class="s2">: </span><span class="s1">done</span><span class="s2">.</span><span class="s1">set</span><span class="s2">())</span>
+    <span class="s1">done</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+
+    <span class="s0">if </span><span class="s1">child_pid </span><span class="s2">!= </span><span class="s4">0</span><span class="s2">:</span>
+        <span class="s5"># if this test fails, this will hang, triggering a timeout.</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">waitpid</span><span class="s2">(</span><span class="s1">child_pid</span><span class="s2">, </span><span class="s4">0</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s5"># this is necessary because os._exit doesn't unwind the stack,</span>
+        <span class="s5"># so coverage doesn't get to automatically stop and save</span>
+        <span class="s5"># coverage information.</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">import </span><span class="s1">coverage</span>
+
+            <span class="s1">cov </span><span class="s2">= </span><span class="s1">coverage</span><span class="s2">.</span><span class="s1">Coverage</span><span class="s2">.</span><span class="s1">current</span><span class="s2">()</span>
+            <span class="s5"># the following pragmas are necessary because if coverage:</span>
+            <span class="s5">#  - isn't running, then it can't record the branch not</span>
+            <span class="s5">#    taken</span>
+            <span class="s5">#  - isn't installed, then it can't record the ImportError</span>
+
+            <span class="s0">if </span><span class="s1">cov</span><span class="s2">:  </span><span class="s5"># pragma: no branch</span>
+                <span class="s1">cov</span><span class="s2">.</span><span class="s1">stop</span><span class="s2">()</span>
+                <span class="s1">cov</span><span class="s2">.</span><span class="s1">save</span><span class="s2">()</span>
+        <span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:  </span><span class="s5"># pragma: no cover</span>
+            <span class="s0">pass</span>
+
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">_exit</span><span class="s2">(</span><span class="s4">0</span><span class="s2">)  </span><span class="s5"># pragma: no cover  # coverage was stopped above.</span>
+</pre>
+</body>
+</html>

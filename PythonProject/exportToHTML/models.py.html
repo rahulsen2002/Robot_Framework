@@ -1,0 +1,383 @@
+<html>
+<head>
+<title>models.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #2aacb8;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #7a7e85;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+models.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">encodings</span><span class="s2">.</span><span class="s1">aliases </span><span class="s0">import </span><span class="s1">aliases</span>
+<span class="s0">from </span><span class="s1">hashlib </span><span class="s0">import </span><span class="s1">sha256</span>
+<span class="s0">from </span><span class="s1">json </span><span class="s0">import </span><span class="s1">dumps</span>
+<span class="s0">from </span><span class="s1">re </span><span class="s0">import </span><span class="s1">sub</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Iterator</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Tuple</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">constant </span><span class="s0">import </span><span class="s1">RE_POSSIBLE_ENCODING_INDICATION</span><span class="s2">, </span><span class="s1">TOO_BIG_SEQUENCE</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">utils </span><span class="s0">import </span><span class="s1">iana_name</span><span class="s2">, </span><span class="s1">is_multi_byte_encoding</span><span class="s2">, </span><span class="s1">unicode_range</span>
+
+
+<span class="s0">class </span><span class="s1">CharsetMatch</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">payload</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">,</span>
+        <span class="s1">guessed_encoding</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">mean_mess_ratio</span><span class="s2">: </span><span class="s1">float</span><span class="s2">,</span>
+        <span class="s1">has_sig_or_bom</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">,</span>
+        <span class="s1">languages</span><span class="s2">: </span><span class="s1">CoherenceMatches</span><span class="s2">,</span>
+        <span class="s1">decoded_payload</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">preemptive_declaration</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_payload</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">= </span><span class="s1">payload</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">guessed_encoding</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_mean_mess_ratio</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">mean_mess_ratio</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_languages</span><span class="s2">: </span><span class="s1">CoherenceMatches </span><span class="s2">= </span><span class="s1">languages</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_has_sig_or_bom</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s1">has_sig_or_bom</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_unicode_ranges</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_leaves</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">CharsetMatch</span><span class="s2">] = []</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_mean_coherence_ratio</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s3">0.0</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_output_payload</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_output_encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_string</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">decoded_payload</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_preemptive_declaration</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">preemptive_declaration</span>
+
+    <span class="s0">def </span><span class="s1">__eq__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">CharsetMatch</span><span class="s2">):</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+                <span class="s0">return </span><span class="s1">iana_name</span><span class="s2">(</span><span class="s1">other</span><span class="s2">) == </span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span>
+            <span class="s0">return False</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding </span><span class="s2">== </span><span class="s1">other</span><span class="s2">.</span><span class="s1">encoding </span><span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">fingerprint </span><span class="s2">== </span><span class="s1">other</span><span class="s2">.</span><span class="s1">fingerprint</span>
+
+    <span class="s0">def </span><span class="s1">__lt__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Implemented to make sorted available upon CharsetMatches items. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">CharsetMatch</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span>
+
+        <span class="s1">chaos_difference</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">abs</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">chaos </span><span class="s2">- </span><span class="s1">other</span><span class="s2">.</span><span class="s1">chaos</span><span class="s2">)</span>
+        <span class="s1">coherence_difference</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">abs</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">coherence </span><span class="s2">- </span><span class="s1">other</span><span class="s2">.</span><span class="s1">coherence</span><span class="s2">)</span>
+
+        <span class="s5"># Below 1% difference --&gt; Use Coherence</span>
+        <span class="s0">if </span><span class="s1">chaos_difference </span><span class="s2">&lt; </span><span class="s3">0.01 </span><span class="s0">and </span><span class="s1">coherence_difference </span><span class="s2">&gt; </span><span class="s3">0.02</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">coherence </span><span class="s2">&gt; </span><span class="s1">other</span><span class="s2">.</span><span class="s1">coherence</span>
+        <span class="s0">elif </span><span class="s1">chaos_difference </span><span class="s2">&lt; </span><span class="s3">0.01 </span><span class="s0">and </span><span class="s1">coherence_difference </span><span class="s2">&lt;= </span><span class="s3">0.02</span><span class="s2">:</span>
+            <span class="s5"># When having a difficult decision, use the result that decoded as many multi-byte as possible.</span>
+            <span class="s5"># preserve RAM usage!</span>
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_payload</span><span class="s2">) &gt;= </span><span class="s1">TOO_BIG_SEQUENCE</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">chaos </span><span class="s2">&lt; </span><span class="s1">other</span><span class="s2">.</span><span class="s1">chaos</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">multi_byte_usage </span><span class="s2">&gt; </span><span class="s1">other</span><span class="s2">.</span><span class="s1">multi_byte_usage</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">chaos </span><span class="s2">&lt; </span><span class="s1">other</span><span class="s2">.</span><span class="s1">chaos</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">multi_byte_usage</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s3">1.0 </span><span class="s2">- (</span><span class="s1">len</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)) / </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">raw</span><span class="s2">))</span>
+
+    <span class="s0">def </span><span class="s1">__str__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5"># Lazy Str Loading</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_string </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_string </span><span class="s2">= </span><span class="s1">str</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_payload</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_encoding</span><span class="s2">, </span><span class="s6">&quot;strict&quot;</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_string</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s6">f&quot;&lt;CharsetMatch '</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span><span class="s0">}</span><span class="s6">' bytes(</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">fingerprint</span><span class="s0">}</span><span class="s6">)&gt;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">add_submatch</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">: </span><span class="s1">CharsetMatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">other</span><span class="s2">, </span><span class="s1">CharsetMatch</span><span class="s2">) </span><span class="s0">or </span><span class="s1">other </span><span class="s2">== </span><span class="s1">self</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s6">&quot;Unable to add instance &lt;{}&gt; as a submatch of a CharsetMatch&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span>
+                    <span class="s1">other</span><span class="s2">.</span><span class="s1">__class__</span>
+                <span class="s2">)</span>
+            <span class="s2">)</span>
+
+        <span class="s1">other</span><span class="s2">.</span><span class="s1">_string </span><span class="s2">= </span><span class="s0">None  </span><span class="s5"># Unload RAM usage; dirty trick.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_leaves</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">other</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">encoding</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_encoding</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">encoding_aliases</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Encoding name are known by many name, using this could help when searching for IBM855 when it's listed as CP855. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">also_known_as</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+        <span class="s0">for </span><span class="s1">u</span><span class="s2">, </span><span class="s1">p </span><span class="s0">in </span><span class="s1">aliases</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding </span><span class="s2">== </span><span class="s1">u</span><span class="s2">:</span>
+                <span class="s1">also_known_as</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">p</span><span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding </span><span class="s2">== </span><span class="s1">p</span><span class="s2">:</span>
+                <span class="s1">also_known_as</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">u</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">also_known_as</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">bom</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_has_sig_or_bom</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">byte_order_mark</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_has_sig_or_bom</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">languages</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return the complete list of possible languages found in decoded sequence. 
+        Usually not really useful. Returned list may be empty even if 'language' property return something != 'Unknown'. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s1">e</span><span class="s2">[</span><span class="s3">0</span><span class="s2">] </span><span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_languages</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">language</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Most probable language found in decoded sequence. If none were detected or inferred, the property will return 
+        &quot;Unknown&quot;. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_languages</span><span class="s2">:</span>
+            <span class="s5"># Trying to infer the language based on the given encoding</span>
+            <span class="s5"># Its either English or we should not pronounce ourselves in certain cases.</span>
+            <span class="s0">if </span><span class="s6">&quot;ascii&quot; </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">could_be_from_charset</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s6">&quot;English&quot;</span>
+
+            <span class="s5"># doing it there to avoid circular import</span>
+            <span class="s0">from </span><span class="s1">charset_normalizer</span><span class="s2">.</span><span class="s1">cd </span><span class="s0">import </span><span class="s1">encoding_languages</span><span class="s2">, </span><span class="s1">mb_encoding_languages</span>
+
+            <span class="s1">languages </span><span class="s2">= (</span>
+                <span class="s1">mb_encoding_languages</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">is_multi_byte_encoding</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span><span class="s2">)</span>
+                <span class="s0">else </span><span class="s1">encoding_languages</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span><span class="s2">)</span>
+            <span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">languages</span><span class="s2">) == </span><span class="s3">0 </span><span class="s0">or </span><span class="s6">&quot;Latin Based&quot; </span><span class="s0">in </span><span class="s1">languages</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s6">&quot;Unknown&quot;</span>
+
+            <span class="s0">return </span><span class="s1">languages</span><span class="s2">[</span><span class="s3">0</span><span class="s2">]</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_languages</span><span class="s2">[</span><span class="s3">0</span><span class="s2">][</span><span class="s3">0</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">chaos</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_mean_mess_ratio</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">coherence</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_languages</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s3">0.0</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_languages</span><span class="s2">[</span><span class="s3">0</span><span class="s2">][</span><span class="s3">1</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">percent_chaos</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">round</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">chaos </span><span class="s2">* </span><span class="s3">100</span><span class="s2">, </span><span class="s1">ndigits</span><span class="s2">=</span><span class="s3">3</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">percent_coherence</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">round</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">coherence </span><span class="s2">* </span><span class="s3">100</span><span class="s2">, </span><span class="s1">ndigits</span><span class="s2">=</span><span class="s3">3</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">raw</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Original untouched bytes. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_payload</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">submatch</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">CharsetMatch</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_leaves</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">has_submatch</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_leaves</span><span class="s2">) &gt; </span><span class="s3">0</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">alphabets</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_unicode_ranges </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_unicode_ranges</span>
+        <span class="s5"># list detected ranges</span>
+        <span class="s1">detected_ranges</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">] = [</span><span class="s1">unicode_range</span><span class="s2">(</span><span class="s1">char</span><span class="s2">) </span><span class="s0">for </span><span class="s1">char </span><span class="s0">in </span><span class="s1">str</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)]</span>
+        <span class="s5"># filter and sort</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_unicode_ranges </span><span class="s2">= </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">list</span><span class="s2">({</span><span class="s1">r </span><span class="s0">for </span><span class="s1">r </span><span class="s0">in </span><span class="s1">detected_ranges </span><span class="s0">if </span><span class="s1">r</span><span class="s2">}))</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_unicode_ranges</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">could_be_from_charset</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        The complete list of encoding that output the exact SAME str result and therefore could be the originating 
+        encoding. 
+        This list does include the encoding available in property 'encoding'. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_encoding</span><span class="s2">] + [</span><span class="s1">m</span><span class="s2">.</span><span class="s1">encoding </span><span class="s0">for </span><span class="s1">m </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_leaves</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">output</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s6">&quot;utf_8&quot;</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Method to get re-encoded bytes payload using given target encoding. Default to UTF-8. 
+        Any errors will be simply ignored by the encoder NOT replaced. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_output_encoding </span><span class="s0">is None or </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_output_encoding </span><span class="s2">!= </span><span class="s1">encoding</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_output_encoding </span><span class="s2">= </span><span class="s1">encoding</span>
+            <span class="s1">decoded_string </span><span class="s2">= </span><span class="s1">str</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s2">(</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_preemptive_declaration </span><span class="s0">is not None</span>
+                <span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_preemptive_declaration</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+                <span class="s0">not in </span><span class="s2">[</span><span class="s6">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s6">&quot;utf8&quot;</span><span class="s2">, </span><span class="s6">&quot;utf_8&quot;</span><span class="s2">]</span>
+            <span class="s2">):</span>
+                <span class="s1">patched_header </span><span class="s2">= </span><span class="s1">sub</span><span class="s2">(</span>
+                    <span class="s1">RE_POSSIBLE_ENCODING_INDICATION</span><span class="s2">,</span>
+                    <span class="s0">lambda </span><span class="s1">m</span><span class="s2">: </span><span class="s1">m</span><span class="s2">.</span><span class="s1">string</span><span class="s2">[</span><span class="s1">m</span><span class="s2">.</span><span class="s1">span</span><span class="s2">()[</span><span class="s3">0</span><span class="s2">] : </span><span class="s1">m</span><span class="s2">.</span><span class="s1">span</span><span class="s2">()[</span><span class="s3">1</span><span class="s2">]].</span><span class="s1">replace</span><span class="s2">(</span>
+                        <span class="s1">m</span><span class="s2">.</span><span class="s1">groups</span><span class="s2">()[</span><span class="s3">0</span><span class="s2">],</span>
+                        <span class="s1">iana_name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_output_encoding</span><span class="s2">).</span><span class="s1">replace</span><span class="s2">(</span><span class="s6">&quot;_&quot;</span><span class="s2">, </span><span class="s6">&quot;-&quot;</span><span class="s2">),  </span><span class="s5"># type: ignore[arg-type]</span>
+                    <span class="s2">),</span>
+                    <span class="s1">decoded_string</span><span class="s2">[:</span><span class="s3">8192</span><span class="s2">],</span>
+                    <span class="s1">count</span><span class="s2">=</span><span class="s3">1</span><span class="s2">,</span>
+                <span class="s2">)</span>
+
+                <span class="s1">decoded_string </span><span class="s2">= </span><span class="s1">patched_header </span><span class="s2">+ </span><span class="s1">decoded_string</span><span class="s2">[</span><span class="s3">8192</span><span class="s2">:]</span>
+
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_output_payload </span><span class="s2">= </span><span class="s1">decoded_string</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s1">encoding</span><span class="s2">, </span><span class="s6">&quot;replace&quot;</span><span class="s2">)</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_output_payload  </span><span class="s5"># type: ignore</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">fingerprint</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Retrieve the unique SHA256 computed using the transformed (re-encoded) payload. Not the original one. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">sha256</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">output</span><span class="s2">()).</span><span class="s1">hexdigest</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">CharsetMatches</span><span class="s2">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Container with every CharsetMatch items ordered by default from most probable to the less one. 
+    Act like a list(iterable) but does not implements all related methods. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">results</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">CharsetMatch</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">):</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">CharsetMatch</span><span class="s2">] = </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">results</span><span class="s2">) </span><span class="s0">if </span><span class="s1">results </span><span class="s0">else </span><span class="s2">[]</span>
+
+    <span class="s0">def </span><span class="s1">__iter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Iterator</span><span class="s2">[</span><span class="s1">CharsetMatch</span><span class="s2">]:</span>
+        <span class="s0">yield from </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span>
+
+    <span class="s0">def </span><span class="s1">__getitem__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">item</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; CharsetMatch</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Retrieve a single item either by its position or encoding name (alias may be used here). 
+        Raise KeyError upon invalid index or encoding not present in results. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">item</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">[</span><span class="s1">item</span><span class="s2">]</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">item</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+            <span class="s1">item </span><span class="s2">= </span><span class="s1">iana_name</span><span class="s2">(</span><span class="s1">item</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+            <span class="s0">for </span><span class="s1">result </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">item </span><span class="s0">in </span><span class="s1">result</span><span class="s2">.</span><span class="s1">could_be_from_charset</span><span class="s2">:</span>
+                    <span class="s0">return </span><span class="s1">result</span>
+        <span class="s0">raise </span><span class="s1">KeyError</span>
+
+    <span class="s0">def </span><span class="s1">__len__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__bool__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">) &gt; </span><span class="s3">0</span>
+
+    <span class="s0">def </span><span class="s1">append</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">item</span><span class="s2">: </span><span class="s1">CharsetMatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Insert a single match. Will be inserted accordingly to preserve sort. 
+        Can be inserted as a submatch. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">item</span><span class="s2">, </span><span class="s1">CharsetMatch</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s6">&quot;Cannot append instance '{}' to CharsetMatches&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span>
+                    <span class="s1">str</span><span class="s2">(</span><span class="s1">item</span><span class="s2">.</span><span class="s1">__class__</span><span class="s2">)</span>
+                <span class="s2">)</span>
+            <span class="s2">)</span>
+        <span class="s5"># We should disable the submatch factoring when the input file is too heavy (conserve RAM usage)</span>
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">item</span><span class="s2">.</span><span class="s1">raw</span><span class="s2">) &lt; </span><span class="s1">TOO_BIG_SEQUENCE</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">match </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">match</span><span class="s2">.</span><span class="s1">fingerprint </span><span class="s2">== </span><span class="s1">item</span><span class="s2">.</span><span class="s1">fingerprint </span><span class="s0">and </span><span class="s1">match</span><span class="s2">.</span><span class="s1">chaos </span><span class="s2">== </span><span class="s1">item</span><span class="s2">.</span><span class="s1">chaos</span><span class="s2">:</span>
+                    <span class="s1">match</span><span class="s2">.</span><span class="s1">add_submatch</span><span class="s2">(</span><span class="s1">item</span><span class="s2">)</span>
+                    <span class="s0">return</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">item</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_results </span><span class="s2">= </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">best</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; CharsetMatch </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Simply return the first match. Strict equivalent to matches[0]. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_results</span><span class="s2">[</span><span class="s3">0</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">first</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; CharsetMatch </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Redundant method, call the method best(). Kept for BC reasons. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">best</span><span class="s2">()</span>
+
+
+<span class="s1">CoherenceMatch </span><span class="s2">= </span><span class="s1">Tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">float</span><span class="s2">]</span>
+<span class="s1">CoherenceMatches </span><span class="s2">= </span><span class="s1">List</span><span class="s2">[</span><span class="s1">CoherenceMatch</span><span class="s2">]</span>
+
+
+<span class="s0">class </span><span class="s1">CliDetectionResult</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">path</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">encoding_aliases</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+        <span class="s1">alternative_encodings</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+        <span class="s1">language</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">alphabets</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+        <span class="s1">has_sig_or_bom</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">,</span>
+        <span class="s1">chaos</span><span class="s2">: </span><span class="s1">float</span><span class="s2">,</span>
+        <span class="s1">coherence</span><span class="s2">: </span><span class="s1">float</span><span class="s2">,</span>
+        <span class="s1">unicode_path</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">is_preferred</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">path</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">path</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">unicode_path</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">unicode_path</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">encoding</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">encoding_aliases</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">encoding_aliases</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">alternative_encodings</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">alternative_encodings</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">language</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">language</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">alphabets</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">alphabets</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">has_sig_or_bom</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s1">has_sig_or_bom</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">chaos</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">chaos</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">coherence</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">coherence</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">is_preferred</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s1">is_preferred</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">__dict__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">]:  </span><span class="s5"># type: ignore</span>
+        <span class="s0">return </span><span class="s2">{</span>
+            <span class="s6">&quot;path&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">path</span><span class="s2">,</span>
+            <span class="s6">&quot;encoding&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding</span><span class="s2">,</span>
+            <span class="s6">&quot;encoding_aliases&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">encoding_aliases</span><span class="s2">,</span>
+            <span class="s6">&quot;alternative_encodings&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">alternative_encodings</span><span class="s2">,</span>
+            <span class="s6">&quot;language&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">language</span><span class="s2">,</span>
+            <span class="s6">&quot;alphabets&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">alphabets</span><span class="s2">,</span>
+            <span class="s6">&quot;has_sig_or_bom&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">has_sig_or_bom</span><span class="s2">,</span>
+            <span class="s6">&quot;chaos&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">chaos</span><span class="s2">,</span>
+            <span class="s6">&quot;coherence&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">coherence</span><span class="s2">,</span>
+            <span class="s6">&quot;unicode_path&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">unicode_path</span><span class="s2">,</span>
+            <span class="s6">&quot;is_preferred&quot;</span><span class="s2">: </span><span class="s1">self</span><span class="s2">.</span><span class="s1">is_preferred</span><span class="s2">,</span>
+        <span class="s2">}</span>
+
+    <span class="s0">def </span><span class="s1">to_json</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">dumps</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">__dict__</span><span class="s2">, </span><span class="s1">ensure_ascii</span><span class="s2">=</span><span class="s0">True</span><span class="s2">, </span><span class="s1">indent</span><span class="s2">=</span><span class="s3">4</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

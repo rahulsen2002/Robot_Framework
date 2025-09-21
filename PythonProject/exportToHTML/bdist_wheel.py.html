@@ -1,0 +1,627 @@
+<html>
+<head>
+<title>bdist_wheel.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bdist_wheel.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Create a wheel (.whl) distribution. 
+ 
+A wheel is a built archive format. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">shutil</span>
+<span class="s2">import </span><span class="s1">struct</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">sysconfig</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Iterable</span><span class="s3">, </span><span class="s1">Sequence</span>
+<span class="s2">from </span><span class="s1">email</span><span class="s3">.</span><span class="s1">generator </span><span class="s2">import </span><span class="s1">BytesGenerator</span>
+<span class="s2">from </span><span class="s1">glob </span><span class="s2">import </span><span class="s1">iglob</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Literal</span><span class="s3">, </span><span class="s1">cast</span>
+<span class="s2">from </span><span class="s1">zipfile </span><span class="s2">import </span><span class="s1">ZIP_DEFLATED</span><span class="s3">, </span><span class="s1">ZIP_STORED</span>
+
+<span class="s2">from </span><span class="s1">packaging </span><span class="s2">import </span><span class="s1">tags</span><span class="s3">, </span><span class="s1">version </span><span class="s2">as </span><span class="s1">_packaging_version</span>
+<span class="s2">from </span><span class="s1">wheel</span><span class="s3">.</span><span class="s1">wheelfile </span><span class="s2">import </span><span class="s1">WheelFile</span>
+
+<span class="s2">from </span><span class="s3">.. </span><span class="s2">import </span><span class="s1">Command</span><span class="s3">, </span><span class="s1">__version__</span><span class="s3">, </span><span class="s1">_shutil</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_core_metadata </span><span class="s2">import </span><span class="s1">_safe_license_file</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_normalization </span><span class="s2">import </span><span class="s1">safer_name</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">warnings </span><span class="s2">import </span><span class="s1">SetuptoolsDeprecationWarning</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">egg_info </span><span class="s2">import </span><span class="s1">egg_info </span><span class="s2">as </span><span class="s1">egg_info_cls</span>
+
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+
+
+<span class="s2">def </span><span class="s1">safe_version</span><span class="s3">(</span><span class="s1">version</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Convert an arbitrary string to a standard version string 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s4"># normalize the version</span>
+        <span class="s2">return </span><span class="s1">str</span><span class="s3">(</span><span class="s1">_packaging_version</span><span class="s3">.</span><span class="s1">Version</span><span class="s3">(</span><span class="s1">version</span><span class="s3">))</span>
+    <span class="s2">except </span><span class="s1">_packaging_version</span><span class="s3">.</span><span class="s1">InvalidVersion</span><span class="s3">:</span>
+        <span class="s1">version </span><span class="s3">= </span><span class="s1">version</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot; &quot;</span><span class="s3">, </span><span class="s5">&quot;.&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">re</span><span class="s3">.</span><span class="s1">sub</span><span class="s3">(</span><span class="s5">&quot;[^A-Za-z0-9.]+&quot;</span><span class="s3">, </span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s1">version</span><span class="s3">)</span>
+
+
+<span class="s1">setuptools_major_version </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">__version__</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">])</span>
+
+<span class="s1">PY_LIMITED_API_PATTERN </span><span class="s3">= </span><span class="s5">r&quot;cp3\d&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_is_32bit_interpreter</span><span class="s3">() </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">calcsize</span><span class="s3">(</span><span class="s5">&quot;P&quot;</span><span class="s3">) == </span><span class="s6">4</span>
+
+
+<span class="s2">def </span><span class="s1">python_tag</span><span class="s3">() </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s5">f&quot;py</span><span class="s2">{</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">.</span><span class="s1">major</span><span class="s2">}</span><span class="s5">&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">get_platform</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Return our platform name 'win32', 'linux_x86_64'&quot;&quot;&quot;</span>
+    <span class="s1">result </span><span class="s3">= </span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_platform</span><span class="s3">()</span>
+    <span class="s2">if </span><span class="s1">result</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;macosx&quot;</span><span class="s3">) </span><span class="s2">and </span><span class="s1">archive_root </span><span class="s2">is not None</span><span class="s3">:  </span><span class="s4"># pragma: no cover</span>
+        <span class="s2">from </span><span class="s1">wheel</span><span class="s3">.</span><span class="s1">macosx_libfile </span><span class="s2">import </span><span class="s1">calculate_macosx_platform_tag</span>
+
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">calculate_macosx_platform_tag</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+    <span class="s2">elif </span><span class="s1">_is_32bit_interpreter</span><span class="s3">():</span>
+        <span class="s2">if </span><span class="s1">result </span><span class="s3">== </span><span class="s5">&quot;linux-x86_64&quot;</span><span class="s3">:</span>
+            <span class="s4"># pip pull request #3497</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s5">&quot;linux-i686&quot;</span>
+        <span class="s2">elif </span><span class="s1">result </span><span class="s3">== </span><span class="s5">&quot;linux-aarch64&quot;</span><span class="s3">:</span>
+            <span class="s4"># packaging pull request #234</span>
+            <span class="s4"># TODO armv8l, packaging pull request #690 =&gt; this did not land</span>
+            <span class="s4"># in pip/packaging yet</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s5">&quot;linux-armv7l&quot;</span>
+
+    <span class="s2">return </span><span class="s1">result</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_flag</span><span class="s3">(</span>
+    <span class="s1">var</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">fallback</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">, </span><span class="s1">expected</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">, </span><span class="s1">warn</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span>
+<span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Use a fallback value for determining SOABI flags if the needed config 
+    var is unset or unavailable.&quot;&quot;&quot;</span>
+    <span class="s1">val </span><span class="s3">= </span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_config_var</span><span class="s3">(</span><span class="s1">var</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">val </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">warn</span><span class="s3">:</span>
+            <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s5">f&quot;Config variable '</span><span class="s2">{</span><span class="s1">var</span><span class="s2">}</span><span class="s5">' is unset, Python ABI tag may be incorrect&quot;</span><span class="s3">,</span>
+                <span class="s1">RuntimeWarning</span><span class="s3">,</span>
+                <span class="s1">stacklevel</span><span class="s3">=</span><span class="s6">2</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">fallback</span>
+    <span class="s2">return </span><span class="s1">val </span><span class="s3">== </span><span class="s1">expected</span>
+
+
+<span class="s2">def </span><span class="s1">get_abi_tag</span><span class="s3">() </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Return the ABI tag based on SOABI (if available) or emulate SOABI (PyPy2).&quot;&quot;&quot;</span>
+    <span class="s1">soabi</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_config_var</span><span class="s3">(</span><span class="s5">&quot;SOABI&quot;</span><span class="s3">)</span>
+    <span class="s1">impl </span><span class="s3">= </span><span class="s1">tags</span><span class="s3">.</span><span class="s1">interpreter_name</span><span class="s3">()</span>
+    <span class="s2">if not </span><span class="s1">soabi </span><span class="s2">and </span><span class="s1">impl </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;cp&quot;</span><span class="s3">, </span><span class="s5">&quot;pp&quot;</span><span class="s3">) </span><span class="s2">and </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">, </span><span class="s5">&quot;maxunicode&quot;</span><span class="s3">):</span>
+        <span class="s1">d </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+        <span class="s1">u </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">get_flag</span><span class="s3">(</span><span class="s5">&quot;Py_DEBUG&quot;</span><span class="s3">, </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">, </span><span class="s5">&quot;gettotalrefcount&quot;</span><span class="s3">), </span><span class="s1">warn</span><span class="s3">=(</span><span class="s1">impl </span><span class="s3">== </span><span class="s5">&quot;cp&quot;</span><span class="s3">)):</span>
+            <span class="s1">d </span><span class="s3">= </span><span class="s5">&quot;d&quot;</span>
+
+        <span class="s1">abi </span><span class="s3">= </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">impl</span><span class="s2">}{</span><span class="s1">tags</span><span class="s3">.</span><span class="s1">interpreter_version</span><span class="s3">()</span><span class="s2">}{</span><span class="s1">d</span><span class="s2">}{</span><span class="s1">u</span><span class="s2">}</span><span class="s5">&quot;</span>
+    <span class="s2">elif </span><span class="s1">soabi </span><span class="s2">and </span><span class="s1">impl </span><span class="s3">== </span><span class="s5">&quot;cp&quot; </span><span class="s2">and </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;cpython&quot;</span><span class="s3">):</span>
+        <span class="s4"># non-Windows</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s5">&quot;cp&quot; </span><span class="s3">+ </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">)[</span><span class="s6">1</span><span class="s3">]</span>
+    <span class="s2">elif </span><span class="s1">soabi </span><span class="s2">and </span><span class="s1">impl </span><span class="s3">== </span><span class="s5">&quot;cp&quot; </span><span class="s2">and </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;cp&quot;</span><span class="s3">):</span>
+        <span class="s4"># Windows</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">)[</span><span class="s6">0</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">, </span><span class="s5">&quot;gettotalrefcount&quot;</span><span class="s3">):</span>
+            <span class="s4"># using debug build; append &quot;d&quot; flag</span>
+            <span class="s1">abi </span><span class="s3">+= </span><span class="s5">&quot;d&quot;</span>
+    <span class="s2">elif </span><span class="s1">soabi </span><span class="s2">and </span><span class="s1">impl </span><span class="s3">== </span><span class="s5">&quot;pp&quot;</span><span class="s3">:</span>
+        <span class="s4"># we want something like pypy36-pp73</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s5">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">)[:</span><span class="s6">2</span><span class="s3">])</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s1">abi</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+    <span class="s2">elif </span><span class="s1">soabi </span><span class="s2">and </span><span class="s1">impl </span><span class="s3">== </span><span class="s5">&quot;graalpy&quot;</span><span class="s3">:</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s5">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">)[:</span><span class="s6">3</span><span class="s3">])</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s1">abi</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+    <span class="s2">elif </span><span class="s1">soabi</span><span class="s3">:</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s1">soabi</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">abi </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">return </span><span class="s1">abi</span>
+
+
+<span class="s2">def </span><span class="s1">safer_version</span><span class="s3">(</span><span class="s1">version</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s1">safe_version</span><span class="s3">(</span><span class="s1">version</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">bdist_wheel</span><span class="s3">(</span><span class="s1">Command</span><span class="s3">):</span>
+    <span class="s1">description </span><span class="s3">= </span><span class="s5">&quot;create a wheel distribution&quot;</span>
+
+    <span class="s1">supported_compressions </span><span class="s3">= {</span>
+        <span class="s5">&quot;stored&quot;</span><span class="s3">: </span><span class="s1">ZIP_STORED</span><span class="s3">,</span>
+        <span class="s5">&quot;deflated&quot;</span><span class="s3">: </span><span class="s1">ZIP_DEFLATED</span><span class="s3">,</span>
+    <span class="s3">}</span>
+
+    <span class="s1">user_options </span><span class="s3">= [</span>
+        <span class="s3">(</span><span class="s5">&quot;bdist-dir=&quot;</span><span class="s3">, </span><span class="s5">&quot;b&quot;</span><span class="s3">, </span><span class="s5">&quot;temporary directory for creating the distribution&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;plat-name=&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;p&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;platform name to embed in generated filenames &quot;</span>
+            <span class="s5">f&quot;[default: </span><span class="s2">{</span><span class="s1">get_platform</span><span class="s3">(</span><span class="s2">None</span><span class="s3">)</span><span class="s2">}</span><span class="s5">]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;keep-temp&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;k&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;keep the pseudo-installation tree around after &quot;</span>
+            <span class="s5">&quot;creating the distribution archive&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">&quot;dist-dir=&quot;</span><span class="s3">, </span><span class="s5">&quot;d&quot;</span><span class="s3">, </span><span class="s5">&quot;directory to put final built distributions in&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">&quot;skip-build&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s5">&quot;skip rebuilding everything (for testing/debugging)&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;relative&quot;</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">&quot;build the archive using relative paths [default: false]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;owner=&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;u&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;Owner name used when creating a tar file [default: current user]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;group=&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;g&quot;</span><span class="s3">,</span>
+            <span class="s5">&quot;Group name used when creating a tar file [default: current group]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span><span class="s5">&quot;universal&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s5">&quot;*DEPRECATED* make a universal wheel [default: false]&quot;</span><span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;compression=&quot;</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">f&quot;zipfile compression (one of: </span><span class="s2">{</span><span class="s5">', '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">supported_compressions</span><span class="s3">)</span><span class="s2">}</span><span class="s5">) [default: 'deflated']&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;python-tag=&quot;</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">f&quot;Python implementation compatibility tag [default: '</span><span class="s2">{</span><span class="s1">python_tag</span><span class="s3">()</span><span class="s2">}</span><span class="s5">']&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;build-number=&quot;</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">&quot;Build number for this particular version. &quot;</span>
+            <span class="s5">&quot;As specified in PEP-0427, this must start with a digit. &quot;</span>
+            <span class="s5">&quot;[default: None]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;py-limited-api=&quot;</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">&quot;Python tag (cp32|cp33|cpNN) for abi3 wheel tag [default: false]&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+        <span class="s3">(</span>
+            <span class="s5">&quot;dist-info-dir=&quot;</span><span class="s3">,</span>
+            <span class="s2">None</span><span class="s3">,</span>
+            <span class="s5">&quot;directory where a pre-generated dist-info can be found (e.g. as a &quot;</span>
+            <span class="s5">&quot;result of calling the PEP517 'prepare_metadata_for_build_wheel' &quot;</span>
+            <span class="s5">&quot;method)&quot;</span><span class="s3">,</span>
+        <span class="s3">),</span>
+    <span class="s3">]</span>
+
+    <span class="s1">boolean_options </span><span class="s3">= [</span><span class="s5">&quot;keep-temp&quot;</span><span class="s3">, </span><span class="s5">&quot;skip-build&quot;</span><span class="s3">, </span><span class="s5">&quot;relative&quot;</span><span class="s3">, </span><span class="s5">&quot;universal&quot;</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">data_dir </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_tag</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">format </span><span class="s3">= </span><span class="s5">&quot;zip&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">egginfo_dir</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">root_is_pure</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">relative </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">owner </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">group </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">universal </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">compression</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">int </span><span class="s3">= </span><span class="s5">&quot;deflated&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">python_tag </span><span class="s3">= </span><span class="s1">python_tag</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">build_number</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">py_limited_api</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">Literal</span><span class="s3">[</span><span class="s2">False</span><span class="s3">] = </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name_supplied </span><span class="s3">= </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">:</span>
+            <span class="s1">bdist_base </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_finalized_command</span><span class="s3">(</span><span class="s5">&quot;bdist&quot;</span><span class="s3">).</span><span class="s1">bdist_base</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">bdist_base</span><span class="s3">, </span><span class="s5">&quot;wheel&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">egg_info </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">egg_info_cls</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s5">&quot;egg_info&quot;</span><span class="s3">))</span>
+            <span class="s1">egg_info</span><span class="s3">.</span><span class="s1">ensure_finalized</span><span class="s3">()  </span><span class="s4"># needed for correct `wheel_dist_name`</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">data_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">wheel_dist_name </span><span class="s3">+ </span><span class="s5">&quot;.data&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name_supplied </span><span class="s3">= </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span><span class="s3">)</span>
+
+        <span class="s1">need_options </span><span class="s3">= (</span><span class="s5">&quot;dist_dir&quot;</span><span class="s3">, </span><span class="s5">&quot;plat_name&quot;</span><span class="s3">, </span><span class="s5">&quot;skip_build&quot;</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_undefined_options</span><span class="s3">(</span><span class="s5">&quot;bdist&quot;</span><span class="s3">, *</span><span class="s1">zip</span><span class="s3">(</span><span class="s1">need_options</span><span class="s3">, </span><span class="s1">need_options</span><span class="s3">))</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">root_is_pure </span><span class="s3">= </span><span class="s2">not </span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_ext_modules</span><span class="s3">() </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">has_c_libraries</span><span class="s3">()</span>
+        <span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_py_limited_api</span><span class="s3">()</span>
+
+        <span class="s4"># Support legacy [wheel] section for setting universal</span>
+        <span class="s1">wheel </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_option_dict</span><span class="s3">(</span><span class="s5">&quot;wheel&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s5">&quot;universal&quot; </span><span class="s2">in </span><span class="s1">wheel</span><span class="s3">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s4"># please don't define this in your global configs</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span><span class="s5">&quot;The [wheel] section is deprecated. Use [bdist_wheel] instead.&quot;</span><span class="s3">)</span>
+            <span class="s1">val </span><span class="s3">= </span><span class="s1">wheel</span><span class="s3">[</span><span class="s5">&quot;universal&quot;</span><span class="s3">][</span><span class="s6">1</span><span class="s3">].</span><span class="s1">strip</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">val</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">() </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;1&quot;</span><span class="s3">, </span><span class="s5">&quot;true&quot;</span><span class="s3">, </span><span class="s5">&quot;yes&quot;</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">universal </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">universal</span><span class="s3">:</span>
+            <span class="s1">SetuptoolsDeprecationWarning</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span>
+                <span class="s5">&quot;bdist_wheel.universal is deprecated&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;&quot;&quot; 
+                With Python 2.7 end-of-life, support for building universal wheels 
+                (i.e., wheels that support both Python 2 and Python 3) 
+                is being obviated. 
+                Please discontinue using this option, or if you still need it, 
+                file an issue with pypa/setuptools describing your use case. 
+                &quot;&quot;&quot;</span><span class="s3">,</span>
+                <span class="s1">due_date</span><span class="s3">=(</span><span class="s6">2025</span><span class="s3">, </span><span class="s6">8</span><span class="s3">, </span><span class="s6">30</span><span class="s3">),  </span><span class="s4"># Introduced in 2024-08-30</span>
+            <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_number </span><span class="s2">is not None and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_number</span><span class="s3">[:</span><span class="s6">1</span><span class="s3">].</span><span class="s1">isdigit</span><span class="s3">():</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;Build tag (build-number) must start with a digit.&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_py_limited_api</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">py_limited_api</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+        <span class="s2">if not </span><span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s1">PY_LIMITED_API_PATTERN</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">py_limited_api</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">f&quot;py-limited-api must match '</span><span class="s2">{</span><span class="s1">PY_LIMITED_API_PATTERN</span><span class="s2">}</span><span class="s5">'&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">sysconfig</span><span class="s3">.</span><span class="s1">get_config_var</span><span class="s3">(</span><span class="s5">&quot;Py_GIL_DISABLED&quot;</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span>
+                <span class="s5">f&quot;`py_limited_api=</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">py_limited_api</span><span class="s2">!r}</span><span class="s5">` not supported. &quot;</span>
+                <span class="s5">&quot;`Py_LIMITED_API` is currently incompatible with &quot;</span>
+                <span class="s5">&quot;`Py_GIL_DISABLED`. &quot;</span>
+                <span class="s5">&quot;See https://github.com/python/cpython/issues/111506.&quot;</span>
+            <span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">wheel_dist_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return distribution full name with - replaced with _&quot;&quot;&quot;</span>
+        <span class="s1">components </span><span class="s3">= [</span>
+            <span class="s1">safer_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_name</span><span class="s3">()),</span>
+            <span class="s1">safer_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_version</span><span class="s3">()),</span>
+        <span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_number</span><span class="s3">:</span>
+            <span class="s1">components</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_number</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s5">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">components</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">get_tag</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s4"># bdist sets self.plat_name if unset, we should only use it for purepy</span>
+        <span class="s4"># wheels if the user supplied it.</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name_supplied </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span><span class="s3">:</span>
+            <span class="s1">plat_name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_is_pure</span><span class="s3">:</span>
+            <span class="s1">plat_name </span><span class="s3">= </span><span class="s5">&quot;any&quot;</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s4"># macosx contains system version in platform name so need special handle</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name </span><span class="s2">and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;macosx&quot;</span><span class="s3">):</span>
+                <span class="s1">plat_name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">plat_name</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s4"># on macosx always limit the platform name to comply with any</span>
+                <span class="s4"># c-extension modules in bdist_dir, since the user can specify</span>
+                <span class="s4"># a higher MACOSX_DEPLOYMENT_TARGET via tools like CMake</span>
+
+                <span class="s4"># on other platforms, and on macosx if there are no c-extension</span>
+                <span class="s4"># modules, use the default platform name.</span>
+                <span class="s1">plat_name </span><span class="s3">= </span><span class="s1">get_platform</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">)</span>
+
+            <span class="s2">if </span><span class="s1">_is_32bit_interpreter</span><span class="s3">():</span>
+                <span class="s2">if </span><span class="s1">plat_name </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;linux-x86_64&quot;</span><span class="s3">, </span><span class="s5">&quot;linux_x86_64&quot;</span><span class="s3">):</span>
+                    <span class="s1">plat_name </span><span class="s3">= </span><span class="s5">&quot;linux_i686&quot;</span>
+                <span class="s2">if </span><span class="s1">plat_name </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;linux-aarch64&quot;</span><span class="s3">, </span><span class="s5">&quot;linux_aarch64&quot;</span><span class="s3">):</span>
+                    <span class="s4"># TODO armv8l, packaging pull request #690 =&gt; this did not land</span>
+                    <span class="s4"># in pip/packaging yet</span>
+                    <span class="s1">plat_name </span><span class="s3">= </span><span class="s5">&quot;linux_armv7l&quot;</span>
+
+        <span class="s1">plat_name </span><span class="s3">= (</span>
+            <span class="s1">plat_name</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;-&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s5">&quot; &quot;</span><span class="s3">, </span><span class="s5">&quot;_&quot;</span><span class="s3">)</span>
+        <span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_is_pure</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">universal</span><span class="s3">:</span>
+                <span class="s1">impl </span><span class="s3">= </span><span class="s5">&quot;py2.py3&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">impl </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">python_tag</span>
+            <span class="s1">tag </span><span class="s3">= (</span><span class="s1">impl</span><span class="s3">, </span><span class="s5">&quot;none&quot;</span><span class="s3">, </span><span class="s1">plat_name</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">impl_name </span><span class="s3">= </span><span class="s1">tags</span><span class="s3">.</span><span class="s1">interpreter_name</span><span class="s3">()</span>
+            <span class="s1">impl_ver </span><span class="s3">= </span><span class="s1">tags</span><span class="s3">.</span><span class="s1">interpreter_version</span><span class="s3">()</span>
+            <span class="s1">impl </span><span class="s3">= </span><span class="s1">impl_name </span><span class="s3">+ </span><span class="s1">impl_ver</span>
+            <span class="s4"># We don't work on CPython 3.1, 3.0.</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">py_limited_api </span><span class="s2">and </span><span class="s3">(</span><span class="s1">impl_name </span><span class="s3">+ </span><span class="s1">impl_ver</span><span class="s3">).</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;cp3&quot;</span><span class="s3">):</span>
+                <span class="s1">impl </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">py_limited_api</span>
+                <span class="s1">abi_tag </span><span class="s3">= </span><span class="s5">&quot;abi3&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">abi_tag </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">get_abi_tag</span><span class="s3">()).</span><span class="s1">lower</span><span class="s3">()</span>
+            <span class="s1">tag </span><span class="s3">= (</span><span class="s1">impl</span><span class="s3">, </span><span class="s1">abi_tag</span><span class="s3">, </span><span class="s1">plat_name</span><span class="s3">)</span>
+            <span class="s4"># issue gh-374: allow overriding plat_name</span>
+            <span class="s1">supported_tags </span><span class="s3">= [</span>
+                <span class="s3">(</span><span class="s1">t</span><span class="s3">.</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s1">t</span><span class="s3">.</span><span class="s1">abi</span><span class="s3">, </span><span class="s1">plat_name</span><span class="s3">) </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tags</span><span class="s3">.</span><span class="s1">sys_tags</span><span class="s3">()</span>
+            <span class="s3">]</span>
+            <span class="s2">assert </span><span class="s1">tag </span><span class="s2">in </span><span class="s1">supported_tags</span><span class="s3">, (</span>
+                <span class="s5">f&quot;would build wheel with unsupported tag </span><span class="s2">{</span><span class="s1">tag</span><span class="s2">}</span><span class="s5">&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">tag</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">build_scripts </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s5">&quot;build_scripts&quot;</span><span class="s3">)</span>
+        <span class="s1">build_scripts</span><span class="s3">.</span><span class="s1">executable </span><span class="s3">= </span><span class="s5">&quot;python&quot;</span>
+        <span class="s1">build_scripts</span><span class="s3">.</span><span class="s1">force </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s1">build_ext </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s5">&quot;build_ext&quot;</span><span class="s3">)</span>
+        <span class="s1">build_ext</span><span class="s3">.</span><span class="s1">inplace </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s5">&quot;build&quot;</span><span class="s3">)</span>
+
+        <span class="s1">install </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s5">&quot;install&quot;</span><span class="s3">, </span><span class="s1">reinit_subcommands</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">root </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">compile </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">skip_build </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">skip_build</span>
+        <span class="s1">install</span><span class="s3">.</span><span class="s1">warn_dir </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s4"># A wheel without setuptools scripts is more cross-platform.</span>
+        <span class="s4"># Use the (undocumented) `no_ep` option to setuptools'</span>
+        <span class="s4"># install_scripts command to avoid creating entry point scripts.</span>
+        <span class="s1">install_scripts </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">reinitialize_command</span><span class="s3">(</span><span class="s5">&quot;install_scripts&quot;</span><span class="s3">)</span>
+        <span class="s1">install_scripts</span><span class="s3">.</span><span class="s1">no_ep </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s4"># Use a custom scheme for the archive, because we have to decide</span>
+        <span class="s4"># at installation time which scheme to use.</span>
+        <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;headers&quot;</span><span class="s3">, </span><span class="s5">&quot;scripts&quot;</span><span class="s3">, </span><span class="s5">&quot;data&quot;</span><span class="s3">, </span><span class="s5">&quot;purelib&quot;</span><span class="s3">, </span><span class="s5">&quot;platlib&quot;</span><span class="s3">):</span>
+            <span class="s1">setattr</span><span class="s3">(</span><span class="s1">install</span><span class="s3">, </span><span class="s5">&quot;install_&quot; </span><span class="s3">+ </span><span class="s1">key</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">data_dir</span><span class="s3">, </span><span class="s1">key</span><span class="s3">))</span>
+
+        <span class="s1">basedir_observed </span><span class="s3">= </span><span class="s5">&quot;&quot;</span>
+
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">name </span><span class="s3">== </span><span class="s5">&quot;nt&quot;</span><span class="s3">:</span>
+            <span class="s4"># win32 barfs if any of these are ''; could be '.'?</span>
+            <span class="s4"># (distutils.command.install:change_roots bug)</span>
+            <span class="s1">basedir_observed </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">data_dir</span><span class="s3">, </span><span class="s5">&quot;..&quot;</span><span class="s3">))</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">install_libbase </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">install_lib </span><span class="s3">= </span><span class="s1">basedir_observed</span>
+
+        <span class="s1">setattr</span><span class="s3">(</span>
+            <span class="s1">install</span><span class="s3">,</span>
+            <span class="s5">&quot;install_purelib&quot; </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_is_pure </span><span class="s2">else </span><span class="s5">&quot;install_platlib&quot;</span><span class="s3">,</span>
+            <span class="s1">basedir_observed</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">f&quot;installing to </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">run_command</span><span class="s3">(</span><span class="s5">&quot;install&quot;</span><span class="s3">)</span>
+
+        <span class="s1">impl_tag</span><span class="s3">, </span><span class="s1">abi_tag</span><span class="s3">, </span><span class="s1">plat_tag </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_tag</span><span class="s3">()</span>
+        <span class="s1">archive_basename </span><span class="s3">= </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">wheel_dist_name</span><span class="s2">}</span><span class="s5">-</span><span class="s2">{</span><span class="s1">impl_tag</span><span class="s2">}</span><span class="s5">-</span><span class="s2">{</span><span class="s1">abi_tag</span><span class="s2">}</span><span class="s5">-</span><span class="s2">{</span><span class="s1">plat_tag</span><span class="s2">}</span><span class="s5">&quot;</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">relative</span><span class="s3">:</span>
+            <span class="s1">archive_root </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">archive_root </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_ensure_relative</span><span class="s3">(</span><span class="s1">install</span><span class="s3">.</span><span class="s1">install_base</span><span class="s3">)</span>
+            <span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">set_undefined_options</span><span class="s3">(</span><span class="s5">&quot;install_egg_info&quot;</span><span class="s3">, (</span><span class="s5">&quot;target&quot;</span><span class="s3">, </span><span class="s5">&quot;egginfo_dir&quot;</span><span class="s3">))</span>
+        <span class="s1">distinfo_dirname </span><span class="s3">= (</span>
+            <span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">safer_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_name</span><span class="s3">())</span><span class="s2">}</span><span class="s5">-&quot;</span>
+            <span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">safer_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_version</span><span class="s3">())</span><span class="s2">}</span><span class="s5">.dist-info&quot;</span>
+        <span class="s3">)</span>
+        <span class="s1">distinfo_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">, </span><span class="s1">distinfo_dirname</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">:</span>
+            <span class="s4"># Use the given dist-info directly.</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s5">f&quot;reusing </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+            <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copytree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_info_dir</span><span class="s3">, </span><span class="s1">distinfo_dir</span><span class="s3">)</span>
+            <span class="s4"># Egg info is still generated, so remove it now to avoid it getting</span>
+            <span class="s4"># copied into the wheel.</span>
+            <span class="s1">_shutil</span><span class="s3">.</span><span class="s1">rmtree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">egginfo_dir</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s4"># Convert the generated egg-info into dist-info.</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">egg2dist</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">egginfo_dir</span><span class="s3">, </span><span class="s1">distinfo_dir</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">write_wheelfile</span><span class="s3">(</span><span class="s1">distinfo_dir</span><span class="s3">)</span>
+
+        <span class="s4"># Make the archive</span>
+        <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">):</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">makedirs</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">)</span>
+
+        <span class="s1">wheel_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">dist_dir</span><span class="s3">, </span><span class="s1">archive_basename </span><span class="s3">+ </span><span class="s5">&quot;.whl&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">WheelFile</span><span class="s3">(</span><span class="s1">wheel_path</span><span class="s3">, </span><span class="s5">&quot;w&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_zip_compression</span><span class="s3">()) </span><span class="s2">as </span><span class="s1">wf</span><span class="s3">:</span>
+            <span class="s1">wf</span><span class="s3">.</span><span class="s1">write_files</span><span class="s3">(</span><span class="s1">archive_root</span><span class="s3">)</span>
+
+        <span class="s4"># Add to 'Distribution.dist_files' so that the &quot;upload&quot; command works</span>
+        <span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">, </span><span class="s5">&quot;dist_files&quot;</span><span class="s3">, []).</span><span class="s1">append</span><span class="s3">((</span>
+            <span class="s5">&quot;bdist_wheel&quot;</span><span class="s3">,</span>
+            <span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">.</span><span class="s1">major</span><span class="s2">}</span><span class="s5">.</span><span class="s2">{</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">version_info</span><span class="s3">.</span><span class="s1">minor</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">,</span>
+            <span class="s1">wheel_path</span><span class="s3">,</span>
+        <span class="s3">))</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">keep_temp</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">f&quot;removing </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s1">_shutil</span><span class="s3">.</span><span class="s1">rmtree</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bdist_dir</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">write_wheelfile</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">wheelfile_base</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">generator</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s5">f&quot;setuptools (</span><span class="s2">{</span><span class="s1">__version__</span><span class="s2">}</span><span class="s5">)&quot;</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">from </span><span class="s1">email</span><span class="s3">.</span><span class="s1">message </span><span class="s2">import </span><span class="s1">Message</span>
+
+        <span class="s1">msg </span><span class="s3">= </span><span class="s1">Message</span><span class="s3">()</span>
+        <span class="s1">msg</span><span class="s3">[</span><span class="s5">&quot;Wheel-Version&quot;</span><span class="s3">] = </span><span class="s5">&quot;1.0&quot;  </span><span class="s4"># of the spec</span>
+        <span class="s1">msg</span><span class="s3">[</span><span class="s5">&quot;Generator&quot;</span><span class="s3">] = </span><span class="s1">generator</span>
+        <span class="s1">msg</span><span class="s3">[</span><span class="s5">&quot;Root-Is-Purelib&quot;</span><span class="s3">] = </span><span class="s1">str</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_is_pure</span><span class="s3">).</span><span class="s1">lower</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_number </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">msg</span><span class="s3">[</span><span class="s5">&quot;Build&quot;</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_number</span>
+
+        <span class="s4"># Doesn't work for bdist_wininst</span>
+        <span class="s1">impl_tag</span><span class="s3">, </span><span class="s1">abi_tag</span><span class="s3">, </span><span class="s1">plat_tag </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_tag</span><span class="s3">()</span>
+        <span class="s2">for </span><span class="s1">impl </span><span class="s2">in </span><span class="s1">impl_tag</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">):</span>
+            <span class="s2">for </span><span class="s1">abi </span><span class="s2">in </span><span class="s1">abi_tag</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">):</span>
+                <span class="s2">for </span><span class="s1">plat </span><span class="s2">in </span><span class="s1">plat_tag</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s5">&quot;.&quot;</span><span class="s3">):</span>
+                    <span class="s1">msg</span><span class="s3">[</span><span class="s5">&quot;Tag&quot;</span><span class="s3">] = </span><span class="s5">&quot;-&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">((</span><span class="s1">impl</span><span class="s3">, </span><span class="s1">abi</span><span class="s3">, </span><span class="s1">plat</span><span class="s3">))</span>
+
+        <span class="s1">wheelfile_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">wheelfile_base</span><span class="s3">, </span><span class="s5">&quot;WHEEL&quot;</span><span class="s3">)</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s5">f&quot;creating </span><span class="s2">{</span><span class="s1">wheelfile_path</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">wheelfile_path</span><span class="s3">, </span><span class="s5">&quot;wb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+            <span class="s1">BytesGenerator</span><span class="s3">(</span><span class="s1">f</span><span class="s3">, </span><span class="s1">maxheaderlen</span><span class="s3">=</span><span class="s6">0</span><span class="s3">).</span><span class="s1">flatten</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_ensure_relative</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s4"># copied from dir_util, deleted</span>
+        <span class="s1">drive</span><span class="s3">, </span><span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitdrive</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">path</span><span class="s3">[</span><span class="s6">0</span><span class="s3">:</span><span class="s6">1</span><span class="s3">] == </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">:</span>
+            <span class="s1">path </span><span class="s3">= </span><span class="s1">drive </span><span class="s3">+ </span><span class="s1">path</span><span class="s3">[</span><span class="s6">1</span><span class="s3">:]</span>
+        <span class="s2">return </span><span class="s1">path</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">license_paths</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">setuptools_major_version </span><span class="s3">&gt;= </span><span class="s6">57</span><span class="s3">:</span>
+            <span class="s4"># Setuptools has resolved any patterns to actual file names</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files </span><span class="s2">or </span><span class="s3">()</span>
+
+        <span class="s1">files </span><span class="s3">= </span><span class="s1">set</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]()</span>
+        <span class="s1">metadata </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">get_option_dict</span><span class="s3">(</span><span class="s5">&quot;metadata&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">setuptools_major_version </span><span class="s3">&gt;= </span><span class="s6">42</span><span class="s3">:</span>
+            <span class="s4"># Setuptools recognizes the license_files option but does not do globbing</span>
+            <span class="s1">patterns </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Sequence</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">self</span><span class="s3">.</span><span class="s1">distribution</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">license_files</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s4"># Prior to those, wheel is entirely responsible for handling license files</span>
+            <span class="s2">if </span><span class="s5">&quot;license_files&quot; </span><span class="s2">in </span><span class="s1">metadata</span><span class="s3">:</span>
+                <span class="s1">patterns </span><span class="s3">= </span><span class="s1">metadata</span><span class="s3">[</span><span class="s5">&quot;license_files&quot;</span><span class="s3">][</span><span class="s6">1</span><span class="s3">].</span><span class="s1">split</span><span class="s3">()</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">patterns </span><span class="s3">= ()</span>
+
+        <span class="s2">if </span><span class="s5">&quot;license_file&quot; </span><span class="s2">in </span><span class="s1">metadata</span><span class="s3">:</span>
+            <span class="s1">warnings</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s5">'The &quot;license_file&quot; option is deprecated. Use &quot;license_files&quot; instead.'</span><span class="s3">,</span>
+                <span class="s1">DeprecationWarning</span><span class="s3">,</span>
+                <span class="s1">stacklevel</span><span class="s3">=</span><span class="s6">2</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s1">files</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">metadata</span><span class="s3">[</span><span class="s5">&quot;license_file&quot;</span><span class="s3">][</span><span class="s6">1</span><span class="s3">])</span>
+
+        <span class="s2">if not </span><span class="s1">files </span><span class="s2">and not </span><span class="s1">patterns </span><span class="s2">and not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">patterns</span><span class="s3">, </span><span class="s1">list</span><span class="s3">):</span>
+            <span class="s1">patterns </span><span class="s3">= (</span><span class="s5">&quot;LICEN[CS]E*&quot;</span><span class="s3">, </span><span class="s5">&quot;COPYING*&quot;</span><span class="s3">, </span><span class="s5">&quot;NOTICE*&quot;</span><span class="s3">, </span><span class="s5">&quot;AUTHORS*&quot;</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">patterns</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">iglob</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">):</span>
+                <span class="s2">if </span><span class="s1">path</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;~&quot;</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span>
+                        <span class="s5">f'ignoring license file &quot;</span><span class="s2">{</span><span class="s1">path</span><span class="s2">}</span><span class="s5">&quot; as it looks like a backup'</span>
+                    <span class="s3">)</span>
+                    <span class="s2">continue</span>
+
+                <span class="s2">if </span><span class="s1">path </span><span class="s2">not in </span><span class="s1">files </span><span class="s2">and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+                    <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span>
+                        <span class="s5">f'adding license file &quot;</span><span class="s2">{</span><span class="s1">path</span><span class="s2">}</span><span class="s5">&quot; (matched pattern &quot;</span><span class="s2">{</span><span class="s1">pattern</span><span class="s2">}</span><span class="s5">&quot;)'</span>
+                    <span class="s3">)</span>
+                    <span class="s1">files</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">files</span>
+
+    <span class="s2">def </span><span class="s1">egg2dist</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">egginfo_path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">distinfo_path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Convert an .egg-info directory into a .dist-info directory&quot;&quot;&quot;</span>
+
+        <span class="s2">def </span><span class="s1">adios</span><span class="s3">(</span><span class="s1">p</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+            <span class="s0">&quot;&quot;&quot;Appropriately delete directory, file or link.&quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">p</span><span class="s3">) </span><span class="s2">and not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">islink</span><span class="s3">(</span><span class="s1">p</span><span class="s3">) </span><span class="s2">and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">p</span><span class="s3">):</span>
+                <span class="s1">_shutil</span><span class="s3">.</span><span class="s1">rmtree</span><span class="s3">(</span><span class="s1">p</span><span class="s3">)</span>
+            <span class="s2">elif </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">p</span><span class="s3">):</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">p</span><span class="s3">)</span>
+
+        <span class="s1">adios</span><span class="s3">(</span><span class="s1">distinfo_path</span><span class="s3">)</span>
+
+        <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">egginfo_path</span><span class="s3">):</span>
+            <span class="s4"># There is no egg-info. This is probably because the egg-info</span>
+            <span class="s4"># file/directory is not named matching the distribution name used</span>
+            <span class="s4"># to name the archive file. Check for this case and report</span>
+            <span class="s4"># accordingly.</span>
+            <span class="s2">import </span><span class="s1">glob</span>
+
+            <span class="s1">pat </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">egginfo_path</span><span class="s3">), </span><span class="s5">&quot;*.egg-info&quot;</span><span class="s3">)</span>
+            <span class="s1">possible </span><span class="s3">= </span><span class="s1">glob</span><span class="s3">.</span><span class="s1">glob</span><span class="s3">(</span><span class="s1">pat</span><span class="s3">)</span>
+            <span class="s1">err </span><span class="s3">= </span><span class="s5">f&quot;Egg metadata expected at </span><span class="s2">{</span><span class="s1">egginfo_path</span><span class="s2">} </span><span class="s5">but not found&quot;</span>
+            <span class="s2">if </span><span class="s1">possible</span><span class="s3">:</span>
+                <span class="s1">alt </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">possible</span><span class="s3">[</span><span class="s6">0</span><span class="s3">])</span>
+                <span class="s1">err </span><span class="s3">+= </span><span class="s5">f&quot; (</span><span class="s2">{</span><span class="s1">alt</span><span class="s2">} </span><span class="s5">found - possible misnamed archive file?)&quot;</span>
+
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s1">err</span><span class="s3">)</span>
+
+        <span class="s4"># .egg-info is a directory</span>
+        <span class="s1">pkginfo_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egginfo_path</span><span class="s3">, </span><span class="s5">&quot;PKG-INFO&quot;</span><span class="s3">)</span>
+
+        <span class="s4"># ignore common egg metadata that is useless to wheel</span>
+        <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copytree</span><span class="s3">(</span>
+            <span class="s1">egginfo_path</span><span class="s3">,</span>
+            <span class="s1">distinfo_path</span><span class="s3">,</span>
+            <span class="s1">ignore</span><span class="s3">=</span><span class="s2">lambda </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">: {</span>
+                <span class="s5">&quot;PKG-INFO&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;requires.txt&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;SOURCES.txt&quot;</span><span class="s3">,</span>
+                <span class="s5">&quot;not-zip-safe&quot;</span><span class="s3">,</span>
+            <span class="s3">},</span>
+        <span class="s3">)</span>
+
+        <span class="s4"># delete dependency_links if it is only whitespace</span>
+        <span class="s1">dependency_links_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">distinfo_path</span><span class="s3">, </span><span class="s5">&quot;dependency_links.txt&quot;</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">dependency_links_path</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s5">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">dependency_links_file</span><span class="s3">:</span>
+            <span class="s1">dependency_links </span><span class="s3">= </span><span class="s1">dependency_links_file</span><span class="s3">.</span><span class="s1">read</span><span class="s3">().</span><span class="s1">strip</span><span class="s3">()</span>
+        <span class="s2">if not </span><span class="s1">dependency_links</span><span class="s3">:</span>
+            <span class="s1">adios</span><span class="s3">(</span><span class="s1">dependency_links_path</span><span class="s3">)</span>
+
+        <span class="s1">metadata_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">distinfo_path</span><span class="s3">, </span><span class="s5">&quot;METADATA&quot;</span><span class="s3">)</span>
+        <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">(</span><span class="s1">pkginfo_path</span><span class="s3">, </span><span class="s1">metadata_path</span><span class="s3">)</span>
+
+        <span class="s1">licenses_folder_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">distinfo_path</span><span class="s3">, </span><span class="s5">&quot;licenses&quot;</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">license_path </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">license_paths</span><span class="s3">:</span>
+            <span class="s1">safe_path </span><span class="s3">= </span><span class="s1">_safe_license_file</span><span class="s3">(</span><span class="s1">license_path</span><span class="s3">)</span>
+            <span class="s1">dist_info_license_path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">licenses_folder_path</span><span class="s3">, </span><span class="s1">safe_path</span><span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">makedirs</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">dist_info_license_path</span><span class="s3">), </span><span class="s1">exist_ok</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s1">shutil</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">(</span><span class="s1">license_path</span><span class="s3">, </span><span class="s1">dist_info_license_path</span><span class="s3">)</span>
+
+        <span class="s1">adios</span><span class="s3">(</span><span class="s1">egginfo_path</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_zip_compression</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s3">(</span>
+            <span class="s1">isinstance</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">compression</span><span class="s3">, </span><span class="s1">int</span><span class="s3">)</span>
+            <span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compression </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">supported_compressions</span><span class="s3">.</span><span class="s1">values</span><span class="s3">()</span>
+        <span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">compression</span>
+
+        <span class="s1">compression </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">supported_compressions</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">compression</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">compression </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">compression</span>
+
+        <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">f&quot;Unsupported compression: </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">compression</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

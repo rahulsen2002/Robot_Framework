@@ -1,0 +1,136 @@
+<html>
+<head>
+<title>waitid.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+waitid.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">math</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span><span class="s2">, </span><span class="s1">_subprocess</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_sync </span><span class="s0">import </span><span class="s1">CapacityLimiter</span><span class="s2">, </span><span class="s1">Event</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_threads </span><span class="s0">import </span><span class="s1">to_thread_run_sync</span>
+
+<span class="s0">assert </span><span class="s2">(</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;win32&quot; </span><span class="s0">and </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;darwin&quot;</span><span class="s2">) </span><span class="s0">or not </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">try</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">os </span><span class="s0">import </span><span class="s1">waitid</span>
+
+    <span class="s0">def </span><span class="s1">sync_wait_reapable</span><span class="s2">(</span><span class="s1">pid</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">waitid</span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">P_PID</span><span class="s2">, </span><span class="s1">pid</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">WEXITED </span><span class="s2">| </span><span class="s1">os</span><span class="s2">.</span><span class="s1">WNOWAIT</span><span class="s2">)</span>
+
+<span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:</span>
+    <span class="s4"># pypy doesn't define os.waitid so we need to pull it out ourselves</span>
+    <span class="s4"># using cffi: https://bitbucket.org/pypy/pypy/issues/2922/</span>
+    <span class="s0">import </span><span class="s1">cffi</span>
+
+    <span class="s1">waitid_ffi </span><span class="s2">= </span><span class="s1">cffi</span><span class="s2">.</span><span class="s1">FFI</span><span class="s2">()</span>
+
+    <span class="s4"># Believe it or not, siginfo_t starts with fields in the</span>
+    <span class="s4"># same layout on both Linux and Darwin. The Linux structure</span>
+    <span class="s4"># is bigger so that's what we use to size `pad`; while</span>
+    <span class="s4"># there are a few extra fields in there, most of it is</span>
+    <span class="s4"># true padding which would not be written by the syscall.</span>
+    <span class="s1">waitid_ffi</span><span class="s2">.</span><span class="s1">cdef</span><span class="s2">(</span>
+        <span class="s3">&quot;&quot;&quot; 
+typedef struct siginfo_s { 
+    int si_signo; 
+    int si_errno; 
+    int si_code; 
+    int si_pid; 
+    int si_uid; 
+    int si_status; 
+    int pad[26]; 
+} siginfo_t; 
+int waitid(int idtype, int id, siginfo_t* result, int options); 
+&quot;&quot;&quot;</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s1">waitid_cffi </span><span class="s2">= </span><span class="s1">waitid_ffi</span><span class="s2">.</span><span class="s1">dlopen</span><span class="s2">(</span><span class="s0">None</span><span class="s2">).</span><span class="s1">waitid  </span><span class="s4"># type: ignore[attr-defined]</span>
+
+    <span class="s0">def </span><span class="s1">sync_wait_reapable</span><span class="s2">(</span><span class="s1">pid</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">P_PID </span><span class="s2">= </span><span class="s5">1</span>
+        <span class="s1">WEXITED </span><span class="s2">= </span><span class="s5">0x00000004</span>
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;darwin&quot;</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s4"># waitid() is not exposed on Python on Darwin but does</span>
+            <span class="s4"># work through CFFI; note that we typically won't get</span>
+            <span class="s4"># here since Darwin also defines kqueue</span>
+            <span class="s1">WNOWAIT </span><span class="s2">= </span><span class="s5">0x00000020</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">WNOWAIT </span><span class="s2">= </span><span class="s5">0x01000000</span>
+        <span class="s1">result </span><span class="s2">= </span><span class="s1">waitid_ffi</span><span class="s2">.</span><span class="s1">new</span><span class="s2">(</span><span class="s3">&quot;siginfo_t *&quot;</span><span class="s2">)</span>
+        <span class="s0">while </span><span class="s1">waitid_cffi</span><span class="s2">(</span><span class="s1">P_PID</span><span class="s2">, </span><span class="s1">pid</span><span class="s2">, </span><span class="s1">result</span><span class="s2">, </span><span class="s1">WEXITED </span><span class="s2">| </span><span class="s1">WNOWAIT</span><span class="s2">) &lt; </span><span class="s5">0</span><span class="s2">:</span>
+            <span class="s1">got_errno </span><span class="s2">= </span><span class="s1">waitid_ffi</span><span class="s2">.</span><span class="s1">errno</span>
+            <span class="s0">if </span><span class="s1">got_errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EINTR</span><span class="s2">:</span>
+                <span class="s0">continue</span>
+            <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s1">got_errno</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">strerror</span><span class="s2">(</span><span class="s1">got_errno</span><span class="s2">))</span>
+
+
+<span class="s4"># adapted from</span>
+<span class="s4"># https://github.com/python-trio/trio/issues/4#issuecomment-398967572</span>
+
+<span class="s1">waitid_limiter </span><span class="s2">= </span><span class="s1">CapacityLimiter</span><span class="s2">(</span><span class="s1">math</span><span class="s2">.</span><span class="s1">inf</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">_waitid_system_task</span><span class="s2">(</span><span class="s1">pid</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">event</span><span class="s2">: </span><span class="s1">Event</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Spawn a thread that waits for ``pid`` to exit, then wake any tasks 
+    that were waiting on it. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># abandon_on_cancel=True: if this task is cancelled, then we abandon the</span>
+    <span class="s4"># thread to keep running waitpid in the background. Since this is</span>
+    <span class="s4"># always run as a system task, this will only happen if the whole</span>
+    <span class="s4"># call to trio.run is shutting down.</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">to_thread_run_sync</span><span class="s2">(</span>
+            <span class="s1">sync_wait_reapable</span><span class="s2">,</span>
+            <span class="s1">pid</span><span class="s2">,</span>
+            <span class="s1">abandon_on_cancel</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+            <span class="s1">limiter</span><span class="s2">=</span><span class="s1">waitid_limiter</span><span class="s2">,</span>
+        <span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+        <span class="s4"># If waitid fails, waitpid will fail too, so it still makes</span>
+        <span class="s4"># sense to wake up the callers of wait_process_exiting(). The</span>
+        <span class="s4"># most likely reason for this error in practice is a child</span>
+        <span class="s4"># exiting when wait() is not possible because SIGCHLD is</span>
+        <span class="s4"># ignored.</span>
+        <span class="s0">pass</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">event</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">wait_child_exiting</span><span class="s2">(</span><span class="s1">process</span><span class="s2">: </span><span class="s3">&quot;_subprocess.Process&quot;</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Logic of this function:</span>
+    <span class="s4"># - The first time we get called, we create an Event and start</span>
+    <span class="s4">#   an instance of _waitid_system_task that will set the Event</span>
+    <span class="s4">#   when waitid() completes. If that Event is set before</span>
+    <span class="s4">#   we get cancelled, we're good.</span>
+    <span class="s4"># - Otherwise, a following call after the cancellation must</span>
+    <span class="s4">#   reuse the Event created during the first call, lest we</span>
+    <span class="s4">#   create an arbitrary number of threads waiting on the same</span>
+    <span class="s4">#   process.</span>
+
+    <span class="s0">if </span><span class="s1">process</span><span class="s2">.</span><span class="s1">_wait_for_exit_data </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">process</span><span class="s2">.</span><span class="s1">_wait_for_exit_data </span><span class="s2">= </span><span class="s1">event </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">spawn_system_task</span><span class="s2">(</span><span class="s1">_waitid_system_task</span><span class="s2">, </span><span class="s1">process</span><span class="s2">.</span><span class="s1">pid</span><span class="s2">, </span><span class="s1">event</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">process</span><span class="s2">.</span><span class="s1">_wait_for_exit_data</span><span class="s2">, </span><span class="s1">Event</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">process</span><span class="s2">.</span><span class="s1">_wait_for_exit_data</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+</pre>
+</body>
+</html>

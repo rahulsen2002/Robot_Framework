@@ -1,0 +1,585 @@
+<html>
+<head>
+<title>constructors.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+constructors.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Backing implementation for InstallRequirement's various constructors 
+ 
+The idea here is that these formed a major chunk of InstallRequirement's size 
+so, moving them and support code dedicated to them outside of that class 
+helps creates for better understandability for the rest of the code. 
+ 
+These are meant to be used elsewhere within pip to create instances of 
+InstallRequirement. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">copy</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Collection</span>
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">markers </span><span class="s2">import </span><span class="s1">Marker</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">requirements </span><span class="s2">import </span><span class="s1">InvalidRequirement</span><span class="s3">, </span><span class="s1">Requirement</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">specifiers </span><span class="s2">import </span><span class="s1">Specifier</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s1">InstallationError</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">models</span><span class="s3">.</span><span class="s1">index </span><span class="s2">import </span><span class="s1">PyPI</span><span class="s3">, </span><span class="s1">TestPyPI</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">models</span><span class="s3">.</span><span class="s1">link </span><span class="s2">import </span><span class="s1">Link</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">models</span><span class="s3">.</span><span class="s1">wheel </span><span class="s2">import </span><span class="s1">Wheel</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">req</span><span class="s3">.</span><span class="s1">req_file </span><span class="s2">import </span><span class="s1">ParsedRequirement</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">req</span><span class="s3">.</span><span class="s1">req_install </span><span class="s2">import </span><span class="s1">InstallRequirement</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">filetypes </span><span class="s2">import </span><span class="s1">is_archive_file</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">misc </span><span class="s2">import </span><span class="s1">is_installable_dir</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">packaging </span><span class="s2">import </span><span class="s1">get_requirement</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">utils</span><span class="s3">.</span><span class="s1">urls </span><span class="s2">import </span><span class="s1">path_to_url</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">vcs </span><span class="s2">import </span><span class="s1">is_url</span><span class="s3">, </span><span class="s1">vcs</span>
+
+<span class="s1">__all__ </span><span class="s3">= [</span>
+    <span class="s4">&quot;install_req_from_editable&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;install_req_from_line&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;parse_editable&quot;</span><span class="s3">,</span>
+<span class="s3">]</span>
+
+<span class="s1">logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+<span class="s1">operators </span><span class="s3">= </span><span class="s1">Specifier</span><span class="s3">.</span><span class="s1">_operators</span><span class="s3">.</span><span class="s1">keys</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">_strip_extras</span><span class="s3">(</span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">]:</span>
+    <span class="s1">m </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">match</span><span class="s3">(</span><span class="s4">r&quot;^(.+)(\[[^\]]+\])$&quot;</span><span class="s3">, </span><span class="s1">path</span><span class="s3">)</span>
+    <span class="s1">extras </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">m</span><span class="s3">:</span>
+        <span class="s1">path_no_extras </span><span class="s3">= </span><span class="s1">m</span><span class="s3">.</span><span class="s1">group</span><span class="s3">(</span><span class="s5">1</span><span class="s3">)</span>
+        <span class="s1">extras </span><span class="s3">= </span><span class="s1">m</span><span class="s3">.</span><span class="s1">group</span><span class="s3">(</span><span class="s5">2</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">path_no_extras </span><span class="s3">= </span><span class="s1">path</span>
+
+    <span class="s2">return </span><span class="s1">path_no_extras</span><span class="s3">, </span><span class="s1">extras</span>
+
+
+<span class="s2">def </span><span class="s1">convert_extras</span><span class="s3">(</span><span class="s1">extras</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; set</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]:</span>
+    <span class="s2">if not </span><span class="s1">extras</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">set</span><span class="s3">()</span>
+    <span class="s2">return </span><span class="s1">get_requirement</span><span class="s3">(</span><span class="s4">&quot;placeholder&quot; </span><span class="s3">+ </span><span class="s1">extras</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()).</span><span class="s1">extras</span>
+
+
+<span class="s2">def </span><span class="s1">_set_requirement_extras</span><span class="s3">(</span><span class="s1">req</span><span class="s3">: </span><span class="s1">Requirement</span><span class="s3">, </span><span class="s1">new_extras</span><span class="s3">: </span><span class="s1">set</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; Requirement</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns a new requirement based on the given one, with the supplied extras. If the 
+    given requirement already has extras those are replaced (or dropped if no new extras 
+    are given). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">match</span><span class="s3">: </span><span class="s1">re</span><span class="s3">.</span><span class="s1">Match</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">fullmatch</span><span class="s3">(</span>
+        <span class="s6"># see https://peps.python.org/pep-0508/#complete-grammar</span>
+        <span class="s4">r&quot;([\w\t .-]+)(\[[^\]]*\])?(.*)&quot;</span><span class="s3">,</span>
+        <span class="s1">str</span><span class="s3">(</span><span class="s1">req</span><span class="s3">),</span>
+        <span class="s1">flags</span><span class="s3">=</span><span class="s1">re</span><span class="s3">.</span><span class="s1">ASCII</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s6"># ireq.req is a valid requirement so the regex should always match</span>
+    <span class="s2">assert </span><span class="s3">(</span>
+        <span class="s1">match </span><span class="s2">is not None</span>
+    <span class="s3">), </span><span class="s4">f&quot;regex match on requirement </span><span class="s2">{</span><span class="s1">req</span><span class="s2">} </span><span class="s4">failed, this should never happen&quot;</span>
+    <span class="s1">pre</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s1">match</span><span class="s3">.</span><span class="s1">group</span><span class="s3">(</span><span class="s5">1</span><span class="s3">)</span>
+    <span class="s1">post</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s1">match</span><span class="s3">.</span><span class="s1">group</span><span class="s3">(</span><span class="s5">3</span><span class="s3">)</span>
+    <span class="s2">assert </span><span class="s3">(</span>
+        <span class="s1">pre </span><span class="s2">is not None and </span><span class="s1">post </span><span class="s2">is not None</span>
+    <span class="s3">), </span><span class="s4">f&quot;regex group selection for requirement </span><span class="s2">{</span><span class="s1">req</span><span class="s2">} </span><span class="s4">failed, this should never happen&quot;</span>
+    <span class="s1">extras</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot;[{}]&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s4">&quot;,&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">new_extras</span><span class="s3">)) </span><span class="s2">if </span><span class="s1">new_extras </span><span class="s2">else </span><span class="s4">&quot;&quot;</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">get_requirement</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">pre</span><span class="s2">}{</span><span class="s1">extras</span><span class="s2">}{</span><span class="s1">post</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">parse_editable</span><span class="s3">(</span><span class="s1">editable_req</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; tuple</span><span class="s3">[</span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">set</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]]:</span>
+    <span class="s0">&quot;&quot;&quot;Parses an editable requirement into: 
+        - a requirement name 
+        - an URL 
+        - extras 
+        - editable options 
+    Accepted requirements: 
+        svn+http://blahblah@rev#egg=Foobar[baz]&amp;subdirectory=version_subdir 
+        .[some_extra] 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">url </span><span class="s3">= </span><span class="s1">editable_req</span>
+
+    <span class="s6"># If a file path is specified with extras, strip off the extras.</span>
+    <span class="s1">url_no_extras</span><span class="s3">, </span><span class="s1">extras </span><span class="s3">= </span><span class="s1">_strip_extras</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">url_no_extras</span><span class="s3">):</span>
+        <span class="s6"># Treating it as code that has already been checked out</span>
+        <span class="s1">url_no_extras </span><span class="s3">= </span><span class="s1">path_to_url</span><span class="s3">(</span><span class="s1">url_no_extras</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">url_no_extras</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;file:&quot;</span><span class="s3">):</span>
+        <span class="s1">package_name </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">(</span><span class="s1">url_no_extras</span><span class="s3">).</span><span class="s1">egg_fragment</span>
+        <span class="s2">if </span><span class="s1">extras</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s3">(</span>
+                <span class="s1">package_name</span><span class="s3">,</span>
+                <span class="s1">url_no_extras</span><span class="s3">,</span>
+                <span class="s1">get_requirement</span><span class="s3">(</span><span class="s4">&quot;placeholder&quot; </span><span class="s3">+ </span><span class="s1">extras</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()).</span><span class="s1">extras</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">package_name</span><span class="s3">, </span><span class="s1">url_no_extras</span><span class="s3">, </span><span class="s1">set</span><span class="s3">()</span>
+
+    <span class="s2">for </span><span class="s1">version_control </span><span class="s2">in </span><span class="s1">vcs</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">url</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">version_control</span><span class="s2">}</span><span class="s4">:&quot;</span><span class="s3">):</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">version_control</span><span class="s2">}</span><span class="s4">+</span><span class="s2">{</span><span class="s1">url</span><span class="s2">}</span><span class="s4">&quot;</span>
+            <span class="s2">break</span>
+
+    <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+
+    <span class="s2">if not </span><span class="s1">link</span><span class="s3">.</span><span class="s1">is_vcs</span><span class="s3">:</span>
+        <span class="s1">backends </span><span class="s3">= </span><span class="s4">&quot;, &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">vcs</span><span class="s3">.</span><span class="s1">all_schemes</span><span class="s3">)</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span>
+            <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">editable_req</span><span class="s2">} </span><span class="s4">is not a valid editable requirement. &quot;</span>
+            <span class="s4">f&quot;It should either be a path to a local project or a VCS URL &quot;</span>
+            <span class="s4">f&quot;(beginning with </span><span class="s2">{</span><span class="s1">backends</span><span class="s2">}</span><span class="s4">).&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s1">package_name </span><span class="s3">= </span><span class="s1">link</span><span class="s3">.</span><span class="s1">egg_fragment</span>
+    <span class="s2">if not </span><span class="s1">package_name</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span>
+            <span class="s4">f&quot;Could not detect requirement name for '</span><span class="s2">{</span><span class="s1">editable_req</span><span class="s2">}</span><span class="s4">', &quot;</span>
+            <span class="s4">&quot;please specify one with #egg=your_package_name&quot;</span>
+        <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">package_name</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">set</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">check_first_requirement_in_file</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Check if file is parsable as a requirements file. 
+ 
+    This is heavily based on ``pkg_resources.parse_requirements``, but 
+    simplified to just check the first meaningful line. 
+ 
+    :raises InvalidRequirement: If the first meaningful line cannot be parsed 
+        as an requirement. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">&quot;utf-8&quot;</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">=</span><span class="s4">&quot;ignore&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+        <span class="s6"># Create a steppable iterator, so we can handle \-continuations.</span>
+        <span class="s1">lines </span><span class="s3">= (</span>
+            <span class="s1">line</span>
+            <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s3">(</span><span class="s1">line</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">() </span><span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">f</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">line </span><span class="s2">and not </span><span class="s1">line</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;#&quot;</span><span class="s3">)  </span><span class="s6"># Skip blank lines/comments.</span>
+        <span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">lines</span><span class="s3">:</span>
+            <span class="s6"># Drop comments -- a hash without a space may be in a URL.</span>
+            <span class="s2">if </span><span class="s4">&quot; #&quot; </span><span class="s2">in </span><span class="s1">line</span><span class="s3">:</span>
+                <span class="s1">line </span><span class="s3">= </span><span class="s1">line</span><span class="s3">[: </span><span class="s1">line</span><span class="s3">.</span><span class="s1">find</span><span class="s3">(</span><span class="s4">&quot; #&quot;</span><span class="s3">)]</span>
+            <span class="s6"># If there is a line continuation, drop it, and append the next line.</span>
+            <span class="s2">if </span><span class="s1">line</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s3">):</span>
+                <span class="s1">line </span><span class="s3">= </span><span class="s1">line</span><span class="s3">[:-</span><span class="s5">2</span><span class="s3">].</span><span class="s1">strip</span><span class="s3">() + </span><span class="s1">next</span><span class="s3">(</span><span class="s1">lines</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s3">)</span>
+            <span class="s1">get_requirement</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+            <span class="s2">return</span>
+
+
+<span class="s2">def </span><span class="s1">deduce_helpful_msg</span><span class="s3">(</span><span class="s1">req</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Returns helpful msg in case requirements file does not exist, 
+    or cannot be parsed. 
+ 
+    :params req: Requirements file path 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">req</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s4">f&quot; File '</span><span class="s2">{</span><span class="s1">req</span><span class="s2">}</span><span class="s4">' does not exist.&quot;</span>
+    <span class="s1">msg </span><span class="s3">= </span><span class="s4">&quot; The path does exist. &quot;</span>
+    <span class="s6"># Try to parse and check if it is a requirements file.</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">check_first_requirement_in_file</span><span class="s3">(</span><span class="s1">req</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">InvalidRequirement</span><span class="s3">:</span>
+        <span class="s1">logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">&quot;Cannot parse '%s' as requirements file&quot;</span><span class="s3">, </span><span class="s1">req</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">msg </span><span class="s3">+= (</span>
+            <span class="s4">f&quot;The argument you provided &quot;</span>
+            <span class="s4">f&quot;(</span><span class="s2">{</span><span class="s1">req</span><span class="s2">}</span><span class="s4">) appears to be a&quot;</span>
+            <span class="s4">f&quot; requirements file. If that is the&quot;</span>
+            <span class="s4">f&quot; case, use the '-r' flag to install&quot;</span>
+            <span class="s4">f&quot; the packages specified within it.&quot;</span>
+        <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">msg</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">RequirementParts</span><span class="s3">:</span>
+    <span class="s1">requirement</span><span class="s3">: </span><span class="s1">Requirement </span><span class="s3">| </span><span class="s2">None</span>
+    <span class="s1">link</span><span class="s3">: </span><span class="s1">Link </span><span class="s3">| </span><span class="s2">None</span>
+    <span class="s1">markers</span><span class="s3">: </span><span class="s1">Marker </span><span class="s3">| </span><span class="s2">None</span>
+    <span class="s1">extras</span><span class="s3">: </span><span class="s1">set</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]</span>
+
+
+<span class="s2">def </span><span class="s1">parse_req_from_editable</span><span class="s3">(</span><span class="s1">editable_req</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; RequirementParts</span><span class="s3">:</span>
+    <span class="s1">name</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">extras_override </span><span class="s3">= </span><span class="s1">parse_editable</span><span class="s3">(</span><span class="s1">editable_req</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">name </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">req</span><span class="s3">: </span><span class="s1">Requirement </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s1">get_requirement</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">InvalidRequirement </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s4">f&quot;Invalid requirement: </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s4">: </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">req </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">RequirementParts</span><span class="s3">(</span><span class="s1">req</span><span class="s3">, </span><span class="s1">link</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s1">extras_override</span><span class="s3">)</span>
+
+
+<span class="s6"># ---- The actual constructors follow ----</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_from_editable</span><span class="s3">(</span>
+    <span class="s1">editable_req</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">comes_from</span><span class="s3">: </span><span class="s1">InstallRequirement </span><span class="s3">| </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">*,</span>
+    <span class="s1">use_pep517</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">isolated</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">global_options</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">hash_options</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">constraint</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">user_supplied</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">permit_editable_wheels</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">config_settings</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s1">parts </span><span class="s3">= </span><span class="s1">parse_req_from_editable</span><span class="s3">(</span><span class="s1">editable_req</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">InstallRequirement</span><span class="s3">(</span>
+        <span class="s1">parts</span><span class="s3">.</span><span class="s1">requirement</span><span class="s3">,</span>
+        <span class="s1">comes_from</span><span class="s3">=</span><span class="s1">comes_from</span><span class="s3">,</span>
+        <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">user_supplied</span><span class="s3">,</span>
+        <span class="s1">editable</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">permit_editable_wheels</span><span class="s3">=</span><span class="s1">permit_editable_wheels</span><span class="s3">,</span>
+        <span class="s1">link</span><span class="s3">=</span><span class="s1">parts</span><span class="s3">.</span><span class="s1">link</span><span class="s3">,</span>
+        <span class="s1">constraint</span><span class="s3">=</span><span class="s1">constraint</span><span class="s3">,</span>
+        <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">use_pep517</span><span class="s3">,</span>
+        <span class="s1">isolated</span><span class="s3">=</span><span class="s1">isolated</span><span class="s3">,</span>
+        <span class="s1">global_options</span><span class="s3">=</span><span class="s1">global_options</span><span class="s3">,</span>
+        <span class="s1">hash_options</span><span class="s3">=</span><span class="s1">hash_options</span><span class="s3">,</span>
+        <span class="s1">config_settings</span><span class="s3">=</span><span class="s1">config_settings</span><span class="s3">,</span>
+        <span class="s1">extras</span><span class="s3">=</span><span class="s1">parts</span><span class="s3">.</span><span class="s1">extras</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_looks_like_path</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Checks whether the string &quot;looks like&quot; a path on the filesystem. 
+ 
+    This does not check whether the target actually exists, only judge from the 
+    appearance. 
+ 
+    Returns true if any of the following conditions is true: 
+    * a path separator is found (either os.path.sep or os.path.altsep); 
+    * a dot is found (which represents the current directory). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">sep </span><span class="s2">in </span><span class="s1">name</span><span class="s3">:</span>
+        <span class="s2">return True</span>
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">altsep </span><span class="s2">is not None and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">altsep </span><span class="s2">in </span><span class="s1">name</span><span class="s3">:</span>
+        <span class="s2">return True</span>
+    <span class="s2">if </span><span class="s1">name</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;.&quot;</span><span class="s3">):</span>
+        <span class="s2">return True</span>
+    <span class="s2">return False</span>
+
+
+<span class="s2">def </span><span class="s1">_get_url_from_path</span><span class="s3">(</span><span class="s1">path</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    First, it checks whether a provided path is an installable directory. If it 
+    is, returns the path. 
+ 
+    If false, check if the path is an archive file (such as a .whl). 
+    The function checks if the path is a file. If false, if the path has 
+    an @, it will treat it as a PEP 440 URL requirement and return the path. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">_looks_like_path</span><span class="s3">(</span><span class="s1">name</span><span class="s3">) </span><span class="s2">and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">is_installable_dir</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">path_to_url</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s6"># TODO: The is_installable_dir test here might not be necessary</span>
+        <span class="s6">#       now that it is done in load_pyproject_toml too.</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span>
+            <span class="s4">f&quot;Directory </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r} </span><span class="s4">is not installable. Neither 'setup.py' &quot;</span>
+            <span class="s4">&quot;nor 'pyproject.toml' found.&quot;</span>
+        <span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">is_archive_file</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+        <span class="s2">return None</span>
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">path_to_url</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+    <span class="s1">urlreq_parts </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">&quot;@&quot;</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">urlreq_parts</span><span class="s3">) &gt;= </span><span class="s5">2 </span><span class="s2">and not </span><span class="s1">_looks_like_path</span><span class="s3">(</span><span class="s1">urlreq_parts</span><span class="s3">[</span><span class="s5">0</span><span class="s3">]):</span>
+        <span class="s6"># If the path contains '@' and the part before it does not look</span>
+        <span class="s6"># like a path, try to treat it as a PEP 440 URL req instead.</span>
+        <span class="s2">return None</span>
+    <span class="s1">logger</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span>
+        <span class="s4">&quot;Requirement %r looks like a filename, but the file does not exist&quot;</span><span class="s3">,</span>
+        <span class="s1">name</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">path_to_url</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">parse_req_from_line</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">line_source</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; RequirementParts</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">is_url</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+        <span class="s1">marker_sep </span><span class="s3">= </span><span class="s4">&quot;; &quot;</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">marker_sep </span><span class="s3">= </span><span class="s4">&quot;;&quot;</span>
+    <span class="s2">if </span><span class="s1">marker_sep </span><span class="s2">in </span><span class="s1">name</span><span class="s3">:</span>
+        <span class="s1">name</span><span class="s3">, </span><span class="s1">markers_as_string </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">marker_sep</span><span class="s3">, </span><span class="s5">1</span><span class="s3">)</span>
+        <span class="s1">markers_as_string </span><span class="s3">= </span><span class="s1">markers_as_string</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">()</span>
+        <span class="s2">if not </span><span class="s1">markers_as_string</span><span class="s3">:</span>
+            <span class="s1">markers </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">markers </span><span class="s3">= </span><span class="s1">Marker</span><span class="s3">(</span><span class="s1">markers_as_string</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">markers </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s1">name </span><span class="s3">= </span><span class="s1">name</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">()</span>
+    <span class="s1">req_as_string </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">name</span><span class="s3">))</span>
+    <span class="s1">link </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s1">extras_as_string </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">if </span><span class="s1">is_url</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+        <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">p</span><span class="s3">, </span><span class="s1">extras_as_string </span><span class="s3">= </span><span class="s1">_strip_extras</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">_get_url_from_path</span><span class="s3">(</span><span class="s1">p</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">url </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+
+    <span class="s6"># it's a local file, dir, or url</span>
+    <span class="s2">if </span><span class="s1">link</span><span class="s3">:</span>
+        <span class="s6"># Handle relative file URLs</span>
+        <span class="s2">if </span><span class="s1">link</span><span class="s3">.</span><span class="s1">scheme </span><span class="s3">== </span><span class="s4">&quot;file&quot; </span><span class="s2">and </span><span class="s1">re</span><span class="s3">.</span><span class="s1">search</span><span class="s3">(</span><span class="s4">r&quot;\.\./&quot;</span><span class="s3">, </span><span class="s1">link</span><span class="s3">.</span><span class="s1">url</span><span class="s3">):</span>
+            <span class="s1">link </span><span class="s3">= </span><span class="s1">Link</span><span class="s3">(</span><span class="s1">path_to_url</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">normpath</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">link</span><span class="s3">.</span><span class="s1">path</span><span class="s3">))))</span>
+        <span class="s6"># wheel file</span>
+        <span class="s2">if </span><span class="s1">link</span><span class="s3">.</span><span class="s1">is_wheel</span><span class="s3">:</span>
+            <span class="s1">wheel </span><span class="s3">= </span><span class="s1">Wheel</span><span class="s3">(</span><span class="s1">link</span><span class="s3">.</span><span class="s1">filename</span><span class="s3">)  </span><span class="s6"># can raise InvalidWheelFilename</span>
+            <span class="s1">req_as_string </span><span class="s3">= </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">wheel</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">==</span><span class="s2">{</span><span class="s1">wheel</span><span class="s3">.</span><span class="s1">version</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s6"># set the req to the egg fragment.  when it's not there, this</span>
+            <span class="s6"># will become an 'unnamed' requirement</span>
+            <span class="s1">req_as_string </span><span class="s3">= </span><span class="s1">link</span><span class="s3">.</span><span class="s1">egg_fragment</span>
+
+    <span class="s6"># a requirement specifier</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">req_as_string </span><span class="s3">= </span><span class="s1">name</span>
+
+    <span class="s1">extras </span><span class="s3">= </span><span class="s1">convert_extras</span><span class="s3">(</span><span class="s1">extras_as_string</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">with_source</span><span class="s3">(</span><span class="s1">text</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">line_source</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">text</span>
+        <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">text</span><span class="s2">} </span><span class="s4">(from </span><span class="s2">{</span><span class="s1">line_source</span><span class="s2">}</span><span class="s4">)&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_parse_req_string</span><span class="s3">(</span><span class="s1">req_as_string</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; Requirement</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">get_requirement</span><span class="s3">(</span><span class="s1">req_as_string</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">InvalidRequirement </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">sep </span><span class="s2">in </span><span class="s1">req_as_string</span><span class="s3">:</span>
+                <span class="s1">add_msg </span><span class="s3">= </span><span class="s4">&quot;It looks like a path.&quot;</span>
+                <span class="s1">add_msg </span><span class="s3">+= </span><span class="s1">deduce_helpful_msg</span><span class="s3">(</span><span class="s1">req_as_string</span><span class="s3">)</span>
+            <span class="s2">elif </span><span class="s4">&quot;=&quot; </span><span class="s2">in </span><span class="s1">req_as_string </span><span class="s2">and not </span><span class="s1">any</span><span class="s3">(</span>
+                <span class="s1">op </span><span class="s2">in </span><span class="s1">req_as_string </span><span class="s2">for </span><span class="s1">op </span><span class="s2">in </span><span class="s1">operators</span>
+            <span class="s3">):</span>
+                <span class="s1">add_msg </span><span class="s3">= </span><span class="s4">&quot;= is not a valid operator. Did you mean == ?&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">add_msg </span><span class="s3">= </span><span class="s4">&quot;&quot;</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s1">with_source</span><span class="s3">(</span><span class="s4">f&quot;Invalid requirement: </span><span class="s2">{</span><span class="s1">req_as_string</span><span class="s2">!r}</span><span class="s4">: </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">add_msg</span><span class="s3">:</span>
+                <span class="s1">msg </span><span class="s3">+= </span><span class="s4">f&quot;</span><span class="s2">\n</span><span class="s4">Hint: </span><span class="s2">{</span><span class="s1">add_msg</span><span class="s2">}</span><span class="s4">&quot;</span>
+            <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">req_as_string </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s1">req</span><span class="s3">: </span><span class="s1">Requirement </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s1">_parse_req_string</span><span class="s3">(</span><span class="s1">req_as_string</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">req </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">return </span><span class="s1">RequirementParts</span><span class="s3">(</span><span class="s1">req</span><span class="s3">, </span><span class="s1">link</span><span class="s3">, </span><span class="s1">markers</span><span class="s3">, </span><span class="s1">extras</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_from_line</span><span class="s3">(</span>
+    <span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">comes_from</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">InstallRequirement </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">*,</span>
+    <span class="s1">use_pep517</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">isolated</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">global_options</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">hash_options</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">constraint</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">line_source</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">user_supplied</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">config_settings</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Creates an InstallRequirement from a name, which might be a 
+    requirement, directory containing 'setup.py', filename, or URL. 
+ 
+    :param line_source: An optional string describing where the line is from, 
+        for logging purposes in case of an error. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parts </span><span class="s3">= </span><span class="s1">parse_req_from_line</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">line_source</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">InstallRequirement</span><span class="s3">(</span>
+        <span class="s1">parts</span><span class="s3">.</span><span class="s1">requirement</span><span class="s3">,</span>
+        <span class="s1">comes_from</span><span class="s3">,</span>
+        <span class="s1">link</span><span class="s3">=</span><span class="s1">parts</span><span class="s3">.</span><span class="s1">link</span><span class="s3">,</span>
+        <span class="s1">markers</span><span class="s3">=</span><span class="s1">parts</span><span class="s3">.</span><span class="s1">markers</span><span class="s3">,</span>
+        <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">use_pep517</span><span class="s3">,</span>
+        <span class="s1">isolated</span><span class="s3">=</span><span class="s1">isolated</span><span class="s3">,</span>
+        <span class="s1">global_options</span><span class="s3">=</span><span class="s1">global_options</span><span class="s3">,</span>
+        <span class="s1">hash_options</span><span class="s3">=</span><span class="s1">hash_options</span><span class="s3">,</span>
+        <span class="s1">config_settings</span><span class="s3">=</span><span class="s1">config_settings</span><span class="s3">,</span>
+        <span class="s1">constraint</span><span class="s3">=</span><span class="s1">constraint</span><span class="s3">,</span>
+        <span class="s1">extras</span><span class="s3">=</span><span class="s1">parts</span><span class="s3">.</span><span class="s1">extras</span><span class="s3">,</span>
+        <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">user_supplied</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_from_req_string</span><span class="s3">(</span>
+    <span class="s1">req_string</span><span class="s3">: </span><span class="s1">str</span><span class="s3">,</span>
+    <span class="s1">comes_from</span><span class="s3">: </span><span class="s1">InstallRequirement </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">isolated</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">use_pep517</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">user_supplied</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">req </span><span class="s3">= </span><span class="s1">get_requirement</span><span class="s3">(</span><span class="s1">req_string</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">InvalidRequirement </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span><span class="s4">f&quot;Invalid requirement: </span><span class="s2">{</span><span class="s1">req_string</span><span class="s2">!r}</span><span class="s4">: </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+    <span class="s1">domains_not_allowed </span><span class="s3">= [</span>
+        <span class="s1">PyPI</span><span class="s3">.</span><span class="s1">file_storage_domain</span><span class="s3">,</span>
+        <span class="s1">TestPyPI</span><span class="s3">.</span><span class="s1">file_storage_domain</span><span class="s3">,</span>
+    <span class="s3">]</span>
+    <span class="s2">if </span><span class="s3">(</span>
+        <span class="s1">req</span><span class="s3">.</span><span class="s1">url</span>
+        <span class="s2">and </span><span class="s1">comes_from</span>
+        <span class="s2">and </span><span class="s1">comes_from</span><span class="s3">.</span><span class="s1">link</span>
+        <span class="s2">and </span><span class="s1">comes_from</span><span class="s3">.</span><span class="s1">link</span><span class="s3">.</span><span class="s1">netloc </span><span class="s2">in </span><span class="s1">domains_not_allowed</span>
+    <span class="s3">):</span>
+        <span class="s6"># Explicitly disallow pypi packages that depend on external urls</span>
+        <span class="s2">raise </span><span class="s1">InstallationError</span><span class="s3">(</span>
+            <span class="s4">&quot;Packages installed from PyPI cannot depend on packages &quot;</span>
+            <span class="s4">&quot;which are not also hosted on PyPI.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+            <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">comes_from</span><span class="s3">.</span><span class="s1">name</span><span class="s2">} </span><span class="s4">depends on </span><span class="s2">{</span><span class="s1">req</span><span class="s2">} </span><span class="s4">&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">InstallRequirement</span><span class="s3">(</span>
+        <span class="s1">req</span><span class="s3">,</span>
+        <span class="s1">comes_from</span><span class="s3">,</span>
+        <span class="s1">isolated</span><span class="s3">=</span><span class="s1">isolated</span><span class="s3">,</span>
+        <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">use_pep517</span><span class="s3">,</span>
+        <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">user_supplied</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_from_parsed_requirement</span><span class="s3">(</span>
+    <span class="s1">parsed_req</span><span class="s3">: </span><span class="s1">ParsedRequirement</span><span class="s3">,</span>
+    <span class="s1">isolated</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">use_pep517</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">user_supplied</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">config_settings</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str </span><span class="s3">| </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">is_editable</span><span class="s3">:</span>
+        <span class="s1">req </span><span class="s3">= </span><span class="s1">install_req_from_editable</span><span class="s3">(</span>
+            <span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">requirement</span><span class="s3">,</span>
+            <span class="s1">comes_from</span><span class="s3">=</span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">comes_from</span><span class="s3">,</span>
+            <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">use_pep517</span><span class="s3">,</span>
+            <span class="s1">constraint</span><span class="s3">=</span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">constraint</span><span class="s3">,</span>
+            <span class="s1">isolated</span><span class="s3">=</span><span class="s1">isolated</span><span class="s3">,</span>
+            <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">user_supplied</span><span class="s3">,</span>
+            <span class="s1">config_settings</span><span class="s3">=</span><span class="s1">config_settings</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">req </span><span class="s3">= </span><span class="s1">install_req_from_line</span><span class="s3">(</span>
+            <span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">requirement</span><span class="s3">,</span>
+            <span class="s1">comes_from</span><span class="s3">=</span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">comes_from</span><span class="s3">,</span>
+            <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">use_pep517</span><span class="s3">,</span>
+            <span class="s1">isolated</span><span class="s3">=</span><span class="s1">isolated</span><span class="s3">,</span>
+            <span class="s1">global_options</span><span class="s3">=(</span>
+                <span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">options</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;global_options&quot;</span><span class="s3">, [])</span>
+                <span class="s2">if </span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">options</span>
+                <span class="s2">else </span><span class="s3">[]</span>
+            <span class="s3">),</span>
+            <span class="s1">hash_options</span><span class="s3">=(</span>
+                <span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">options</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;hashes&quot;</span><span class="s3">, {}) </span><span class="s2">if </span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">options </span><span class="s2">else </span><span class="s3">{}</span>
+            <span class="s3">),</span>
+            <span class="s1">constraint</span><span class="s3">=</span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">constraint</span><span class="s3">,</span>
+            <span class="s1">line_source</span><span class="s3">=</span><span class="s1">parsed_req</span><span class="s3">.</span><span class="s1">line_source</span><span class="s3">,</span>
+            <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">user_supplied</span><span class="s3">,</span>
+            <span class="s1">config_settings</span><span class="s3">=</span><span class="s1">config_settings</span><span class="s3">,</span>
+        <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">req</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_from_link_and_ireq</span><span class="s3">(</span>
+    <span class="s1">link</span><span class="s3">: </span><span class="s1">Link</span><span class="s3">, </span><span class="s1">ireq</span><span class="s3">: </span><span class="s1">InstallRequirement</span>
+<span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s2">return </span><span class="s1">InstallRequirement</span><span class="s3">(</span>
+        <span class="s1">req</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">req</span><span class="s3">,</span>
+        <span class="s1">comes_from</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">comes_from</span><span class="s3">,</span>
+        <span class="s1">editable</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">editable</span><span class="s3">,</span>
+        <span class="s1">link</span><span class="s3">=</span><span class="s1">link</span><span class="s3">,</span>
+        <span class="s1">markers</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">markers</span><span class="s3">,</span>
+        <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">use_pep517</span><span class="s3">,</span>
+        <span class="s1">isolated</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">isolated</span><span class="s3">,</span>
+        <span class="s1">global_options</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">global_options</span><span class="s3">,</span>
+        <span class="s1">hash_options</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">hash_options</span><span class="s3">,</span>
+        <span class="s1">config_settings</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">config_settings</span><span class="s3">,</span>
+        <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">user_supplied</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_drop_extras</span><span class="s3">(</span><span class="s1">ireq</span><span class="s3">: </span><span class="s1">InstallRequirement</span><span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Creates a new InstallationRequirement using the given template but without 
+    any extras. Sets the original requirement as the new one's parent 
+    (comes_from). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">InstallRequirement</span><span class="s3">(</span>
+        <span class="s1">req</span><span class="s3">=(</span>
+            <span class="s1">_set_requirement_extras</span><span class="s3">(</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">req</span><span class="s3">, </span><span class="s1">set</span><span class="s3">()) </span><span class="s2">if </span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">req </span><span class="s2">is not None else None</span>
+        <span class="s3">),</span>
+        <span class="s1">comes_from</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">,</span>
+        <span class="s1">editable</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">editable</span><span class="s3">,</span>
+        <span class="s1">link</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">link</span><span class="s3">,</span>
+        <span class="s1">markers</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">markers</span><span class="s3">,</span>
+        <span class="s1">use_pep517</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">use_pep517</span><span class="s3">,</span>
+        <span class="s1">isolated</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">isolated</span><span class="s3">,</span>
+        <span class="s1">global_options</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">global_options</span><span class="s3">,</span>
+        <span class="s1">hash_options</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">hash_options</span><span class="s3">,</span>
+        <span class="s1">constraint</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">constraint</span><span class="s3">,</span>
+        <span class="s1">extras</span><span class="s3">=[],</span>
+        <span class="s1">config_settings</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">config_settings</span><span class="s3">,</span>
+        <span class="s1">user_supplied</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">user_supplied</span><span class="s3">,</span>
+        <span class="s1">permit_editable_wheels</span><span class="s3">=</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">permit_editable_wheels</span><span class="s3">,</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">install_req_extend_extras</span><span class="s3">(</span>
+    <span class="s1">ireq</span><span class="s3">: </span><span class="s1">InstallRequirement</span><span class="s3">,</span>
+    <span class="s1">extras</span><span class="s3">: </span><span class="s1">Collection</span><span class="s3">[</span><span class="s1">str</span><span class="s3">],</span>
+<span class="s3">) </span><span class="s1">-&gt; InstallRequirement</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns a copy of an installation requirement with some additional extras. 
+    Makes a shallow copy of the ireq object. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">result </span><span class="s3">= </span><span class="s1">copy</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">(</span><span class="s1">ireq</span><span class="s3">)</span>
+    <span class="s1">result</span><span class="s3">.</span><span class="s1">extras </span><span class="s3">= {*</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">extras</span><span class="s3">, *</span><span class="s1">extras</span><span class="s3">}</span>
+    <span class="s1">result</span><span class="s3">.</span><span class="s1">req </span><span class="s3">= (</span>
+        <span class="s1">_set_requirement_extras</span><span class="s3">(</span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">req</span><span class="s3">, </span><span class="s1">result</span><span class="s3">.</span><span class="s1">extras</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">ireq</span><span class="s3">.</span><span class="s1">req </span><span class="s2">is not None</span>
+        <span class="s2">else None</span>
+    <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">result</span>
+</pre>
+</body>
+</html>

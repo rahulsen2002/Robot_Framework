@@ -1,0 +1,490 @@
+<html>
+<head>
+<title>pyprojecttoml.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pyprojecttoml.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Load setuptools configuration from ``pyproject.toml`` files. 
+ 
+**PRIVATE MODULE**: API reserved for setuptools internal usage only. 
+ 
+To read project metadata, consider using 
+``build.util.project_wheel_metadata`` (https://pypi.org/project/build/). 
+For simple scenarios, you can also try parsing the file directly 
+with the help of ``tomllib`` or ``tomli``. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Mapping</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">TracebackType</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Callable</span>
+
+<span class="s2">from </span><span class="s3">..</span><span class="s1">_path </span><span class="s2">import </span><span class="s1">StrPath</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">FileError</span><span class="s3">, </span><span class="s1">InvalidConfigError</span>
+<span class="s2">from </span><span class="s3">..</span><span class="s1">warnings </span><span class="s2">import </span><span class="s1">SetuptoolsWarning</span>
+<span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">expand </span><span class="s2">as </span><span class="s1">_expand</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_apply_pyprojecttoml </span><span class="s2">import </span><span class="s1">_PREVIOUSLY_DEFINED</span><span class="s3">, </span><span class="s1">_MissingDynamic</span><span class="s3">, </span><span class="s1">apply </span><span class="s2">as </span><span class="s1">_apply</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">typing_extensions </span><span class="s2">import </span><span class="s1">Self</span>
+
+    <span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">dist </span><span class="s2">import </span><span class="s1">Distribution</span>
+
+<span class="s1">_logger </span><span class="s3">= </span><span class="s1">logging</span><span class="s3">.</span><span class="s1">getLogger</span><span class="s3">(</span><span class="s1">__name__</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">load_file</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s3">..</span><span class="s1">compat</span><span class="s3">.</span><span class="s1">py310 </span><span class="s2">import </span><span class="s1">tomllib</span>
+
+    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">, </span><span class="s4">&quot;rb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">file</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">tomllib</span><span class="s3">.</span><span class="s1">load</span><span class="s3">(</span><span class="s1">file</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">validate</span><span class="s3">(</span><span class="s1">config</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">, </span><span class="s1">filepath</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">_validate_pyproject </span><span class="s2">as </span><span class="s1">validator</span>
+
+    <span class="s1">trove_classifier </span><span class="s3">= </span><span class="s1">validator</span><span class="s3">.</span><span class="s1">FORMAT_FUNCTIONS</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;trove-classifier&quot;</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">trove_classifier</span><span class="s3">, </span><span class="s4">&quot;_disable_download&quot;</span><span class="s3">):</span>
+        <span class="s5"># Improve reproducibility by default. See abravalheri/validate-pyproject#31</span>
+        <span class="s1">trove_classifier</span><span class="s3">.</span><span class="s1">_disable_download</span><span class="s3">()  </span><span class="s5"># type: ignore[union-attr]</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">validator</span><span class="s3">.</span><span class="s1">validate</span><span class="s3">(</span><span class="s1">config</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">validator</span><span class="s3">.</span><span class="s1">ValidationError </span><span class="s2">as </span><span class="s1">ex</span><span class="s3">:</span>
+        <span class="s1">summary </span><span class="s3">= </span><span class="s4">f&quot;configuration error: </span><span class="s2">{</span><span class="s1">ex</span><span class="s3">.</span><span class="s1">summary</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">if </span><span class="s1">ex</span><span class="s3">.</span><span class="s1">name</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">(</span><span class="s4">&quot;`&quot;</span><span class="s3">) != </span><span class="s4">&quot;project&quot;</span><span class="s3">:</span>
+            <span class="s5"># Probably it is just a field missing/misnamed, not worthy the verbosity...</span>
+            <span class="s1">_logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s1">summary</span><span class="s3">)</span>
+            <span class="s1">_logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s1">ex</span><span class="s3">.</span><span class="s1">details</span><span class="s3">)</span>
+
+        <span class="s1">error </span><span class="s3">= </span><span class="s4">f&quot;invalid pyproject.toml config: </span><span class="s2">{</span><span class="s1">ex</span><span class="s3">.</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.&quot;</span>
+        <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">error</span><span class="s2">}\n{</span><span class="s1">summary</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">) </span><span class="s2">from None</span>
+
+
+<span class="s2">def </span><span class="s1">apply_configuration</span><span class="s3">(</span>
+    <span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">,</span>
+    <span class="s1">filepath</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+    <span class="s1">ignore_option_errors</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; Distribution</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Apply the configuration from a ``pyproject.toml`` file into an existing 
+    distribution object. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">config </span><span class="s3">= </span><span class="s1">read_configuration</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">, </span><span class="s2">True</span><span class="s3">, </span><span class="s1">ignore_option_errors</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">_apply</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">config</span><span class="s3">, </span><span class="s1">filepath</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">read_configuration</span><span class="s3">(</span>
+    <span class="s1">filepath</span><span class="s3">: </span><span class="s1">StrPath</span><span class="s3">,</span>
+    <span class="s1">expand</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s1">ignore_option_errors</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">]:</span>
+    <span class="s0">&quot;&quot;&quot;Read given configuration file and returns options from it as a dict. 
+ 
+    :param str|unicode filepath: Path to configuration file in the ``pyproject.toml`` 
+        format. 
+ 
+    :param bool expand: Whether to expand directives and other computed values 
+        (i.e. post-process the given configuration) 
+ 
+    :param bool ignore_option_errors: Whether to silently ignore 
+        options, values of which could not be resolved (e.g. due to exceptions 
+        in directives such as file:, attr:, etc.). 
+        If False exceptions are propagated as expected. 
+ 
+    :param Distribution|None: Distribution object to which the configuration refers. 
+        If not given a dummy object will be created and discarded after the 
+        configuration is read. This is used for auto-discovery of packages and in the 
+        case a dynamic configuration (e.g. ``attr`` or ``cmdclass``) is expanded. 
+        When ``expand=False`` this object is simply ignored. 
+ 
+    :rtype: dict 
+    &quot;&quot;&quot;</span>
+    <span class="s1">filepath </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">abspath</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">)</span>
+
+    <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isfile</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">FileError</span><span class="s3">(</span><span class="s4">f&quot;Configuration file </span><span class="s2">{</span><span class="s1">filepath</span><span class="s2">!r} </span><span class="s4">does not exist.&quot;</span><span class="s3">)</span>
+
+    <span class="s1">asdict </span><span class="s3">= </span><span class="s1">load_file</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">) </span><span class="s2">or </span><span class="s3">{}</span>
+    <span class="s1">project_table </span><span class="s3">= </span><span class="s1">asdict</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;project&quot;</span><span class="s3">, {})</span>
+    <span class="s1">tool_table </span><span class="s3">= </span><span class="s1">asdict</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;tool&quot;</span><span class="s3">, {})</span>
+    <span class="s1">setuptools_table </span><span class="s3">= </span><span class="s1">tool_table</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;setuptools&quot;</span><span class="s3">, {})</span>
+    <span class="s2">if not </span><span class="s1">asdict </span><span class="s2">or not </span><span class="s3">(</span><span class="s1">project_table </span><span class="s2">or </span><span class="s1">setuptools_table</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s3">{}  </span><span class="s5"># User is not using pyproject to configure setuptools</span>
+
+    <span class="s2">if </span><span class="s4">&quot;setuptools&quot; </span><span class="s2">in </span><span class="s1">asdict</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;tools&quot;</span><span class="s3">, {}):</span>
+        <span class="s5"># let the user know they probably have a typo in their metadata</span>
+        <span class="s1">_ToolsTypoInMetadata</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">()</span>
+
+    <span class="s2">if </span><span class="s4">&quot;distutils&quot; </span><span class="s2">in </span><span class="s1">tool_table</span><span class="s3">:</span>
+        <span class="s1">_ExperimentalConfiguration</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span><span class="s1">subject</span><span class="s3">=</span><span class="s4">&quot;[tool.distutils]&quot;</span><span class="s3">)</span>
+
+    <span class="s5"># There is an overall sense in the community that making include_package_data=True</span>
+    <span class="s5"># the default would be an improvement.</span>
+    <span class="s5"># `ini2toml` backfills include_package_data=False when nothing is explicitly given,</span>
+    <span class="s5"># therefore setting a default here is backwards compatible.</span>
+    <span class="s2">if </span><span class="s1">dist </span><span class="s2">and </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">include_package_data </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s1">setuptools_table</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s4">&quot;include-package-data&quot;</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">include_package_data</span><span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">setuptools_table</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s4">&quot;include-package-data&quot;</span><span class="s3">, </span><span class="s2">True</span><span class="s3">)</span>
+    <span class="s5"># Persist changes:</span>
+    <span class="s1">asdict</span><span class="s3">[</span><span class="s4">&quot;tool&quot;</span><span class="s3">] = </span><span class="s1">tool_table</span>
+    <span class="s1">tool_table</span><span class="s3">[</span><span class="s4">&quot;setuptools&quot;</span><span class="s3">] = </span><span class="s1">setuptools_table</span>
+
+    <span class="s2">if </span><span class="s4">&quot;ext-modules&quot; </span><span class="s2">in </span><span class="s1">setuptools_table</span><span class="s3">:</span>
+        <span class="s1">_ExperimentalConfiguration</span><span class="s3">.</span><span class="s1">emit</span><span class="s3">(</span><span class="s1">subject</span><span class="s3">=</span><span class="s4">&quot;[tool.setuptools.ext-modules]&quot;</span><span class="s3">)</span>
+
+    <span class="s2">with </span><span class="s1">_ignore_errors</span><span class="s3">(</span><span class="s1">ignore_option_errors</span><span class="s3">):</span>
+        <span class="s5"># Don't complain about unrelated errors (e.g. tools not using the &quot;tool&quot; table)</span>
+        <span class="s1">subset </span><span class="s3">= {</span><span class="s4">&quot;project&quot;</span><span class="s3">: </span><span class="s1">project_table</span><span class="s3">, </span><span class="s4">&quot;tool&quot;</span><span class="s3">: {</span><span class="s4">&quot;setuptools&quot;</span><span class="s3">: </span><span class="s1">setuptools_table</span><span class="s3">}}</span>
+        <span class="s1">validate</span><span class="s3">(</span><span class="s1">subset</span><span class="s3">, </span><span class="s1">filepath</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">expand</span><span class="s3">:</span>
+        <span class="s1">root_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">filepath</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">expand_configuration</span><span class="s3">(</span><span class="s1">asdict</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">, </span><span class="s1">ignore_option_errors</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">)</span>
+
+    <span class="s2">return </span><span class="s1">asdict</span>
+
+
+<span class="s2">def </span><span class="s1">expand_configuration</span><span class="s3">(</span>
+    <span class="s1">config</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">,</span>
+    <span class="s1">root_dir</span><span class="s3">: </span><span class="s1">StrPath </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s1">ignore_option_errors</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+<span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Given a configuration with unresolved fields (e.g. dynamic, cmdclass, ...) 
+    find their final values. 
+ 
+    :param dict config: Dict containing the configuration for the distribution 
+    :param str root_dir: Top-level directory for the distribution/project 
+        (the same directory where ``pyproject.toml`` is place) 
+    :param bool ignore_option_errors: see :func:`read_configuration` 
+    :param Distribution|None: Distribution object to which the configuration refers. 
+        If not given a dummy object will be created and discarded after the 
+        configuration is read. Used in the case a dynamic configuration 
+        (e.g. ``attr`` or ``cmdclass``). 
+ 
+    :rtype: dict 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">_ConfigExpander</span><span class="s3">(</span><span class="s1">config</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">, </span><span class="s1">ignore_option_errors</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">).</span><span class="s1">expand</span><span class="s3">()</span>
+
+
+<span class="s2">class </span><span class="s1">_ConfigExpander</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">config</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">,</span>
+        <span class="s1">root_dir</span><span class="s3">: </span><span class="s1">StrPath </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">ignore_option_errors</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">config </span><span class="s3">= </span><span class="s1">config</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">root_dir </span><span class="s3">= </span><span class="s1">root_dir </span><span class="s2">or </span><span class="s1">os</span><span class="s3">.</span><span class="s1">getcwd</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">project_cfg </span><span class="s3">= </span><span class="s1">config</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;project&quot;</span><span class="s3">, {})</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;dynamic&quot;</span><span class="s3">, [])</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg </span><span class="s3">= </span><span class="s1">config</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;tool&quot;</span><span class="s3">, {}).</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;setuptools&quot;</span><span class="s3">, {})</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;dynamic&quot;</span><span class="s3">, {})</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">ignore_option_errors </span><span class="s3">= </span><span class="s1">ignore_option_errors</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_dist </span><span class="s3">= </span><span class="s1">dist</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_referenced_files </span><span class="s3">= </span><span class="s1">set</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]()</span>
+
+    <span class="s2">def </span><span class="s1">_ensure_dist</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Distribution</span><span class="s3">:</span>
+        <span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">dist </span><span class="s2">import </span><span class="s1">Distribution</span>
+
+        <span class="s1">attrs </span><span class="s3">= {</span><span class="s4">&quot;src_root&quot;</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_dir</span><span class="s3">, </span><span class="s4">&quot;name&quot;</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;name&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)}</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dist </span><span class="s2">or </span><span class="s1">Distribution</span><span class="s3">(</span><span class="s1">attrs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_process_field</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">container</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">, </span><span class="s1">field</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">fn</span><span class="s3">: </span><span class="s1">Callable</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">field </span><span class="s2">in </span><span class="s1">container</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">_ignore_errors</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">ignore_option_errors</span><span class="s3">):</span>
+                <span class="s1">container</span><span class="s3">[</span><span class="s1">field</span><span class="s3">] = </span><span class="s1">fn</span><span class="s3">(</span><span class="s1">container</span><span class="s3">[</span><span class="s1">field</span><span class="s3">])</span>
+
+    <span class="s2">def </span><span class="s1">_canonic_package_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">field</span><span class="s3">=</span><span class="s4">&quot;package-data&quot;</span><span class="s3">):</span>
+        <span class="s1">package_data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">field</span><span class="s3">, {})</span>
+        <span class="s2">return </span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">canonic_package_data</span><span class="s3">(</span><span class="s1">package_data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">expand</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_expand_packages</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_canonic_package_data</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_canonic_package_data</span><span class="s3">(</span><span class="s4">&quot;exclude-package-data&quot;</span><span class="s3">)</span>
+
+        <span class="s5"># A distribution object is required for discovering the correct package_dir</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_ensure_dist</span><span class="s3">()</span>
+        <span class="s1">ctx </span><span class="s3">= </span><span class="s1">_EnsurePackagesDiscovered</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_cfg</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">ctx </span><span class="s2">as </span><span class="s1">ensure_discovered</span><span class="s3">:</span>
+            <span class="s1">package_dir </span><span class="s3">= </span><span class="s1">ensure_discovered</span><span class="s3">.</span><span class="s1">package_dir</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_expand_data_files</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_expand_cmdclass</span><span class="s3">(</span><span class="s1">package_dir</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_expand_all_dynamic</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">)</span>
+
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">_referenced_files</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_referenced_files</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">config</span>
+
+    <span class="s2">def </span><span class="s1">_expand_packages</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">packages </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;packages&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">packages </span><span class="s2">is None or </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">packages</span><span class="s3">, (</span><span class="s1">list</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">find </span><span class="s3">= </span><span class="s1">packages</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;find&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">find</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">):</span>
+            <span class="s1">find</span><span class="s3">[</span><span class="s4">&quot;root_dir&quot;</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_dir</span>
+            <span class="s1">find</span><span class="s3">[</span><span class="s4">&quot;fill_package_dir&quot;</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s4">&quot;package-dir&quot;</span><span class="s3">, {})</span>
+            <span class="s2">with </span><span class="s1">_ignore_errors</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">ignore_option_errors</span><span class="s3">):</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">[</span><span class="s4">&quot;packages&quot;</span><span class="s3">] = </span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">find_packages</span><span class="s3">(**</span><span class="s1">find</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_expand_data_files</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">data_files </span><span class="s3">= </span><span class="s1">partial</span><span class="s3">(</span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">canonic_data_files</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_dir</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_field</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">, </span><span class="s4">&quot;data-files&quot;</span><span class="s3">, </span><span class="s1">data_files</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_expand_cmdclass</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s1">root_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_dir</span>
+        <span class="s1">cmdclass </span><span class="s3">= </span><span class="s1">partial</span><span class="s3">(</span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">cmdclass</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">=</span><span class="s1">package_dir</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">=</span><span class="s1">root_dir</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_process_field</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">setuptools_cfg</span><span class="s3">, </span><span class="s4">&quot;cmdclass&quot;</span><span class="s3">, </span><span class="s1">cmdclass</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_expand_all_dynamic</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s1">special </span><span class="s3">= (  </span><span class="s5"># need special handling</span>
+            <span class="s4">&quot;version&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;readme&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;entry-points&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;scripts&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;gui-scripts&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;classifiers&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;dependencies&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;optional-dependencies&quot;</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s5"># `_obtain` functions are assumed to raise appropriate exceptions/warnings.</span>
+        <span class="s1">obtained_dynamic </span><span class="s3">= {</span>
+            <span class="s1">field</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">field</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">field </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic</span>
+            <span class="s2">if </span><span class="s1">field </span><span class="s2">not in </span><span class="s1">special</span>
+        <span class="s3">}</span>
+        <span class="s1">obtained_dynamic</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain_entry_points</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">) </span><span class="s2">or </span><span class="s3">{},</span>
+            <span class="s1">version</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain_version</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">),</span>
+            <span class="s1">readme</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain_readme</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">),</span>
+            <span class="s1">classifiers</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain_classifiers</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">),</span>
+            <span class="s1">dependencies</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain_dependencies</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">),</span>
+            <span class="s1">optional_dependencies</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain_optional_dependencies</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">),</span>
+        <span class="s3">)</span>
+        <span class="s5"># `None` indicates there is nothing in `tool.setuptools.dynamic` but the value</span>
+        <span class="s5"># might have already been set by setup.py/extensions, so avoid overwriting.</span>
+        <span class="s1">updates </span><span class="s3">= {</span><span class="s1">k</span><span class="s3">: </span><span class="s1">v </span><span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">obtained_dynamic</span><span class="s3">.</span><span class="s1">items</span><span class="s3">() </span><span class="s2">if </span><span class="s1">v </span><span class="s2">is not None</span><span class="s3">}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">project_cfg</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">updates</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_ensure_previously_set</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">field</span><span class="s3">: </span><span class="s1">str</span><span class="s3">):</span>
+        <span class="s1">previous </span><span class="s3">= </span><span class="s1">_PREVIOUSLY_DEFINED</span><span class="s3">[</span><span class="s1">field</span><span class="s3">](</span><span class="s1">dist</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">previous </span><span class="s2">is None and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">ignore_option_errors</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">= (</span>
+                <span class="s4">f&quot;No configuration found for dynamic </span><span class="s2">{</span><span class="s1">field</span><span class="s2">!r}</span><span class="s4">.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+                <span class="s4">&quot;Some dynamic fields need to be specified via `tool.setuptools.dynamic`&quot;</span>
+                <span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">others must be specified via the equivalent attribute in `setup.py`.&quot;</span>
+            <span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">InvalidConfigError</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_expand_directive</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">specifier</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">directive</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]</span>
+    <span class="s3">):</span>
+        <span class="s2">from </span><span class="s1">more_itertools </span><span class="s2">import </span><span class="s1">always_iterable</span>
+
+        <span class="s2">with </span><span class="s1">_ignore_errors</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">ignore_option_errors</span><span class="s3">):</span>
+            <span class="s1">root_dir </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">root_dir</span>
+            <span class="s2">if </span><span class="s4">&quot;file&quot; </span><span class="s2">in </span><span class="s1">directive</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_referenced_files</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">always_iterable</span><span class="s3">(</span><span class="s1">directive</span><span class="s3">[</span><span class="s4">&quot;file&quot;</span><span class="s3">]))</span>
+                <span class="s2">return </span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">read_files</span><span class="s3">(</span><span class="s1">directive</span><span class="s3">[</span><span class="s4">&quot;file&quot;</span><span class="s3">], </span><span class="s1">root_dir</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s4">&quot;attr&quot; </span><span class="s2">in </span><span class="s1">directive</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">read_attr</span><span class="s3">(</span><span class="s1">directive</span><span class="s3">[</span><span class="s4">&quot;attr&quot;</span><span class="s3">], </span><span class="s1">package_dir</span><span class="s3">, </span><span class="s1">root_dir</span><span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">f&quot;invalid `</span><span class="s2">{</span><span class="s1">specifier</span><span class="s2">}</span><span class="s4">`: </span><span class="s2">{</span><span class="s1">directive</span><span class="s2">!r}</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">field</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s2">if </span><span class="s1">field </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_expand_directive</span><span class="s3">(</span>
+                <span class="s4">f&quot;tool.setuptools.dynamic.</span><span class="s2">{</span><span class="s1">field</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg</span><span class="s3">[</span><span class="s1">field</span><span class="s3">],</span>
+                <span class="s1">package_dir</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ensure_previously_set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s1">field</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_obtain_version</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]):</span>
+        <span class="s5"># Since plugins can set version, let's silently skip if it cannot be obtained</span>
+        <span class="s2">if </span><span class="s4">&quot;version&quot; </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic </span><span class="s2">and </span><span class="s4">&quot;version&quot; </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">version</span><span class="s3">(</span>
+                <span class="s5"># We already do an early check for the presence of &quot;version&quot;</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;version&quot;</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">)  </span><span class="s5"># pyright: ignore[reportArgumentType]</span>
+            <span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_obtain_readme</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s4">&quot;readme&quot; </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+        <span class="s1">dynamic_cfg </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg</span>
+        <span class="s2">if </span><span class="s4">&quot;readme&quot; </span><span class="s2">in </span><span class="s1">dynamic_cfg</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s3">{</span>
+                <span class="s5"># We already do an early check for the presence of &quot;readme&quot;</span>
+                <span class="s4">&quot;text&quot;</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;readme&quot;</span><span class="s3">, {}),</span>
+                <span class="s4">&quot;content-type&quot;</span><span class="s3">: </span><span class="s1">dynamic_cfg</span><span class="s3">[</span><span class="s4">&quot;readme&quot;</span><span class="s3">].</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;content-type&quot;</span><span class="s3">, </span><span class="s4">&quot;text/x-rst&quot;</span><span class="s3">),</span>
+            <span class="s3">}  </span><span class="s5"># pyright: ignore[reportReturnType]</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ensure_previously_set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;readme&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_obtain_entry_points</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]</span>
+    <span class="s3">) </span><span class="s1">-&gt; dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">]] | </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">fields </span><span class="s3">= (</span><span class="s4">&quot;entry-points&quot;</span><span class="s3">, </span><span class="s4">&quot;scripts&quot;</span><span class="s3">, </span><span class="s4">&quot;gui-scripts&quot;</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">any</span><span class="s3">(</span><span class="s1">field </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic </span><span class="s2">for </span><span class="s1">field </span><span class="s2">in </span><span class="s1">fields</span><span class="s3">):</span>
+            <span class="s2">return None</span>
+
+        <span class="s1">text </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;entry-points&quot;</span><span class="s3">, </span><span class="s1">package_dir</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">text </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+        <span class="s1">groups </span><span class="s3">= </span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">entry_points</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+        <span class="s5"># Any is str | dict[str, str], but causes variance issues</span>
+        <span class="s1">expanded</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">]] = {</span><span class="s4">&quot;entry-points&quot;</span><span class="s3">: </span><span class="s1">groups</span><span class="s3">}</span>
+
+        <span class="s2">def </span><span class="s1">_set_scripts</span><span class="s3">(</span><span class="s1">field</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">group</span><span class="s3">: </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">group </span><span class="s2">in </span><span class="s1">groups</span><span class="s3">:</span>
+                <span class="s1">value </span><span class="s3">= </span><span class="s1">groups</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">group</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">field </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">InvalidConfigError</span><span class="s3">(</span><span class="s1">_MissingDynamic</span><span class="s3">.</span><span class="s1">details</span><span class="s3">(</span><span class="s1">field</span><span class="s3">, </span><span class="s1">value</span><span class="s3">))</span>
+                <span class="s1">expanded</span><span class="s3">[</span><span class="s1">field</span><span class="s3">] = </span><span class="s1">value</span>
+
+        <span class="s1">_set_scripts</span><span class="s3">(</span><span class="s4">&quot;scripts&quot;</span><span class="s3">, </span><span class="s4">&quot;console_scripts&quot;</span><span class="s3">)</span>
+        <span class="s1">_set_scripts</span><span class="s3">(</span><span class="s4">&quot;gui-scripts&quot;</span><span class="s3">, </span><span class="s4">&quot;gui_scripts&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">expanded</span>
+
+    <span class="s2">def </span><span class="s1">_obtain_classifiers</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s4">&quot;classifiers&quot; </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic</span><span class="s3">:</span>
+            <span class="s1">value </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;classifiers&quot;</span><span class="s3">, {})</span>
+            <span class="s2">if </span><span class="s1">value</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">value</span><span class="s3">.</span><span class="s1">splitlines</span><span class="s3">()</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_obtain_dependencies</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s4">&quot;dependencies&quot; </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic</span><span class="s3">:</span>
+            <span class="s1">value </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_obtain</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;dependencies&quot;</span><span class="s3">, {})</span>
+            <span class="s2">if </span><span class="s1">value</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">_parse_requirements_list</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_obtain_optional_dependencies</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s4">&quot;optional-dependencies&quot; </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">if </span><span class="s4">&quot;optional-dependencies&quot; </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg</span><span class="s3">:</span>
+            <span class="s1">optional_dependencies_map </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">dynamic_cfg</span><span class="s3">[</span><span class="s4">&quot;optional-dependencies&quot;</span><span class="s3">]</span>
+            <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">optional_dependencies_map</span><span class="s3">, </span><span class="s1">dict</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s3">{</span>
+                <span class="s1">group</span><span class="s3">: </span><span class="s1">_parse_requirements_list</span><span class="s3">(</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_expand_directive</span><span class="s3">(</span>
+                        <span class="s4">f&quot;tool.setuptools.dynamic.optional-dependencies.</span><span class="s2">{</span><span class="s1">group</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+                        <span class="s1">directive</span><span class="s3">,</span>
+                        <span class="s3">{},</span>
+                    <span class="s3">)</span>
+                <span class="s3">)</span>
+                <span class="s2">for </span><span class="s1">group</span><span class="s3">, </span><span class="s1">directive </span><span class="s2">in </span><span class="s1">optional_dependencies_map</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+            <span class="s3">}</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_ensure_previously_set</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">, </span><span class="s4">&quot;optional-dependencies&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">_parse_requirements_list</span><span class="s3">(</span><span class="s1">value</span><span class="s3">):</span>
+    <span class="s2">return </span><span class="s3">[</span>
+        <span class="s1">line</span>
+        <span class="s2">for </span><span class="s1">line </span><span class="s2">in </span><span class="s1">value</span><span class="s3">.</span><span class="s1">splitlines</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">line</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">() </span><span class="s2">and not </span><span class="s1">line</span><span class="s3">.</span><span class="s1">strip</span><span class="s3">().</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;#&quot;</span><span class="s3">)</span>
+    <span class="s3">]</span>
+
+
+<span class="s3">@</span><span class="s1">contextmanager</span>
+<span class="s2">def </span><span class="s1">_ignore_errors</span><span class="s3">(</span><span class="s1">ignore_option_errors</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">):</span>
+    <span class="s2">if not </span><span class="s1">ignore_option_errors</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+        <span class="s2">return</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+    <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">ex</span><span class="s3">:</span>
+        <span class="s1">_logger</span><span class="s3">.</span><span class="s1">debug</span><span class="s3">(</span><span class="s4">f&quot;ignored error: </span><span class="s2">{</span><span class="s1">ex</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">__name__</span><span class="s2">} </span><span class="s4">- </span><span class="s2">{</span><span class="s1">ex</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_EnsurePackagesDiscovered</span><span class="s3">(</span><span class="s1">_expand</span><span class="s3">.</span><span class="s1">EnsurePackagesDiscovered</span><span class="s3">):</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">distribution</span><span class="s3">: </span><span class="s1">Distribution</span><span class="s3">, </span><span class="s1">project_cfg</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">, </span><span class="s1">setuptools_cfg</span><span class="s3">: </span><span class="s1">dict</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">distribution</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_project_cfg </span><span class="s3">= </span><span class="s1">project_cfg</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_setuptools_cfg </span><span class="s3">= </span><span class="s1">setuptools_cfg</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Self</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;When entering the context, the values of ``packages``, ``py_modules`` and 
+        ``package_dir`` that are missing in ``dist`` are copied from ``setuptools_cfg``. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">dist</span><span class="s3">, </span><span class="s1">cfg </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dist</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_setuptools_cfg</span>
+        <span class="s1">package_dir</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = </span><span class="s1">cfg</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s4">&quot;package-dir&quot;</span><span class="s3">, {})</span>
+        <span class="s1">package_dir</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">dist</span><span class="s3">.</span><span class="s1">package_dir </span><span class="s2">or </span><span class="s3">{})</span>
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">package_dir </span><span class="s3">= </span><span class="s1">package_dir  </span><span class="s5"># needs to be the same object</span>
+
+        <span class="s1">dist</span><span class="s3">.</span><span class="s1">set_defaults</span><span class="s3">.</span><span class="s1">_ignore_ext_modules</span><span class="s3">()  </span><span class="s5"># pyproject.toml-specific behaviour</span>
+
+        <span class="s5"># Set `name`, `py_modules` and `packages` in dist to short-circuit</span>
+        <span class="s5"># auto-discovery, but avoid overwriting empty lists purposefully set by users.</span>
+        <span class="s2">if </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">name </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">dist</span><span class="s3">.</span><span class="s1">metadata</span><span class="s3">.</span><span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_project_cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;name&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">py_modules </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">dist</span><span class="s3">.</span><span class="s1">py_modules </span><span class="s3">= </span><span class="s1">cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;py-modules&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">packages </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">dist</span><span class="s3">.</span><span class="s1">packages </span><span class="s3">= </span><span class="s1">cfg</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;packages&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">super</span><span class="s3">().</span><span class="s1">__enter__</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">exc_type</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">BaseException</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">exc_value</span><span class="s3">: </span><span class="s1">BaseException </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">traceback</span><span class="s3">: </span><span class="s1">TracebackType </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;When exiting the context, if values of ``packages``, ``py_modules`` and 
+        ``package_dir`` are missing in ``setuptools_cfg``, copy from ``dist``. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># If anything was discovered set them back, so they count in the final config.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_setuptools_cfg</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s4">&quot;packages&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dist</span><span class="s3">.</span><span class="s1">packages</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_setuptools_cfg</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s4">&quot;py-modules&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dist</span><span class="s3">.</span><span class="s1">py_modules</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">super</span><span class="s3">().</span><span class="s1">__exit__</span><span class="s3">(</span><span class="s1">exc_type</span><span class="s3">, </span><span class="s1">exc_value</span><span class="s3">, </span><span class="s1">traceback</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_ExperimentalConfiguration</span><span class="s3">(</span><span class="s1">SetuptoolsWarning</span><span class="s3">):</span>
+    <span class="s1">_SUMMARY </span><span class="s3">= (</span>
+        <span class="s4">&quot;`{subject}` in `pyproject.toml` is still *experimental* &quot;</span>
+        <span class="s4">&quot;and likely to change in future releases.&quot;</span>
+    <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">_ToolsTypoInMetadata</span><span class="s3">(</span><span class="s1">SetuptoolsWarning</span><span class="s3">):</span>
+    <span class="s1">_SUMMARY </span><span class="s3">= (</span>
+        <span class="s4">&quot;Ignoring [tools.setuptools] in pyproject.toml, did you mean [tool.setuptools]?&quot;</span>
+    <span class="s3">)</span>
+</pre>
+</body>
+</html>

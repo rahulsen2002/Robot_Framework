@@ -1,0 +1,1044 @@
+<html>
+<head>
+<title>_raises_group.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_raises_group.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">abc </span><span class="s0">import </span><span class="s1">ABC</span><span class="s2">, </span><span class="s1">abstractmethod</span>
+<span class="s0">from </span><span class="s1">re </span><span class="s0">import </span><span class="s1">Pattern</span>
+<span class="s0">from </span><span class="s1">textwrap </span><span class="s0">import </span><span class="s1">indent</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Generic</span><span class="s2">,</span>
+    <span class="s1">Literal</span><span class="s2">,</span>
+    <span class="s1">cast</span><span class="s2">,</span>
+    <span class="s1">overload</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">final</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">import </span><span class="s1">builtins</span>
+
+    <span class="s3"># sphinx will *only* work if we use types.TracebackType, and import</span>
+    <span class="s3"># *inside* TYPE_CHECKING. No other combination works.....</span>
+    <span class="s0">import </span><span class="s1">types</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Sequence</span>
+
+    <span class="s0">from </span><span class="s1">_pytest</span><span class="s2">.</span><span class="s1">_code</span><span class="s2">.</span><span class="s1">code </span><span class="s0">import </span><span class="s1">ExceptionChainRepr</span><span class="s2">, </span><span class="s1">ReprExceptionInfo</span><span class="s2">, </span><span class="s1">Traceback</span>
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">TypeGuard</span><span class="s2">, </span><span class="s1">TypeVar</span>
+
+    <span class="s3"># this conditional definition is because we want to allow a TypeVar default</span>
+    <span class="s1">MatchE </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span>
+        <span class="s4">&quot;MatchE&quot;</span><span class="s2">,</span>
+        <span class="s1">bound</span><span class="s2">=</span><span class="s1">BaseException</span><span class="s2">,</span>
+        <span class="s1">default</span><span class="s2">=</span><span class="s1">BaseException</span><span class="s2">,</span>
+        <span class="s1">covariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">)</span>
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TypeVar</span>
+
+    <span class="s1">MatchE </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;MatchE&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">BaseException</span><span class="s2">, </span><span class="s1">covariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+<span class="s3"># RaisesGroup doesn't work with a default.</span>
+<span class="s1">BaseExcT_co </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;BaseExcT_co&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">BaseException</span><span class="s2">, </span><span class="s1">covariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s1">BaseExcT_1 </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;BaseExcT_1&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">BaseException</span><span class="s2">)</span>
+<span class="s1">BaseExcT_2 </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;BaseExcT_2&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">BaseException</span><span class="s2">)</span>
+<span class="s1">ExcT_1 </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;ExcT_1&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">Exception</span><span class="s2">)</span>
+<span class="s1">ExcT_2 </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;ExcT_2&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s1">Exception</span><span class="s2">)</span>
+
+<span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&lt; (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">11</span><span class="s2">):</span>
+    <span class="s0">from </span><span class="s1">exceptiongroup </span><span class="s0">import </span><span class="s1">BaseExceptionGroup</span><span class="s2">, </span><span class="s1">ExceptionGroup</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">_ExceptionInfo</span><span class="s2">(</span><span class="s1">Generic</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">]):</span>
+    <span class="s6">&quot;&quot;&quot;Minimal re-implementation of pytest.ExceptionInfo, only used if pytest is not available. Supports a subset of its features necessary for functionality of :class:`trio.testing.RaisesGroup` and :class:`trio.testing.Matcher`.&quot;&quot;&quot;</span>
+
+    <span class="s1">_excinfo</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">type</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">], </span><span class="s1">MatchE</span><span class="s2">, </span><span class="s1">types</span><span class="s2">.</span><span class="s1">TracebackType</span><span class="s2">] | </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">excinfo</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">type</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">], </span><span class="s1">MatchE</span><span class="s2">, </span><span class="s1">types</span><span class="s2">.</span><span class="s1">TracebackType</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo </span><span class="s2">= </span><span class="s1">excinfo</span>
+
+    <span class="s0">def </span><span class="s1">fill_unfilled</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc_info</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">type</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">], </span><span class="s1">MatchE</span><span class="s2">, </span><span class="s1">types</span><span class="s2">.</span><span class="s1">TracebackType</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Fill an unfilled ExceptionInfo created with ``for_later()``.&quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo </span><span class="s0">is None</span><span class="s2">, </span><span class="s4">&quot;ExceptionInfo was already filled&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo </span><span class="s2">= </span><span class="s1">exc_info</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">for_later</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">) </span><span class="s1">-&gt; _ExceptionInfo</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Return an unfilled ExceptionInfo.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s3"># Note, special cased in sphinx config, since &quot;type&quot; conflicts.</span>
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">type</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; type</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;The exception class.&quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s2">(</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo </span><span class="s0">is not None</span>
+        <span class="s2">), </span><span class="s4">&quot;.type can only be used after the context manager exits&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo</span><span class="s2">[</span><span class="s5">0</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">value</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; MatchE</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;The exception value.&quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s2">(</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo </span><span class="s0">is not None</span>
+        <span class="s2">), </span><span class="s4">&quot;.value can only be used after the context manager exits&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo</span><span class="s2">[</span><span class="s5">1</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">tb</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; types</span><span class="s2">.</span><span class="s1">TracebackType</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;The exception raw traceback.&quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s2">(</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo </span><span class="s0">is not None</span>
+        <span class="s2">), </span><span class="s4">&quot;.tb can only be used after the context manager exits&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_excinfo</span><span class="s2">[</span><span class="s5">2</span><span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">exconly</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">tryshort</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span><span class="s2">(</span>
+            <span class="s4">&quot;This is a helper method only available if you use RaisesGroup with the pytest package installed&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">errisinstance</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc</span><span class="s2">: </span><span class="s1">builtins</span><span class="s2">.</span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">builtins</span><span class="s2">.</span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">], ...],</span>
+    <span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span><span class="s2">(</span>
+            <span class="s4">&quot;This is a helper method only available if you use RaisesGroup with the pytest package installed&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">getrepr</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">showlocals</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">style</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s4">&quot;long&quot;</span><span class="s2">,</span>
+        <span class="s1">abspath</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">tbfilter</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">| </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">_ExceptionInfo</span><span class="s2">], </span><span class="s1">Traceback</span><span class="s2">] = </span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">funcargs</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">truncate_locals</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">chain</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; ReprExceptionInfo </span><span class="s2">| </span><span class="s1">ExceptionChainRepr</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span><span class="s2">(</span>
+            <span class="s4">&quot;This is a helper method only available if you use RaisesGroup with the pytest package installed&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+
+<span class="s3"># Type checkers are not able to do conditional types depending on installed packages, so</span>
+<span class="s3"># we've added signatures for all helpers to _ExceptionInfo, and then always use that.</span>
+<span class="s3"># If this ends up leading to problems, we can resort to always using _ExceptionInfo and</span>
+<span class="s3"># users that want to use getrepr/errisinstance/exconly can write helpers on their own, or</span>
+<span class="s3"># we reimplement them ourselves...or get this merged in upstream pytest.</span>
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s1">ExceptionInfo </span><span class="s2">= </span><span class="s1">_ExceptionInfo</span>
+
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">from </span><span class="s1">pytest </span><span class="s0">import </span><span class="s1">ExceptionInfo  </span><span class="s3"># noqa: PT013</span>
+    <span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+        <span class="s1">ExceptionInfo </span><span class="s2">= </span><span class="s1">_ExceptionInfo</span>
+
+
+<span class="s3"># copied from pytest.ExceptionInfo</span>
+<span class="s0">def </span><span class="s1">_stringify_exception</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s1">getattr</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s4">&quot;message&quot;</span><span class="s2">, </span><span class="s1">str</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)),</span>
+            <span class="s2">*</span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s4">&quot;__notes__&quot;</span><span class="s2">, []),</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+
+
+<span class="s3"># String patterns default to including the unicode flag.</span>
+<span class="s1">_REGEX_NO_FLAGS </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s4">r&quot;&quot;</span><span class="s2">).</span><span class="s1">flags</span>
+
+
+<span class="s0">def </span><span class="s1">_match_pattern</span><span class="s2">(</span><span class="s1">match</span><span class="s2">: </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;helper function to remove redundant `re.compile` calls when printing regex&quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">match</span><span class="s2">.</span><span class="s1">pattern </span><span class="s0">if </span><span class="s1">match</span><span class="s2">.</span><span class="s1">flags </span><span class="s2">== </span><span class="s1">_REGEX_NO_FLAGS </span><span class="s0">else </span><span class="s1">match</span>
+
+
+<span class="s0">def </span><span class="s1">repr_callable</span><span class="s2">(</span><span class="s1">fun</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseExcT_1</span><span class="s2">], </span><span class="s1">bool</span><span class="s2">]) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Get the repr of a ``check`` parameter. 
+ 
+    Split out so it can be monkeypatched (e.g. by our hypothesis plugin) 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">fun</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_exception_type_name</span><span class="s2">(</span><span class="s1">e</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">]) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+    <span class="s0">return </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">e</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">_check_raw_type</span><span class="s2">(</span>
+    <span class="s1">expected_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">expected_type </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span>
+        <span class="s1">exception</span><span class="s2">,</span>
+        <span class="s1">expected_type</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">actual_type_str </span><span class="s2">= </span><span class="s1">_exception_type_name</span><span class="s2">(</span><span class="s1">type</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">))</span>
+        <span class="s1">expected_type_str </span><span class="s2">= </span><span class="s1">_exception_type_name</span><span class="s2">(</span><span class="s1">expected_type</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span><span class="s2">) </span><span class="s0">and not </span><span class="s1">issubclass</span><span class="s2">(</span>
+            <span class="s1">expected_type</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span>
+        <span class="s2">):</span>
+            <span class="s0">return </span><span class="s4">f&quot;Unexpected nested </span><span class="s0">{</span><span class="s1">actual_type_str</span><span class="s0">}</span><span class="s4">, expected </span><span class="s0">{</span><span class="s1">expected_type_str</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">actual_type_str</span><span class="s0">} </span><span class="s4">is not of type </span><span class="s0">{</span><span class="s1">expected_type_str</span><span class="s0">}</span><span class="s4">&quot;</span>
+    <span class="s0">return None</span>
+
+
+<span class="s0">class </span><span class="s1">AbstractMatcher</span><span class="s2">(</span><span class="s1">ABC</span><span class="s2">, </span><span class="s1">Generic</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">]):</span>
+    <span class="s6">&quot;&quot;&quot;ABC with common functionality shared between Matcher and RaisesGroup&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseExcT_co</span><span class="s2">], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">match</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">: </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">match</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">match </span><span class="s2">= </span><span class="s1">match</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">check </span><span class="s2">= </span><span class="s1">check</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s3"># used to suppress repeated printing of `repr(self.check)`</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_nested</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">fail_reason</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Set after a call to `matches` to give a human-readable 
+        reason for why the match failed. 
+        When used as a context manager the string will be given as the text of an 
+        `AssertionError`&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason</span>
+
+    <span class="s0">def </span><span class="s1">_check_check</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">AbstractMatcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseExcT_1</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return True</span>
+
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">):</span>
+            <span class="s0">return True</span>
+
+        <span class="s1">check_repr </span><span class="s2">= </span><span class="s4">&quot;&quot; </span><span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_nested </span><span class="s0">else </span><span class="s4">&quot; &quot; </span><span class="s2">+ </span><span class="s1">repr_callable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s4">f&quot;check</span><span class="s0">{</span><span class="s1">check_repr</span><span class="s0">} </span><span class="s4">did not return True&quot;</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">def </span><span class="s1">_check_match</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">e</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">match </span><span class="s0">is None or </span><span class="s1">re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">,</span>
+            <span class="s1">stringified_exception </span><span class="s2">:= </span><span class="s1">_stringify_exception</span><span class="s2">(</span><span class="s1">e</span><span class="s2">),</span>
+        <span class="s2">):</span>
+            <span class="s0">return True</span>
+
+        <span class="s1">maybe_specify_type </span><span class="s2">= (</span>
+            <span class="s4">f&quot; of </span><span class="s0">{</span><span class="s1">_exception_type_name</span><span class="s2">(</span><span class="s1">type</span><span class="s2">(</span><span class="s1">e</span><span class="s2">))</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span><span class="s2">)</span>
+            <span class="s0">else </span><span class="s4">&quot;&quot;</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s4">f&quot;Regex pattern </span><span class="s0">{</span><span class="s1">_match_pattern</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">)</span><span class="s0">!r} </span><span class="s4">did not match </span><span class="s0">{</span><span class="s1">stringified_exception</span><span class="s0">!r}{</span><span class="s1">maybe_specify_type</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">if </span><span class="s1">_match_pattern</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">) == </span><span class="s1">stringified_exception</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n  </span><span class="s4">Did you mean to `re.escape()` the regex?&quot;</span>
+        <span class="s0">return False</span>
+
+    <span class="s3"># TODO: when transitioning to pytest, harmonize Matcher and RaisesGroup</span>
+    <span class="s3"># signatures. One names the parameter `exc_val` and the other `exception`</span>
+    <span class="s2">@</span><span class="s1">abstractmethod</span>
+    <span class="s0">def </span><span class="s1">matches</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">AbstractMatcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">], </span><span class="s1">exc_val</span><span class="s2">: </span><span class="s1">BaseException</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Check if an exception matches the requirements of this AbstractMatcher. 
+        If it fails, `AbstractMatcher.fail_reason` should be set. 
+        &quot;&quot;&quot;</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">Matcher</span><span class="s2">(</span><span class="s1">AbstractMatcher</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">]):</span>
+    <span class="s6">&quot;&quot;&quot;Helper class to be used together with RaisesGroups when you want to specify requirements on sub-exceptions. Only specifying the type is redundant, and it's also unnecessary when the type is a nested `RaisesGroup` since it supports the same arguments. 
+    The type is checked with `isinstance`, and does not need to be an exact match. If that is wanted you can use the ``check`` parameter. 
+    :meth:`Matcher.matches` can also be used standalone to check individual exceptions. 
+ 
+    Examples:: 
+ 
+        with RaisesGroups(Matcher(ValueError, match=&quot;string&quot;)): 
+            ... 
+        with RaisesGroups(Matcher(check=lambda x: x.args == (3, &quot;hello&quot;))): 
+            ... 
+        with RaisesGroups(Matcher(check=lambda x: type(x) is ValueError)): 
+            ... 
+ 
+    Tip: if you install ``hypothesis`` and import it in ``conftest.py`` you will get 
+    readable ``repr``s of ``check`` callables in the output. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3"># At least one of the three parameters must be passed.</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exception_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = ...,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">MatchE</span><span class="s2">], </span><span class="s1">bool</span><span class="s2">] = ...,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">],  </span><span class="s3"># Give E a value.</span>
+        <span class="s2">*,</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">],</span>
+        <span class="s3"># If exception_type is not provided, check() must do any typechecks itself.</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseException</span><span class="s2">], </span><span class="s1">bool</span><span class="s2">] = ...,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, *, </span><span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseException</span><span class="s2">], </span><span class="s1">bool</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exception_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">MatchE</span><span class="s2">], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">match</span><span class="s2">, </span><span class="s1">check</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">exception_type </span><span class="s0">is None and </span><span class="s1">match </span><span class="s0">is None and </span><span class="s1">check </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s4">&quot;You must specify at least one parameter to match on.&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">exception_type </span><span class="s0">is not None and not </span><span class="s1">issubclass</span><span class="s2">(</span><span class="s1">exception_type</span><span class="s2">, </span><span class="s1">BaseException</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">f&quot;exception_type </span><span class="s0">{</span><span class="s1">exception_type</span><span class="s0">} </span><span class="s4">must be a subclass of BaseException&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">exception_type </span><span class="s2">= </span><span class="s1">exception_type</span>
+
+    <span class="s0">def </span><span class="s1">matches</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Check if an exception matches the requirements of this Matcher. 
+        If it fails, `Matcher.fail_reason` will be set. 
+ 
+        Examples:: 
+ 
+            assert Matcher(ValueError).matches(my_exception) 
+            # is equivalent to 
+            assert isinstance(my_exception, ValueError) 
+ 
+            # this can be useful when checking e.g. the ``__cause__`` of an exception. 
+            with pytest.raises(ValueError) as excinfo: 
+                ... 
+            assert Matcher(SyntaxError, match=&quot;foo&quot;).matches(excinfo.value.__cause__) 
+            # above line is equivalent to 
+            assert isinstance(excinfo.value.__cause__, SyntaxError) 
+            assert re.search(&quot;foo&quot;, str(excinfo.value.__cause__)) 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_type</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">):</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_match</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">):</span>
+            <span class="s0">return False</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_check</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">parameters </span><span class="s2">= []</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">exception_type </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">exception_type</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">match </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s3"># If no flags were specified, discard the redundant re.compile() here.</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span>
+                <span class="s4">f&quot;match=</span><span class="s0">{</span><span class="s1">_match_pattern</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">)</span><span class="s0">!r}</span><span class="s4">&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">f&quot;check=</span><span class="s0">{</span><span class="s1">repr_callable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">)</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s4">f'Matcher(</span><span class="s0">{</span><span class="s4">&quot;, &quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">parameters</span><span class="s2">)</span><span class="s0">}</span><span class="s4">)'</span>
+
+    <span class="s0">def </span><span class="s1">_check_type</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">MatchE</span><span class="s2">]:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">_check_raw_type</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">exception_type</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s0">is None</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">AbstractMatcher</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">]]):</span>
+    <span class="s6">&quot;&quot;&quot;Contextmanager for checking for an expected `ExceptionGroup`. 
+    This works similar to ``pytest.raises``, and a version of it will hopefully be added upstream, after which this can be deprecated and removed. See https://github.com/pytest-dev/pytest/issues/11538 
+ 
+ 
+    The catching behaviour differs from :ref:`except* &lt;except_star&gt;` in multiple different ways, being much stricter by default. By using ``allow_unwrapped=True`` and ``flatten_subgroups=True`` you can match ``except*`` fully when expecting a single exception. 
+ 
+    #. All specified exceptions must be present, *and no others*. 
+ 
+       * If you expect a variable number of exceptions you need to use ``pytest.raises(ExceptionGroup)`` and manually check the contained exceptions. Consider making use of :func:`Matcher.matches`. 
+ 
+    #. It will only catch exceptions wrapped in an exceptiongroup by default. 
+ 
+       * With ``allow_unwrapped=True`` you can specify a single expected exception or `Matcher` and it will match the exception even if it is not inside an `ExceptionGroup`. If you expect one of several different exception types you need to use a `Matcher` object. 
+ 
+    #. By default it cares about the full structure with nested `ExceptionGroup`'s. You can specify nested `ExceptionGroup`'s by passing `RaisesGroup` objects as expected exceptions. 
+ 
+       * With ``flatten_subgroups=True`` it will &quot;flatten&quot; the raised `ExceptionGroup`, extracting all exceptions inside any nested :class:`ExceptionGroup`, before matching. 
+ 
+    It does not care about the order of the exceptions, so ``RaisesGroups(ValueError, TypeError)`` is equivalent to ``RaisesGroups(TypeError, ValueError)``. 
+ 
+    Examples:: 
+ 
+        with RaisesGroups(ValueError): 
+            raise ExceptionGroup(&quot;&quot;, (ValueError(),)) 
+        with RaisesGroups(ValueError, ValueError, Matcher(TypeError, match=&quot;expected int&quot;)): 
+            ... 
+        with RaisesGroups(KeyboardInterrupt, match=&quot;hello&quot;, check=lambda x: type(x) is BaseExceptionGroup): 
+            ... 
+        with RaisesGroups(RaisesGroups(ValueError)): 
+            raise ExceptionGroup(&quot;&quot;, (ExceptionGroup(&quot;&quot;, (ValueError(),)),)) 
+ 
+        # flatten_subgroups 
+        with RaisesGroups(ValueError, flatten_subgroups=True): 
+            raise ExceptionGroup(&quot;&quot;, (ExceptionGroup(&quot;&quot;, (ValueError(),)),)) 
+ 
+        # allow_unwrapped 
+        with RaisesGroups(ValueError, allow_unwrapped=True): 
+            raise ValueError 
+ 
+ 
+    `RaisesGroup.matches` can also be used directly to check a standalone exception group. 
+ 
+ 
+    The matching algorithm is greedy, which means cases such as this may fail:: 
+ 
+        with RaisesGroups(ValueError, Matcher(ValueError, match=&quot;hello&quot;)): 
+            raise ExceptionGroup(&quot;&quot;, (ValueError(&quot;hello&quot;), ValueError(&quot;goodbye&quot;))) 
+ 
+    even though it generally does not care about the order of the exceptions in the group. 
+    To avoid the above you should specify the first ValueError with a Matcher as well. 
+ 
+    Tip: if you install ``hypothesis`` and import it in ``conftest.py`` you will get 
+    readable ``repr``s of ``check`` callables in the output. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3"># allow_unwrapped=True requires: singular exception, exception not being</span>
+    <span class="s3"># RaisesGroup instance, match is None, check is None</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">],</span>
+        <span class="s2">*,</span>
+        <span class="s1">allow_unwrapped</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s0">True</span><span class="s2">],</span>
+        <span class="s1">flatten_subgroups</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s3"># flatten_subgroups = True also requires no nested RaisesGroup</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">],</span>
+        <span class="s1">flatten_subgroups</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s0">True</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">]], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s3"># simplify the typevars if possible (the following 3 are equivalent but go simpler-&gt;complicated)</span>
+    <span class="s3"># ... the first handles RaisesGroup[ValueError], the second RaisesGroup[ExceptionGroup[ValueError]],</span>
+    <span class="s3">#     the third RaisesGroup[ValueError | ExceptionGroup[ValueError]].</span>
+    <span class="s3"># ... otherwise, we will get results like RaisesGroup[ValueError | ExceptionGroup[Never]] (I think)</span>
+    <span class="s3">#     (technically correct but misleading)</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">]], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">]],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">]]], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_1 </span><span class="s2">| </span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">]],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">] | </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">] | </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: (</span>
+            <span class="s1">Callable</span><span class="s2">[[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_1 </span><span class="s2">| </span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_2</span><span class="s2">]]], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None</span>
+        <span class="s2">) = </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s3"># same as the above 3 but handling BaseException</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">]],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: (</span>
+            <span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">]]], </span><span class="s1">bool</span><span class="s2">] | </span><span class="s0">None</span>
+        <span class="s2">) = </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1 </span><span class="s2">| </span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">]],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">] | </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]</span>
+        <span class="s2">| </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]</span>
+        <span class="s2">| </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">],</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: (</span>
+            <span class="s1">Callable</span><span class="s2">[</span>
+                <span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1 </span><span class="s2">| </span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">]]],</span>
+                <span class="s1">bool</span><span class="s2">,</span>
+            <span class="s2">]</span>
+            <span class="s2">| </span><span class="s0">None</span>
+        <span class="s2">) = </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_1 </span><span class="s2">| </span><span class="s1">BaseExcT_1 </span><span class="s2">| </span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">]],</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">] | </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">],</span>
+        <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]</span>
+        <span class="s2">| </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]</span>
+        <span class="s2">| </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_2</span><span class="s2">],</span>
+        <span class="s1">allow_unwrapped</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">flatten_subgroups</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Pattern</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">: (</span>
+            <span class="s1">Callable</span><span class="s2">[[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]], </span><span class="s1">bool</span><span class="s2">]</span>
+            <span class="s2">| </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">]], </span><span class="s1">bool</span><span class="s2">]</span>
+            <span class="s2">| </span><span class="s0">None</span>
+        <span class="s2">) = </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s3"># The type hint on the `self` and `check` parameters uses different formats</span>
+        <span class="s3"># that are *very* hard to reconcile while adhering to the overloads, so we cast</span>
+        <span class="s3"># it to avoid an error when passing it to super().__init__</span>
+        <span class="s1">check </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span>
+            <span class="s4">&quot;Callable[[&quot;</span>
+            <span class="s4">&quot;BaseExceptionGroup[ExcT_1|BaseExcT_1|BaseExceptionGroup[BaseExcT_2]]&quot;</span>
+            <span class="s4">&quot;], bool]&quot;</span><span class="s2">,</span>
+            <span class="s1">check</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">match</span><span class="s2">, </span><span class="s1">check</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span>
+            <span class="s1">type</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">] | </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">], ...</span>
+        <span class="s2">] = (</span>
+            <span class="s1">exception</span><span class="s2">,</span>
+            <span class="s2">*</span><span class="s1">other_exceptions</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">allow_unwrapped </span><span class="s2">= </span><span class="s1">allow_unwrapped</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">flatten_subgroups</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s1">flatten_subgroups</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">is_baseexceptiongroup</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+
+        <span class="s0">if </span><span class="s1">allow_unwrapped </span><span class="s0">and </span><span class="s1">other_exceptions</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">&quot;You cannot specify multiple exceptions with `allow_unwrapped=True.`&quot;</span>
+                <span class="s4">&quot; If you want to match one of multiple possible exceptions you should&quot;</span>
+                <span class="s4">&quot; use a `Matcher`.&quot;</span>
+                <span class="s4">&quot; E.g. `Matcher(check=lambda e: isinstance(e, (...)))`&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">allow_unwrapped </span><span class="s0">and </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">, </span><span class="s1">RaisesGroup</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">&quot;`allow_unwrapped=True` has no effect when expecting a `RaisesGroup`.&quot;</span>
+                <span class="s4">&quot; You might want it in the expected `RaisesGroup`, or&quot;</span>
+                <span class="s4">&quot; `flatten_subgroups=True` if you don't care about the structure.&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">allow_unwrapped </span><span class="s0">and </span><span class="s2">(</span><span class="s1">match </span><span class="s0">is not None or </span><span class="s1">check </span><span class="s0">is not None</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                <span class="s4">&quot;`allow_unwrapped=True` bypasses the `match` and `check` parameters&quot;</span>
+                <span class="s4">&quot; if the exception is unwrapped. If you intended to match/check the&quot;</span>
+                <span class="s4">&quot; exception you should use a `Matcher` object. If you want to match/check&quot;</span>
+                <span class="s4">&quot; the exceptiongroup when the exception *is* wrapped you need to&quot;</span>
+                <span class="s4">&quot; do e.g. `if isinstance(exc.value, ExceptionGroup):&quot;</span>
+                <span class="s4">&quot; assert RaisesGroup(...).matches(exc.value)` afterwards.&quot;</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+        <span class="s3"># verify `expected_exceptions` and set `self.is_baseexceptiongroup`</span>
+        <span class="s0">for </span><span class="s1">exc </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">RaisesGroup</span><span class="s2">):</span>
+                <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">flatten_subgroups</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                        <span class="s4">&quot;You cannot specify a nested structure inside a RaisesGroup with&quot;</span>
+                        <span class="s4">&quot; `flatten_subgroups=True`. The parameter will flatten subgroups&quot;</span>
+                        <span class="s4">&quot; in the raised exceptiongroup before matching, which would never&quot;</span>
+                        <span class="s4">&quot; match a nested structure.&quot;</span><span class="s2">,</span>
+                    <span class="s2">)</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">is_baseexceptiongroup </span><span class="s2">|= </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">is_baseexceptiongroup</span>
+                <span class="s1">exc</span><span class="s2">.</span><span class="s1">_nested </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s0">elif </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">Matcher</span><span class="s2">):</span>
+                <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">exception_type </span><span class="s0">is not None</span><span class="s2">:</span>
+                    <span class="s3"># Matcher __init__ assures it's a subclass of BaseException</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">is_baseexceptiongroup </span><span class="s2">|= </span><span class="s0">not </span><span class="s1">issubclass</span><span class="s2">(</span>
+                        <span class="s1">exc</span><span class="s2">.</span><span class="s1">exception_type</span><span class="s2">,</span>
+                        <span class="s1">Exception</span><span class="s2">,</span>
+                    <span class="s2">)</span>
+                <span class="s1">exc</span><span class="s2">.</span><span class="s1">_nested </span><span class="s2">= </span><span class="s0">True</span>
+            <span class="s0">elif </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">type</span><span class="s2">) </span><span class="s0">and </span><span class="s1">issubclass</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">BaseException</span><span class="s2">):</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">is_baseexceptiongroup </span><span class="s2">|= </span><span class="s0">not </span><span class="s1">issubclass</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">Exception</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span>
+                    <span class="s4">f'Invalid argument &quot;</span><span class="s0">{</span><span class="s1">exc</span><span class="s0">!r}</span><span class="s4">&quot; must be exception type, Matcher, or'</span>
+                    <span class="s4">&quot; RaisesGroup.&quot;</span><span class="s2">,</span>
+                <span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; ExceptionInfo</span><span class="s2">[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">]]: ...</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; ExceptionInfo</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]]: ...</span>
+
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; ExceptionInfo</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">]]:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">excinfo</span><span class="s2">: </span><span class="s1">ExceptionInfo</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">]] = (</span>
+            <span class="s1">ExceptionInfo</span><span class="s2">.</span><span class="s1">for_later</span><span class="s2">()</span>
+        <span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">excinfo</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">parameters </span><span class="s2">= [</span>
+            <span class="s1">e</span><span class="s2">.</span><span class="s1">__name__ </span><span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">type</span><span class="s2">) </span><span class="s0">else </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+            <span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span>
+        <span class="s2">]</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">allow_unwrapped</span><span class="s2">:</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">f&quot;allow_unwrapped=</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">allow_unwrapped</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">flatten_subgroups</span><span class="s2">:</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">f&quot;flatten_subgroups=</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">flatten_subgroups</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">match </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s3"># If no flags were specified, discard the redundant re.compile() here.</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">f&quot;match=</span><span class="s0">{</span><span class="s1">_match_pattern</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">)</span><span class="s0">!r}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">check </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">parameters</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s4">f&quot;check=</span><span class="s0">{</span><span class="s1">repr_callable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">check</span><span class="s2">)</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s4">f&quot;RaisesGroup(</span><span class="s0">{</span><span class="s4">', '</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">parameters</span><span class="s2">)</span><span class="s0">}</span><span class="s4">)&quot;</span>
+
+    <span class="s0">def </span><span class="s1">_unroll_exceptions</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exceptions</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; Sequence</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Used if `flatten_subgroups=True`.&quot;&quot;&quot;</span>
+        <span class="s1">res</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] = []</span>
+        <span class="s0">for </span><span class="s1">exc </span><span class="s0">in </span><span class="s1">exceptions</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span><span class="s2">):</span>
+                <span class="s1">res</span><span class="s2">.</span><span class="s1">extend</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_unroll_exceptions</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">.</span><span class="s1">exceptions</span><span class="s2">))</span>
+
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">res</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">res</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">matches</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">],</span>
+        <span class="s1">exc_val</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">]]: ...</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">matches</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+        <span class="s1">exc_val</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]]: ...</span>
+
+    <span class="s0">def </span><span class="s1">matches</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc_val</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">]]:</span>
+        <span class="s6">&quot;&quot;&quot;Check if an exception matches the requirements of this RaisesGroup. 
+        If it fails, `RaisesGroup.fail_reason` will be set. 
+ 
+        Example:: 
+ 
+            with pytest.raises(TypeError) as excinfo: 
+                ... 
+            assert RaisesGroups(ValueError).matches(excinfo.value.__cause__) 
+            # the above line is equivalent to 
+            myexc = excinfo.value.__cause 
+            assert isinstance(myexc, BaseExceptionGroup) 
+            assert len(myexc.exceptions) == 1 
+            assert isinstance(myexc.exceptions[0], ValueError) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">exc_val </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s4">&quot;exception is None&quot;</span>
+            <span class="s0">return False</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span><span class="s2">):</span>
+            <span class="s3"># we opt to only print type of the exception here, as the repr would</span>
+            <span class="s3"># likely be quite long</span>
+            <span class="s1">not_group_msg </span><span class="s2">= </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">type</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">).</span><span class="s1">__name__</span><span class="s0">!r} </span><span class="s4">is not an exception group&quot;</span>
+            <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">) &gt; </span><span class="s5">1</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">not_group_msg</span>
+                <span class="s0">return False</span>
+            <span class="s3"># if we have 1 expected exception, check if it would work even if</span>
+            <span class="s3"># allow_unwrapped is not set</span>
+            <span class="s1">res </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_expected</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">[</span><span class="s5">0</span><span class="s2">], </span><span class="s1">exc_val</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">res </span><span class="s0">is None and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">allow_unwrapped</span><span class="s2">:</span>
+                <span class="s0">return True</span>
+
+            <span class="s0">if </span><span class="s1">res </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= (</span>
+                    <span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">not_group_msg</span><span class="s0">}</span><span class="s4">, but would match with `allow_unwrapped=True`&quot;</span>
+                <span class="s2">)</span>
+            <span class="s0">elif </span><span class="s1">self</span><span class="s2">.</span><span class="s1">allow_unwrapped</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">res</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">not_group_msg</span>
+            <span class="s0">return False</span>
+
+        <span class="s1">actual_exceptions</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] = </span><span class="s1">exc_val</span><span class="s2">.</span><span class="s1">exceptions</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">flatten_subgroups</span><span class="s2">:</span>
+            <span class="s1">actual_exceptions </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_unroll_exceptions</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">)</span>
+
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_match</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">):</span>
+            <span class="s1">old_reason </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason</span>
+            <span class="s0">if </span><span class="s2">(</span>
+                <span class="s1">len</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">) == </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">) == </span><span class="s5">1</span>
+                <span class="s0">and </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">expected </span><span class="s2">:= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">[</span><span class="s5">0</span><span class="s2">], </span><span class="s1">type</span><span class="s2">)</span>
+                <span class="s0">and </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">actual </span><span class="s2">:= </span><span class="s1">actual_exceptions</span><span class="s2">[</span><span class="s5">0</span><span class="s2">], </span><span class="s1">expected</span><span class="s2">)</span>
+                <span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_match</span><span class="s2">(</span><span class="s1">actual</span><span class="s2">)</span>
+            <span class="s2">):</span>
+                <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">match </span><span class="s0">is not None</span><span class="s2">, </span><span class="s4">&quot;can't be None if _check_match failed&quot;</span>
+                <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s0">is </span><span class="s1">old_reason </span><span class="s0">is not None</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">+= </span><span class="s4">f&quot;, but matched the expected </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_repr_expected</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">)</span><span class="s0">}</span><span class="s4">. You might want RaisesGroup(Matcher(</span><span class="s0">{</span><span class="s1">expected</span><span class="s2">.</span><span class="s1">__name__</span><span class="s0">}</span><span class="s4">, match=</span><span class="s0">{</span><span class="s1">_match_pattern</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">match</span><span class="s2">)</span><span class="s0">!r}</span><span class="s4">))&quot;</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">old_reason</span>
+            <span class="s0">return False</span>
+
+        <span class="s3"># do the full check on expected exceptions</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_exceptions</span><span class="s2">(</span>
+            <span class="s1">exc_val</span><span class="s2">,</span>
+            <span class="s1">actual_exceptions</span><span class="s2">,</span>
+        <span class="s2">):</span>
+            <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s0">is not None</span>
+            <span class="s1">old_reason </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason</span>
+            <span class="s3"># if we're not expecting a nested structure, and there is one, do a second</span>
+            <span class="s3"># pass where we try flattening it</span>
+            <span class="s0">if </span><span class="s2">(</span>
+                <span class="s0">not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">flatten_subgroups</span>
+                <span class="s0">and not </span><span class="s1">any</span><span class="s2">(</span>
+                    <span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">RaisesGroup</span><span class="s2">) </span><span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span>
+                <span class="s2">)</span>
+                <span class="s0">and </span><span class="s1">any</span><span class="s2">(</span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span><span class="s2">) </span><span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">actual_exceptions</span><span class="s2">)</span>
+                <span class="s0">and </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_exceptions</span><span class="s2">(</span>
+                    <span class="s1">exc_val</span><span class="s2">,</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_unroll_exceptions</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">.</span><span class="s1">exceptions</span><span class="s2">),</span>
+                <span class="s2">)</span>
+            <span class="s2">):</span>
+                <span class="s3"># only indent if it's a single-line reason. In a multi-line there's already</span>
+                <span class="s3"># indented lines that this does not belong to.</span>
+                <span class="s1">indent </span><span class="s2">= </span><span class="s4">&quot;  &quot; </span><span class="s0">if </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot; </span><span class="s0">not in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s0">else </span><span class="s4">&quot;&quot;</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= (</span>
+                    <span class="s1">old_reason</span>
+                    <span class="s2">+ </span><span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">indent</span><span class="s0">}</span><span class="s4">Did you mean to use `flatten_subgroups=True`?&quot;</span>
+                <span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">old_reason</span>
+            <span class="s0">return False</span>
+
+        <span class="s3"># Only run `self.check` once we know `exc_val` is of the correct type.</span>
+        <span class="s3"># TODO: if this fails, we should say the *group* did not match</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_check</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_check_expected</span><span class="s2">(</span>
+        <span class="s1">expected_type</span><span class="s2">: (</span>
+            <span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s1">Matcher</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">]</span>
+        <span class="s2">),</span>
+        <span class="s1">exception</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Helper method for `RaisesGroup.matches` and `RaisesGroup._check_exceptions` 
+        to check one of potentially several expected exceptions.&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">expected_type</span><span class="s2">, </span><span class="s1">type</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">_check_raw_type</span><span class="s2">(</span><span class="s1">expected_type</span><span class="s2">, </span><span class="s1">exception</span><span class="s2">)</span>
+        <span class="s1">res </span><span class="s2">= </span><span class="s1">expected_type</span><span class="s2">.</span><span class="s1">matches</span><span class="s2">(</span><span class="s1">exception</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">res</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s0">assert </span><span class="s1">expected_type</span><span class="s2">.</span><span class="s1">fail_reason </span><span class="s0">is not None</span>
+        <span class="s0">if </span><span class="s1">expected_type</span><span class="s2">.</span><span class="s1">fail_reason</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">expected_type</span><span class="s0">!r}</span><span class="s4">: </span><span class="s0">{</span><span class="s1">indent</span><span class="s2">(</span><span class="s1">expected_type</span><span class="s2">.</span><span class="s1">fail_reason</span><span class="s2">, </span><span class="s4">'  '</span><span class="s2">)</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">expected_type</span><span class="s0">!r}</span><span class="s4">: </span><span class="s0">{</span><span class="s1">expected_type</span><span class="s2">.</span><span class="s1">fail_reason</span><span class="s0">}</span><span class="s4">&quot;</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_repr_expected</span><span class="s2">(</span><span class="s1">e</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s1">AbstractMatcher</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">]) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Get the repr of an expected type/Matcher/RaisesGroup, but we only want 
+        the name if it's a type&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">type</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">_exception_type_name</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">e</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">_check_exceptions</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">],</span>
+        <span class="s1">_exc_val</span><span class="s2">: </span><span class="s1">Exception</span><span class="s2">,</span>
+        <span class="s1">actual_exceptions</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">Exception</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">ExceptionGroup</span><span class="s2">[</span><span class="s1">ExcT_1</span><span class="s2">]]: ...</span>
+    <span class="s2">@</span><span class="s1">overload</span>
+    <span class="s0">def </span><span class="s1">_check_exceptions</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">RaisesGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">],</span>
+        <span class="s1">_exc_val</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+        <span class="s1">actual_exceptions</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_1</span><span class="s2">]]: ...</span>
+
+    <span class="s0">def </span><span class="s1">_check_exceptions</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">_exc_val</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+        <span class="s1">actual_exceptions</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; TypeGuard</span><span class="s2">[</span><span class="s1">BaseExceptionGroup</span><span class="s2">[</span><span class="s1">BaseExcT_co</span><span class="s2">]]:</span>
+        <span class="s6">&quot;&quot;&quot;helper method for RaisesGroup.matches that attempts to pair up expected and actual exceptions&quot;&quot;&quot;</span>
+        <span class="s3"># full table with all results</span>
+        <span class="s1">results </span><span class="s2">= </span><span class="s1">ResultHolder</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">, </span><span class="s1">actual_exceptions</span><span class="s2">)</span>
+
+        <span class="s3"># (indexes of) raised exceptions that haven't (yet) found an expected</span>
+        <span class="s1">remaining_actual </span><span class="s2">= </span><span class="s1">list</span><span class="s2">(</span><span class="s1">range</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">)))</span>
+        <span class="s3"># (indexes of) expected exceptions that haven't found a matching raised</span>
+        <span class="s1">failed_expected</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">int</span><span class="s2">] = []</span>
+        <span class="s3"># successful greedy matches</span>
+        <span class="s1">matches</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] = {}</span>
+
+        <span class="s3"># loop over expected exceptions first to get a more predictable result</span>
+        <span class="s0">for </span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">expected </span><span class="s0">in </span><span class="s1">enumerate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">):</span>
+            <span class="s0">for </span><span class="s1">i_rem </span><span class="s0">in </span><span class="s1">remaining_actual</span><span class="s2">:</span>
+                <span class="s1">res </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_expected</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">, </span><span class="s1">actual_exceptions</span><span class="s2">[</span><span class="s1">i_rem</span><span class="s2">])</span>
+                <span class="s1">results</span><span class="s2">.</span><span class="s1">set_result</span><span class="s2">(</span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">i_rem</span><span class="s2">, </span><span class="s1">res</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">res </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s1">remaining_actual</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">i_rem</span><span class="s2">)</span>
+                    <span class="s1">matches</span><span class="s2">[</span><span class="s1">i_exp</span><span class="s2">] = </span><span class="s1">i_rem</span>
+                    <span class="s0">break</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">failed_expected</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">i_exp</span><span class="s2">)</span>
+
+        <span class="s3"># All exceptions matched up successfully</span>
+        <span class="s0">if not </span><span class="s1">remaining_actual </span><span class="s0">and not </span><span class="s1">failed_expected</span><span class="s2">:</span>
+            <span class="s0">return True</span>
+
+        <span class="s3"># in case of a single expected and single raised we simplify the output</span>
+        <span class="s0">if </span><span class="s5">1 </span><span class="s2">== </span><span class="s1">len</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">) == </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">):</span>
+            <span class="s0">assert not </span><span class="s1">matches</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">res</span>
+            <span class="s0">return False</span>
+
+        <span class="s3"># The test case is failing, so we can do a slow and exhaustive check to find</span>
+        <span class="s3"># duplicate matches etc that will be helpful in debugging</span>
+        <span class="s0">for </span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">expected </span><span class="s0">in </span><span class="s1">enumerate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">):</span>
+            <span class="s0">for </span><span class="s1">i_actual</span><span class="s2">, </span><span class="s1">actual </span><span class="s0">in </span><span class="s1">enumerate</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">):</span>
+                <span class="s0">if </span><span class="s1">results</span><span class="s2">.</span><span class="s1">has_result</span><span class="s2">(</span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">i_actual</span><span class="s2">):</span>
+                    <span class="s0">continue</span>
+                <span class="s1">results</span><span class="s2">.</span><span class="s1">set_result</span><span class="s2">(</span>
+                    <span class="s1">i_exp</span><span class="s2">, </span><span class="s1">i_actual</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_check_expected</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">, </span><span class="s1">actual</span><span class="s2">)</span>
+                <span class="s2">)</span>
+
+        <span class="s1">successful_str </span><span class="s2">= (</span>
+            <span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">len</span><span class="s2">(</span><span class="s1">matches</span><span class="s2">)</span><span class="s0">} </span><span class="s4">matched exception</span><span class="s0">{</span><span class="s4">'s' </span><span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">matches</span><span class="s2">) &gt; </span><span class="s5">1 </span><span class="s0">else </span><span class="s4">''</span><span class="s0">}</span><span class="s4">. &quot;</span>
+            <span class="s0">if </span><span class="s1">matches</span>
+            <span class="s0">else </span><span class="s4">&quot;&quot;</span>
+        <span class="s2">)</span>
+
+        <span class="s3"># all expected were found</span>
+        <span class="s0">if not </span><span class="s1">failed_expected </span><span class="s0">and </span><span class="s1">results</span><span class="s2">.</span><span class="s1">no_match_for_actual</span><span class="s2">(</span><span class="s1">remaining_actual</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">successful_str</span><span class="s0">}</span><span class="s4">Unexpected exception(s): </span><span class="s0">{</span><span class="s2">[</span><span class="s1">actual_exceptions</span><span class="s2">[</span><span class="s1">i</span><span class="s2">] </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">remaining_actual</span><span class="s2">]</span><span class="s0">!r}</span><span class="s4">&quot;</span>
+            <span class="s0">return False</span>
+        <span class="s3"># all raised exceptions were expected</span>
+        <span class="s0">if not </span><span class="s1">remaining_actual </span><span class="s0">and </span><span class="s1">results</span><span class="s2">.</span><span class="s1">no_match_for_expected</span><span class="s2">(</span><span class="s1">failed_expected</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">successful_str</span><span class="s0">}</span><span class="s4">Too few exceptions raised, found no match for: [</span><span class="s0">{</span><span class="s4">', '</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_repr_expected</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">[</span><span class="s1">i</span><span class="s2">]) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">failed_expected</span><span class="s2">)</span><span class="s0">}</span><span class="s4">]&quot;</span>
+            <span class="s0">return False</span>
+
+        <span class="s3"># if there's only one remaining and one failed, and the unmatched didn't match anything else,</span>
+        <span class="s3"># we elect to only print why the remaining and the failed didn't match.</span>
+        <span class="s0">if </span><span class="s2">(</span>
+            <span class="s5">1 </span><span class="s2">== </span><span class="s1">len</span><span class="s2">(</span><span class="s1">remaining_actual</span><span class="s2">) == </span><span class="s1">len</span><span class="s2">(</span><span class="s1">failed_expected</span><span class="s2">)</span>
+            <span class="s0">and </span><span class="s1">results</span><span class="s2">.</span><span class="s1">no_match_for_actual</span><span class="s2">(</span><span class="s1">remaining_actual</span><span class="s2">)</span>
+            <span class="s0">and </span><span class="s1">results</span><span class="s2">.</span><span class="s1">no_match_for_expected</span><span class="s2">(</span><span class="s1">failed_expected</span><span class="s2">)</span>
+        <span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">successful_str</span><span class="s0">}{</span><span class="s1">results</span><span class="s2">.</span><span class="s1">get_result</span><span class="s2">(</span><span class="s1">failed_expected</span><span class="s2">[</span><span class="s5">0</span><span class="s2">], </span><span class="s1">remaining_actual</span><span class="s2">[</span><span class="s5">0</span><span class="s2">])</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s0">return False</span>
+
+        <span class="s3"># there's both expected and raised exceptions without matches</span>
+        <span class="s1">s </span><span class="s2">= </span><span class="s4">&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">matches</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">successful_str</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s1">indent_1 </span><span class="s2">= </span><span class="s4">&quot; &quot; </span><span class="s2">* </span><span class="s5">2</span>
+        <span class="s1">indent_2 </span><span class="s2">= </span><span class="s4">&quot; &quot; </span><span class="s2">* </span><span class="s5">4</span>
+
+        <span class="s0">if not </span><span class="s1">remaining_actual</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">Too few exceptions raised!&quot;</span>
+        <span class="s0">elif not </span><span class="s1">failed_expected</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">Unexpected exception(s)!&quot;</span>
+
+        <span class="s0">if </span><span class="s1">failed_expected</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">The following expected exceptions did not find a match:&quot;</span>
+            <span class="s1">rev_matches </span><span class="s2">= {</span><span class="s1">v</span><span class="s2">: </span><span class="s1">k </span><span class="s0">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">matches</span><span class="s2">.</span><span class="s1">items</span><span class="s2">()}</span>
+        <span class="s0">for </span><span class="s1">i_failed </span><span class="s0">in </span><span class="s1">failed_expected</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= (</span>
+                <span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">indent_1</span><span class="s0">}{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_repr_expected</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">[</span><span class="s1">i_failed</span><span class="s2">])</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s2">)</span>
+            <span class="s0">for </span><span class="s1">i_actual</span><span class="s2">, </span><span class="s1">actual </span><span class="s0">in </span><span class="s1">enumerate</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">):</span>
+                <span class="s0">if </span><span class="s1">results</span><span class="s2">.</span><span class="s1">get_result</span><span class="s2">(</span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">i_actual</span><span class="s2">) </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s3"># we print full repr of match target</span>
+                    <span class="s1">s </span><span class="s2">+= </span><span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">indent_2</span><span class="s0">}</span><span class="s4">It matches </span><span class="s0">{</span><span class="s1">actual</span><span class="s0">!r} </span><span class="s4">which was paired with </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_repr_expected</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">[</span><span class="s1">rev_matches</span><span class="s2">[</span><span class="s1">i_actual</span><span class="s2">]])</span><span class="s0">}</span><span class="s4">&quot;</span>
+
+        <span class="s0">if </span><span class="s1">remaining_actual</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">The following raised exceptions did not find a match&quot;</span>
+        <span class="s0">for </span><span class="s1">i_actual </span><span class="s0">in </span><span class="s1">remaining_actual</span><span class="s2">:</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">indent_1</span><span class="s0">}{</span><span class="s1">actual_exceptions</span><span class="s2">[</span><span class="s1">i_actual</span><span class="s2">]</span><span class="s0">!r}</span><span class="s4">:&quot;</span>
+            <span class="s0">for </span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">expected </span><span class="s0">in </span><span class="s1">enumerate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">):</span>
+                <span class="s1">res </span><span class="s2">= </span><span class="s1">results</span><span class="s2">.</span><span class="s1">get_result</span><span class="s2">(</span><span class="s1">i_exp</span><span class="s2">, </span><span class="s1">i_actual</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">i_exp </span><span class="s0">in </span><span class="s1">failed_expected</span><span class="s2">:</span>
+                    <span class="s0">assert </span><span class="s1">res </span><span class="s0">is not None</span>
+                    <span class="s0">if </span><span class="s1">res</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] != </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s2">:</span>
+                        <span class="s1">s </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span>
+                    <span class="s1">s </span><span class="s2">+= </span><span class="s1">indent</span><span class="s2">(</span><span class="s1">res</span><span class="s2">, </span><span class="s1">indent_2</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">res </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s3"># we print full repr of match target</span>
+                    <span class="s1">s </span><span class="s2">+= </span><span class="s4">f&quot;</span><span class="s0">\n{</span><span class="s1">indent_2</span><span class="s0">}</span><span class="s4">It matches </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_repr_expected</span><span class="s2">(</span><span class="s1">expected</span><span class="s2">)</span><span class="s0">} </span><span class="s4">which was paired with </span><span class="s0">{</span><span class="s1">actual_exceptions</span><span class="s2">[</span><span class="s1">matches</span><span class="s2">[</span><span class="s1">i_exp</span><span class="s2">]]</span><span class="s0">!r}</span><span class="s4">&quot;</span>
+
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">) == </span><span class="s1">len</span><span class="s2">(</span><span class="s1">actual_exceptions</span><span class="s2">) </span><span class="s0">and </span><span class="s1">possible_match</span><span class="s2">(</span>
+            <span class="s1">results</span>
+        <span class="s2">):</span>
+            <span class="s1">s </span><span class="s2">+= </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">There exist a possible match when attempting an exhaustive check, but RaisesGroup uses a greedy algorithm. Please make your expected exceptions more stringent with `Matcher` etc so the greedy algorithm can function.&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason </span><span class="s2">= </span><span class="s1">s</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">def </span><span class="s1">__exit__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">exc_type</span><span class="s2">: </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">exc_val</span><span class="s2">: </span><span class="s1">BaseException </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">exc_tb</span><span class="s2">: </span><span class="s1">types</span><span class="s2">.</span><span class="s1">TracebackType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s1">__tracebackhide__ </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">assert </span><span class="s2">(</span>
+            <span class="s1">exc_type </span><span class="s0">is not None</span>
+        <span class="s2">), </span><span class="s4">f&quot;DID NOT RAISE any exception, expected </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_type</span><span class="s2">()</span><span class="s0">}</span><span class="s4">&quot;</span>
+        <span class="s0">assert </span><span class="s2">(</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">excinfo </span><span class="s0">is not None</span>
+        <span class="s2">), </span><span class="s4">&quot;Internal error - should have been constructed in __enter__&quot;</span>
+
+        <span class="s1">group_str </span><span class="s2">= (</span>
+            <span class="s4">&quot;(group)&quot;</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">allow_unwrapped </span><span class="s0">and not </span><span class="s1">issubclass</span><span class="s2">(</span><span class="s1">exc_type</span><span class="s2">, </span><span class="s1">BaseExceptionGroup</span><span class="s2">)</span>
+            <span class="s0">else </span><span class="s4">&quot;group&quot;</span>
+        <span class="s2">)</span>
+
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">matches</span><span class="s2">(</span>
+            <span class="s1">exc_val</span><span class="s2">,</span>
+        <span class="s2">), </span><span class="s4">f&quot;Raised exception </span><span class="s0">{</span><span class="s1">group_str</span><span class="s0">} </span><span class="s4">did not match: </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fail_reason</span><span class="s0">}</span><span class="s4">&quot;</span>
+
+        <span class="s3"># Cast to narrow the exception type now that it's verified.</span>
+        <span class="s1">exc_info </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span>
+            <span class="s4">&quot;tuple[type[BaseExceptionGroup[BaseExcT_co]], BaseExceptionGroup[BaseExcT_co], types.TracebackType]&quot;</span><span class="s2">,</span>
+            <span class="s2">(</span><span class="s1">exc_type</span><span class="s2">, </span><span class="s1">exc_val</span><span class="s2">, </span><span class="s1">exc_tb</span><span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">fill_unfilled</span><span class="s2">(</span><span class="s1">exc_info</span><span class="s2">)</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">def </span><span class="s1">expected_type</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">subexcs </span><span class="s2">= []</span>
+        <span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">expected_exceptions</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">Matcher</span><span class="s2">):</span>
+                <span class="s1">subexcs</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">str</span><span class="s2">(</span><span class="s1">e</span><span class="s2">))</span>
+            <span class="s0">elif </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">RaisesGroup</span><span class="s2">):</span>
+                <span class="s1">subexcs</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">e</span><span class="s2">.</span><span class="s1">expected_type</span><span class="s2">())</span>
+            <span class="s0">elif </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">e</span><span class="s2">, </span><span class="s1">type</span><span class="s2">):</span>
+                <span class="s1">subexcs</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">e</span><span class="s2">.</span><span class="s1">__name__</span><span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+                <span class="s0">raise </span><span class="s1">AssertionError</span><span class="s2">(</span><span class="s4">&quot;unknown type&quot;</span><span class="s2">)</span>
+        <span class="s1">group_type </span><span class="s2">= </span><span class="s4">&quot;Base&quot; </span><span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">is_baseexceptiongroup </span><span class="s0">else </span><span class="s4">&quot;&quot;</span>
+        <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">group_type</span><span class="s0">}</span><span class="s4">ExceptionGroup(</span><span class="s0">{</span><span class="s4">', '</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">subexcs</span><span class="s2">)</span><span class="s0">}</span><span class="s4">)&quot;</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">NotChecked</span><span class="s2">: ...</span>
+
+
+<span class="s0">class </span><span class="s1">ResultHolder</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">expected_exceptions</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span>
+            <span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] | </span><span class="s1">AbstractMatcher</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">], ...</span>
+        <span class="s2">],</span>
+        <span class="s1">actual_exceptions</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">results</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">list</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s1">type</span><span class="s2">[</span><span class="s1">NotChecked</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">]] = [</span>
+            <span class="s2">[</span><span class="s1">NotChecked </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">expected_exceptions</span><span class="s2">] </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">actual_exceptions</span>
+        <span class="s2">]</span>
+
+    <span class="s0">def </span><span class="s1">set_result</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">actual</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">result</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">results</span><span class="s2">[</span><span class="s1">actual</span><span class="s2">][</span><span class="s1">expected</span><span class="s2">] = </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">get_result</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">actual</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">res </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">results</span><span class="s2">[</span><span class="s1">actual</span><span class="s2">][</span><span class="s1">expected</span><span class="s2">]</span>
+        <span class="s3"># mypy doesn't support `assert res is not NotChecked`</span>
+        <span class="s0">assert not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">res</span><span class="s2">, </span><span class="s1">type</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">res</span>
+
+    <span class="s0">def </span><span class="s1">has_result</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">actual</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">results</span><span class="s2">[</span><span class="s1">actual</span><span class="s2">][</span><span class="s1">expected</span><span class="s2">] </span><span class="s0">is not </span><span class="s1">NotChecked</span>
+
+    <span class="s0">def </span><span class="s1">no_match_for_expected</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">expected</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">actual_results </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">results</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">actual_results</span><span class="s2">[</span><span class="s1">i</span><span class="s2">] </span><span class="s0">is not </span><span class="s1">NotChecked</span>
+                <span class="s0">if </span><span class="s1">actual_results</span><span class="s2">[</span><span class="s1">i</span><span class="s2">] </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s0">return False</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">def </span><span class="s1">no_match_for_actual</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">actual</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">int</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">actual</span><span class="s2">:</span>
+            <span class="s0">for </span><span class="s1">res </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">results</span><span class="s2">[</span><span class="s1">i</span><span class="s2">]:</span>
+                <span class="s0">assert </span><span class="s1">res </span><span class="s0">is not </span><span class="s1">NotChecked</span>
+                <span class="s0">if </span><span class="s1">res </span><span class="s0">is None</span><span class="s2">:</span>
+                    <span class="s0">return False</span>
+        <span class="s0">return True</span>
+
+
+<span class="s0">def </span><span class="s1">possible_match</span><span class="s2">(</span><span class="s1">results</span><span class="s2">: </span><span class="s1">ResultHolder</span><span class="s2">, </span><span class="s1">used</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">int</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">used </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s1">used </span><span class="s2">= </span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s1">curr_row </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">used</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">curr_row </span><span class="s2">== </span><span class="s1">len</span><span class="s2">(</span><span class="s1">results</span><span class="s2">.</span><span class="s1">results</span><span class="s2">):</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">val </span><span class="s0">in </span><span class="s1">enumerate</span><span class="s2">(</span><span class="s1">results</span><span class="s2">.</span><span class="s1">results</span><span class="s2">[</span><span class="s1">curr_row</span><span class="s2">]):</span>
+        <span class="s0">if </span><span class="s1">val </span><span class="s0">is None and </span><span class="s1">i </span><span class="s0">not in </span><span class="s1">used </span><span class="s0">and </span><span class="s1">possible_match</span><span class="s2">(</span><span class="s1">results</span><span class="s2">, </span><span class="s1">used </span><span class="s2">| {</span><span class="s1">i</span><span class="s2">}):</span>
+            <span class="s0">return True</span>
+    <span class="s0">return False</span>
+</pre>
+</body>
+</html>

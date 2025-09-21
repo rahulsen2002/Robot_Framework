@@ -1,0 +1,572 @@
+<html>
+<head>
+<title>_embedding.h</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #bcbec4;}
+.s1 { color: #7a7e85;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #6aab73;}
+.s4 { color: #2aacb8;}
+.s5 { color: #0da19e;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_embedding.h</font>
+</center></td></tr></table>
+<pre>
+<span class="s1">/***** Support code for embedding *****/</span>
+
+<span class="s2">#ifdef </span><span class="s0">__cplusplus</span>
+<span class="s2">extern </span><span class="s3">&quot;C&quot; </span><span class="s0">{</span>
+<span class="s2">#endif</span>
+
+
+<span class="s2">#if </span><span class="s0">defined(_WIN32)</span>
+<span class="s0">#  define CFFI_DLLEXPORT  __declspec(dllexport)</span>
+<span class="s0">#elif defined(__GNUC__)</span>
+<span class="s0">#  define CFFI_DLLEXPORT  __attribute__((visibility(</span><span class="s3">&quot;default&quot;</span><span class="s0">)))</span>
+<span class="s2">#else</span>
+<span class="s0">#  define CFFI_DLLEXPORT  </span><span class="s1">/* nothing */</span>
+<span class="s2">#endif</span>
+
+
+<span class="s1">/* There are two global variables of type _cffi_call_python_fnptr: 
+ 
+   * _cffi_call_python, which we declare just below, is the one called 
+     by ``extern &quot;Python&quot;`` implementations. 
+ 
+   * _cffi_call_python_org, which on CPython is actually part of the 
+     _cffi_exports[] array, is the function pointer copied from 
+     _cffi_backend.  If _cffi_start_python() fails, then this is set 
+     to NULL; otherwise, it should never be NULL. 
+ 
+   After initialization is complete, both are equal.  However, the 
+   first one remains equal to &amp;_cffi_start_and_call_python until the 
+   very end of initialization, when we are (or should be) sure that 
+   concurrent threads also see a completely initialized world, and 
+   only then is it changed. 
+*/</span>
+<span class="s2">#undef </span><span class="s0">_cffi_call_python</span>
+<span class="s2">typedef void </span><span class="s0">(*_cffi_call_python_fnptr)(</span><span class="s2">struct </span><span class="s0">_cffi_externpy_s *, </span><span class="s2">char </span><span class="s0">*);</span>
+<span class="s2">static void </span><span class="s0">_cffi_start_and_call_python(</span><span class="s2">struct </span><span class="s0">_cffi_externpy_s *, </span><span class="s2">char </span><span class="s0">*);</span>
+<span class="s2">static </span><span class="s0">_cffi_call_python_fnptr _cffi_call_python = &amp;_cffi_start_and_call_python;</span>
+
+
+<span class="s2">#ifndef </span><span class="s0">_MSC_VER</span>
+   <span class="s1">/* --- Assuming a GCC not infinitely old --- */</span>
+<span class="s0"># define cffi_compare_and_swap(l,o,n)  __sync_bool_compare_and_swap(l,o,n)</span>
+<span class="s0"># define cffi_write_barrier()          __sync_synchronize()</span>
+<span class="s0"># </span><span class="s2">if </span><span class="s0">!defined(__amd64__) &amp;&amp; !defined(__x86_64__) &amp;&amp;   \</span>
+     <span class="s0">!defined(__i386__) &amp;&amp; !defined(__i386)</span>
+<span class="s0">#   define cffi_read_barrier()         __sync_synchronize()</span>
+<span class="s0"># </span><span class="s2">else</span>
+<span class="s0">#   define cffi_read_barrier()         (</span><span class="s2">void</span><span class="s0">)</span><span class="s4">0</span>
+<span class="s0"># endif</span>
+<span class="s2">#else</span>
+   <span class="s1">/* --- Windows threads version --- */</span>
+<span class="s0"># include &lt;Windows.h&gt;</span>
+<span class="s0"># define cffi_compare_and_swap(l,o,n) \</span>
+                               <span class="s0">(InterlockedCompareExchangePointer(l,n,o) == (o))</span>
+<span class="s0"># define cffi_write_barrier()       InterlockedCompareExchange(&amp;_cffi_dummy,</span><span class="s4">0</span><span class="s0">,</span><span class="s4">0</span><span class="s0">)</span>
+<span class="s0"># define cffi_read_barrier()           (</span><span class="s2">void</span><span class="s0">)</span><span class="s4">0</span>
+<span class="s2">static volatile </span><span class="s0">LONG _cffi_dummy;</span>
+<span class="s2">#endif</span>
+
+<span class="s2">#ifdef </span><span class="s0">WITH_THREAD</span>
+<span class="s0"># ifndef _MSC_VER</span>
+<span class="s0">#  include &lt;pthread.h&gt;</span>
+   <span class="s2">static </span><span class="s0">pthread_mutex_t _cffi_embed_startup_lock;</span>
+<span class="s0"># </span><span class="s2">else</span>
+   <span class="s2">static </span><span class="s0">CRITICAL_SECTION _cffi_embed_startup_lock;</span>
+<span class="s0"># endif</span>
+  <span class="s2">static char </span><span class="s0">_cffi_embed_startup_lock_ready = </span><span class="s4">0</span><span class="s0">;</span>
+<span class="s2">#endif</span>
+
+<span class="s2">static void </span><span class="s0">_cffi_acquire_reentrant_mutex(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s2">static void </span><span class="s0">*</span><span class="s2">volatile </span><span class="s0">lock = NULL;</span>
+
+    <span class="s2">while </span><span class="s0">(!cffi_compare_and_swap(&amp;lock, NULL, (</span><span class="s2">void </span><span class="s0">*)</span><span class="s4">1</span><span class="s0">)) {</span>
+        <span class="s1">/* should ideally do a spin loop instruction here, but 
+           hard to do it portably and doesn't really matter I 
+           think: pthread_mutex_init() should be very fast, and 
+           this is only run at start-up anyway. */</span>
+    <span class="s0">}</span>
+
+<span class="s2">#ifdef </span><span class="s0">WITH_THREAD</span>
+    <span class="s2">if </span><span class="s0">(!_cffi_embed_startup_lock_ready) {</span>
+<span class="s0"># ifndef _MSC_VER</span>
+        <span class="s0">pthread_mutexattr_t attr;</span>
+        <span class="s0">pthread_mutexattr_init(&amp;attr);</span>
+        <span class="s0">pthread_mutexattr_settype(&amp;attr, PTHREAD_MUTEX_RECURSIVE);</span>
+        <span class="s0">pthread_mutex_init(&amp;_cffi_embed_startup_lock, &amp;attr);</span>
+<span class="s0"># </span><span class="s2">else</span>
+        <span class="s0">InitializeCriticalSection(&amp;_cffi_embed_startup_lock);</span>
+<span class="s0"># endif</span>
+        <span class="s0">_cffi_embed_startup_lock_ready = </span><span class="s4">1</span><span class="s0">;</span>
+    <span class="s0">}</span>
+<span class="s2">#endif</span>
+
+    <span class="s2">while </span><span class="s0">(!cffi_compare_and_swap(&amp;lock, (</span><span class="s2">void </span><span class="s0">*)</span><span class="s4">1</span><span class="s0">, NULL))</span>
+        <span class="s0">;</span>
+
+<span class="s2">#ifndef </span><span class="s0">_MSC_VER</span>
+    <span class="s0">pthread_mutex_lock(&amp;_cffi_embed_startup_lock);</span>
+<span class="s2">#else</span>
+    <span class="s0">EnterCriticalSection(&amp;_cffi_embed_startup_lock);</span>
+<span class="s2">#endif</span>
+<span class="s0">}</span>
+
+<span class="s2">static void </span><span class="s0">_cffi_release_reentrant_mutex(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+<span class="s2">#ifndef </span><span class="s0">_MSC_VER</span>
+    <span class="s0">pthread_mutex_unlock(&amp;_cffi_embed_startup_lock);</span>
+<span class="s2">#else</span>
+    <span class="s0">LeaveCriticalSection(&amp;_cffi_embed_startup_lock);</span>
+<span class="s2">#endif</span>
+<span class="s0">}</span>
+
+
+<span class="s1">/**********  CPython-specific section  **********/</span>
+<span class="s2">#ifndef </span><span class="s0">PYPY_VERSION</span>
+
+<span class="s2">#include </span><span class="s3">&quot;_cffi_errors.h&quot;</span>
+
+
+<span class="s2">#define </span><span class="s0">_cffi_call_python_org  _cffi_exports[_CFFI_CPIDX]</span>
+
+<span class="s0">PyMODINIT_FUNC _CFFI_PYTHON_STARTUP_FUNC(</span><span class="s2">void</span><span class="s0">);   </span><span class="s1">/* forward */</span>
+
+<span class="s2">static void </span><span class="s0">_cffi_py_initialize(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s1">/* XXX use initsigs=0, which &quot;skips initialization registration of 
+       signal handlers, which might be useful when Python is 
+       embedded&quot; according to the Python docs.  But review and think 
+       if it should be a user-controllable setting. 
+ 
+       XXX we should also give a way to write errors to a buffer 
+       instead of to stderr. 
+ 
+       XXX if importing 'site' fails, CPython (any version) calls 
+       exit().  Should we try to work around this behavior here? 
+    */</span>
+    <span class="s0">Py_InitializeEx(</span><span class="s4">0</span><span class="s0">);</span>
+<span class="s0">}</span>
+
+<span class="s2">static int </span><span class="s0">_cffi_initialize_python(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s1">/* This initializes Python, imports _cffi_backend, and then the 
+       present .dll/.so is set up as a CPython C extension module. 
+    */</span>
+    <span class="s2">int </span><span class="s0">result;</span>
+    <span class="s0">PyGILState_STATE state;</span>
+    <span class="s0">PyObject *pycode=NULL, *global_dict=NULL, *x;</span>
+    <span class="s0">PyObject *builtins;</span>
+
+    <span class="s0">state = PyGILState_Ensure();</span>
+
+    <span class="s1">/* Call the initxxx() function from the present module.  It will 
+       create and initialize us as a CPython extension module, instead 
+       of letting the startup Python code do it---it might reimport 
+       the same .dll/.so and get maybe confused on some platforms. 
+       It might also have troubles locating the .dll/.so again for all 
+       I know. 
+    */</span>
+    <span class="s0">(</span><span class="s2">void</span><span class="s0">)_CFFI_PYTHON_STARTUP_FUNC();</span>
+    <span class="s2">if </span><span class="s0">(PyErr_Occurred())</span>
+        <span class="s2">goto </span><span class="s0">error;</span>
+
+    <span class="s1">/* Now run the Python code provided to ffi.embedding_init_code(). 
+     */</span>
+    <span class="s0">pycode = Py_CompileString(_CFFI_PYTHON_STARTUP_CODE,</span>
+                              <span class="s3">&quot;&lt;init code for '&quot; </span><span class="s0">_CFFI_MODULE_NAME </span><span class="s3">&quot;'&gt;&quot;</span><span class="s0">,</span>
+                              <span class="s0">Py_file_input);</span>
+    <span class="s2">if </span><span class="s0">(pycode == NULL)</span>
+        <span class="s2">goto </span><span class="s0">error;</span>
+    <span class="s0">global_dict = PyDict_New();</span>
+    <span class="s2">if </span><span class="s0">(global_dict == NULL)</span>
+        <span class="s2">goto </span><span class="s0">error;</span>
+    <span class="s0">builtins = PyEval_GetBuiltins();</span>
+    <span class="s2">if </span><span class="s0">(builtins == NULL)</span>
+        <span class="s2">goto </span><span class="s0">error;</span>
+    <span class="s2">if </span><span class="s0">(PyDict_SetItemString(global_dict, </span><span class="s3">&quot;__builtins__&quot;</span><span class="s0">, builtins) &lt; </span><span class="s4">0</span><span class="s0">)</span>
+        <span class="s2">goto </span><span class="s0">error;</span>
+    <span class="s0">x = PyEval_EvalCode(</span>
+<span class="s2">#if </span><span class="s0">PY_MAJOR_VERSION &lt; </span><span class="s4">3</span>
+                        <span class="s0">(PyCodeObject *)</span>
+<span class="s2">#endif</span>
+                        <span class="s0">pycode, global_dict, global_dict);</span>
+    <span class="s2">if </span><span class="s0">(x == NULL)</span>
+        <span class="s2">goto </span><span class="s0">error;</span>
+    <span class="s0">Py_DECREF(x);</span>
+
+    <span class="s1">/* Done!  Now if we've been called from 
+       _cffi_start_and_call_python() in an ``extern &quot;Python&quot;``, we can 
+       only hope that the Python code did correctly set up the 
+       corresponding @ffi.def_extern() function.  Otherwise, the 
+       general logic of ``extern &quot;Python&quot;`` functions (inside the 
+       _cffi_backend module) will find that the reference is still 
+       missing and print an error. 
+     */</span>
+    <span class="s0">result = </span><span class="s4">0</span><span class="s0">;</span>
+ <span class="s0">done:</span>
+    <span class="s0">Py_XDECREF(pycode);</span>
+    <span class="s0">Py_XDECREF(global_dict);</span>
+    <span class="s0">PyGILState_Release(state);</span>
+    <span class="s2">return </span><span class="s0">result;</span>
+
+ <span class="s0">error:;</span>
+    <span class="s0">{</span>
+        <span class="s1">/* Print as much information as potentially useful. 
+           Debugging load-time failures with embedding is not fun 
+        */</span>
+        <span class="s0">PyObject *ecap;</span>
+        <span class="s0">PyObject *exception, *v, *tb, *f, *modules, *mod;</span>
+        <span class="s0">PyErr_Fetch(&amp;exception, &amp;v, &amp;tb);</span>
+        <span class="s0">ecap = _cffi_start_error_capture();</span>
+        <span class="s0">f = PySys_GetObject((</span><span class="s2">char </span><span class="s0">*)</span><span class="s3">&quot;stderr&quot;</span><span class="s0">);</span>
+        <span class="s2">if </span><span class="s0">(f != NULL &amp;&amp; f != Py_None) {</span>
+            <span class="s0">PyFile_WriteString(</span>
+                <span class="s3">&quot;Failed to initialize the Python-CFFI embedding logic:</span><span class="s2">\n\n</span><span class="s3">&quot;</span><span class="s0">, f);</span>
+        <span class="s0">}</span>
+
+        <span class="s2">if </span><span class="s0">(exception != NULL) {</span>
+            <span class="s0">PyErr_NormalizeException(&amp;exception, &amp;v, &amp;tb);</span>
+            <span class="s0">PyErr_Display(exception, v, tb);</span>
+        <span class="s0">}</span>
+        <span class="s0">Py_XDECREF(exception);</span>
+        <span class="s0">Py_XDECREF(v);</span>
+        <span class="s0">Py_XDECREF(tb);</span>
+
+        <span class="s2">if </span><span class="s0">(f != NULL &amp;&amp; f != Py_None) {</span>
+            <span class="s0">PyFile_WriteString(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">From: &quot; </span><span class="s0">_CFFI_MODULE_NAME</span>
+                               <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">compiled with cffi version: 2.0.0&quot;</span>
+                               <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">_cffi_backend module: &quot;</span><span class="s0">, f);</span>
+            <span class="s0">modules = PyImport_GetModuleDict();</span>
+            <span class="s0">mod = PyDict_GetItemString(modules, </span><span class="s3">&quot;_cffi_backend&quot;</span><span class="s0">);</span>
+            <span class="s2">if </span><span class="s0">(mod == NULL) {</span>
+                <span class="s0">PyFile_WriteString(</span><span class="s3">&quot;not loaded&quot;</span><span class="s0">, f);</span>
+            <span class="s0">}</span>
+            <span class="s2">else </span><span class="s0">{</span>
+                <span class="s0">v = PyObject_GetAttrString(mod, </span><span class="s3">&quot;__file__&quot;</span><span class="s0">);</span>
+                <span class="s0">PyFile_WriteObject(v, f, </span><span class="s4">0</span><span class="s0">);</span>
+                <span class="s0">Py_XDECREF(v);</span>
+            <span class="s0">}</span>
+            <span class="s0">PyFile_WriteString(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">sys.path: &quot;</span><span class="s0">, f);</span>
+            <span class="s0">PyFile_WriteObject(PySys_GetObject((</span><span class="s2">char </span><span class="s0">*)</span><span class="s3">&quot;path&quot;</span><span class="s0">), f, </span><span class="s4">0</span><span class="s0">);</span>
+            <span class="s0">PyFile_WriteString(</span><span class="s3">&quot;</span><span class="s2">\n\n</span><span class="s3">&quot;</span><span class="s0">, f);</span>
+        <span class="s0">}</span>
+        <span class="s0">_cffi_stop_error_capture(ecap);</span>
+    <span class="s0">}</span>
+    <span class="s0">result = -</span><span class="s4">1</span><span class="s0">;</span>
+    <span class="s2">goto </span><span class="s0">done;</span>
+<span class="s0">}</span>
+
+<span class="s2">#if </span><span class="s0">PY_VERSION_HEX &lt; </span><span class="s4">0x03080000</span>
+<span class="s0">PyAPI_DATA(</span><span class="s2">char </span><span class="s0">*) _PyParser_TokenNames[];  </span><span class="s1">/* from CPython */</span>
+<span class="s2">#endif</span>
+
+<span class="s2">static int </span><span class="s0">_cffi_carefully_make_gil(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s1">/* This does the basic initialization of Python.  It can be called 
+       completely concurrently from unrelated threads.  It assumes 
+       that we don't hold the GIL before (if it exists), and we don't 
+       hold it afterwards. 
+ 
+       (What it really does used to be completely different in Python 2 
+       and Python 3, with the Python 2 solution avoiding the spin-lock 
+       around the Py_InitializeEx() call.  However, after recent changes 
+       to CPython 2.7 (issue #358) it no longer works.  So we use the 
+       Python 3 solution everywhere.) 
+ 
+       This initializes Python by calling Py_InitializeEx(). 
+       Important: this must not be called concurrently at all. 
+       So we use a global variable as a simple spin lock.  This global 
+       variable must be from 'libpythonX.Y.so', not from this 
+       cffi-based extension module, because it must be shared from 
+       different cffi-based extension modules. 
+ 
+       In Python &lt; 3.8, we choose 
+       _PyParser_TokenNames[0] as a completely arbitrary pointer value 
+       that is never written to.  The default is to point to the 
+       string &quot;ENDMARKER&quot;.  We change it temporarily to point to the 
+       next character in that string.  (Yes, I know it's REALLY 
+       obscure.) 
+ 
+       In Python &gt;= 3.8, this string array is no longer writable, so 
+       instead we pick PyCapsuleType.tp_version_tag.  We can't change 
+       Python &lt; 3.8 because someone might use a mixture of cffi 
+       embedded modules, some of which were compiled before this file 
+       changed. 
+ 
+       In Python &gt;= 3.12, this stopped working because that particular 
+       tp_version_tag gets modified during interpreter startup.  It's 
+       arguably a bad idea before 3.12 too, but again we can't change 
+       that because someone might use a mixture of cffi embedded 
+       modules, and no-one reported a bug so far.  In Python &gt;= 3.12 
+       we go instead for PyCapsuleType.tp_as_buffer, which is supposed 
+       to always be NULL.  We write to it temporarily a pointer to 
+       a struct full of NULLs, which is semantically the same. 
+    */</span>
+
+<span class="s2">#ifdef </span><span class="s0">WITH_THREAD</span>
+<span class="s0"># </span><span class="s2">if </span><span class="s0">PY_VERSION_HEX &lt; </span><span class="s4">0x03080000</span>
+    <span class="s2">char </span><span class="s0">*</span><span class="s2">volatile </span><span class="s0">*lock = (</span><span class="s2">char </span><span class="s0">*</span><span class="s2">volatile </span><span class="s0">*)_PyParser_TokenNames;</span>
+    <span class="s2">char </span><span class="s0">*old_value, *locked_value;</span>
+
+    <span class="s2">while </span><span class="s0">(</span><span class="s4">1</span><span class="s0">) {    </span><span class="s1">/* spin loop */</span>
+        <span class="s0">old_value = *lock;</span>
+        <span class="s0">locked_value = old_value + </span><span class="s4">1</span><span class="s0">;</span>
+        <span class="s2">if </span><span class="s0">(old_value[</span><span class="s4">0</span><span class="s0">] == </span><span class="s3">'E'</span><span class="s0">) {</span>
+            <span class="s0">assert(old_value[</span><span class="s4">1</span><span class="s0">] == </span><span class="s3">'N'</span><span class="s0">);</span>
+            <span class="s2">if </span><span class="s0">(cffi_compare_and_swap(lock, old_value, locked_value))</span>
+                <span class="s2">break</span><span class="s0">;</span>
+        <span class="s0">}</span>
+        <span class="s2">else </span><span class="s0">{</span>
+            <span class="s0">assert(old_value[</span><span class="s4">0</span><span class="s0">] == </span><span class="s3">'N'</span><span class="s0">);</span>
+            <span class="s1">/* should ideally do a spin loop instruction here, but 
+               hard to do it portably and doesn't really matter I 
+               think: PyEval_InitThreads() should be very fast, and 
+               this is only run at start-up anyway. */</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0"># </span><span class="s2">else</span>
+<span class="s0">#  </span><span class="s2">if </span><span class="s0">PY_VERSION_HEX &lt; </span><span class="s4">0x030C0000</span>
+    <span class="s2">int volatile </span><span class="s0">*lock = (</span><span class="s2">int volatile </span><span class="s0">*)&amp;PyCapsule_Type.tp_version_tag;</span>
+    <span class="s2">int </span><span class="s0">old_value, locked_value = -</span><span class="s4">42</span><span class="s0">;</span>
+    <span class="s0">assert(!(PyCapsule_Type.tp_flags &amp; Py_TPFLAGS_HAVE_VERSION_TAG));</span>
+<span class="s0">#  </span><span class="s2">else</span>
+    <span class="s2">static struct </span><span class="s0">ebp_s { PyBufferProcs buf; </span><span class="s2">int </span><span class="s0">mark; } empty_buffer_procs;</span>
+    <span class="s0">empty_buffer_procs.mark = -</span><span class="s4">42</span><span class="s0">;</span>
+    <span class="s0">PyBufferProcs *</span><span class="s2">volatile </span><span class="s0">*lock = (PyBufferProcs *</span><span class="s2">volatile </span><span class="s0">*)</span>
+        <span class="s0">&amp;PyCapsule_Type.tp_as_buffer;</span>
+    <span class="s0">PyBufferProcs *old_value, *locked_value = &amp;empty_buffer_procs.buf;</span>
+<span class="s0">#  endif</span>
+
+    <span class="s2">while </span><span class="s0">(</span><span class="s4">1</span><span class="s0">) {    </span><span class="s1">/* spin loop */</span>
+        <span class="s0">old_value = *lock;</span>
+        <span class="s2">if </span><span class="s0">(old_value == </span><span class="s4">0</span><span class="s0">) {</span>
+            <span class="s2">if </span><span class="s0">(cffi_compare_and_swap(lock, old_value, locked_value))</span>
+                <span class="s2">break</span><span class="s0">;</span>
+        <span class="s0">}</span>
+        <span class="s2">else </span><span class="s0">{</span>
+<span class="s0">#  </span><span class="s2">if </span><span class="s0">PY_VERSION_HEX &lt; </span><span class="s4">0x030C0000</span>
+            <span class="s0">assert(old_value == locked_value);</span>
+<span class="s0">#  </span><span class="s2">else</span>
+            <span class="s1">/* The pointer should point to a possibly different 
+               empty_buffer_procs from another C extension module */</span>
+            <span class="s0">assert(((</span><span class="s2">struct </span><span class="s0">ebp_s *)old_value)</span><span class="s5">-&gt;</span><span class="s0">mark == -</span><span class="s4">42</span><span class="s0">);</span>
+<span class="s0">#  endif</span>
+            <span class="s1">/* should ideally do a spin loop instruction here, but 
+               hard to do it portably and doesn't really matter I 
+               think: PyEval_InitThreads() should be very fast, and 
+               this is only run at start-up anyway. */</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+<span class="s0"># endif</span>
+<span class="s2">#endif</span>
+
+    <span class="s1">/* call Py_InitializeEx() */</span>
+    <span class="s2">if </span><span class="s0">(!Py_IsInitialized()) {</span>
+        <span class="s0">_cffi_py_initialize();</span>
+<span class="s2">#if </span><span class="s0">PY_VERSION_HEX &lt; </span><span class="s4">0x03070000</span>
+        <span class="s0">PyEval_InitThreads();</span>
+<span class="s2">#endif</span>
+        <span class="s0">PyEval_SaveThread();  </span><span class="s1">/* release the GIL */</span>
+        <span class="s1">/* the returned tstate must be the one that has been stored into the 
+           autoTLSkey by _PyGILState_Init() called from Py_Initialize(). */</span>
+    <span class="s0">}</span>
+    <span class="s2">else </span><span class="s0">{</span>
+<span class="s2">#if </span><span class="s0">PY_VERSION_HEX &lt; </span><span class="s4">0x03070000</span>
+        <span class="s1">/* PyEval_InitThreads() is always a no-op from CPython 3.7 */</span>
+        <span class="s0">PyGILState_STATE state = PyGILState_Ensure();</span>
+        <span class="s0">PyEval_InitThreads();</span>
+        <span class="s0">PyGILState_Release(state);</span>
+<span class="s2">#endif</span>
+    <span class="s0">}</span>
+
+<span class="s2">#ifdef </span><span class="s0">WITH_THREAD</span>
+    <span class="s1">/* release the lock */</span>
+    <span class="s2">while </span><span class="s0">(!cffi_compare_and_swap(lock, locked_value, old_value))</span>
+        <span class="s0">;</span>
+<span class="s2">#endif</span>
+
+    <span class="s2">return </span><span class="s4">0</span><span class="s0">;</span>
+<span class="s0">}</span>
+
+<span class="s1">/**********  end CPython-specific section  **********/</span>
+
+
+<span class="s2">#else</span>
+
+
+<span class="s1">/**********  PyPy-specific section  **********/</span>
+
+<span class="s0">PyMODINIT_FUNC _CFFI_PYTHON_STARTUP_FUNC(</span><span class="s2">const void </span><span class="s0">*[]);   </span><span class="s1">/* forward */</span>
+
+<span class="s2">static struct </span><span class="s0">_cffi_pypy_init_s {</span>
+    <span class="s2">const char </span><span class="s0">*name;</span>
+    <span class="s2">void </span><span class="s0">*func;    </span><span class="s1">/* function pointer */</span>
+    <span class="s2">const char </span><span class="s0">*code;</span>
+<span class="s0">} _cffi_pypy_init = {</span>
+    <span class="s0">_CFFI_MODULE_NAME,</span>
+    <span class="s0">_CFFI_PYTHON_STARTUP_FUNC,</span>
+    <span class="s0">_CFFI_PYTHON_STARTUP_CODE,</span>
+<span class="s0">};</span>
+
+<span class="s2">extern int </span><span class="s0">pypy_carefully_make_gil(</span><span class="s2">const char </span><span class="s0">*);</span>
+<span class="s2">extern int </span><span class="s0">pypy_init_embedded_cffi_module(</span><span class="s2">int</span><span class="s0">, </span><span class="s2">struct </span><span class="s0">_cffi_pypy_init_s *);</span>
+
+<span class="s2">static int </span><span class="s0">_cffi_carefully_make_gil(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s2">return </span><span class="s0">pypy_carefully_make_gil(_CFFI_MODULE_NAME);</span>
+<span class="s0">}</span>
+
+<span class="s2">static int </span><span class="s0">_cffi_initialize_python(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s2">return </span><span class="s0">pypy_init_embedded_cffi_module(</span><span class="s4">0xB011</span><span class="s0">, &amp;_cffi_pypy_init);</span>
+<span class="s0">}</span>
+
+<span class="s1">/**********  end PyPy-specific section  **********/</span>
+
+
+<span class="s2">#endif</span>
+
+
+<span class="s2">#ifdef </span><span class="s0">__GNUC__</span>
+<span class="s0">__attribute__((noinline))</span>
+<span class="s2">#endif</span>
+<span class="s2">static </span><span class="s0">_cffi_call_python_fnptr _cffi_start_python(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s1">/* Delicate logic to initialize Python.  This function can be 
+       called multiple times concurrently, e.g. when the process calls 
+       its first ``extern &quot;Python&quot;`` functions in multiple threads at 
+       once.  It can also be called recursively, in which case we must 
+       ignore it.  We also have to consider what occurs if several 
+       different cffi-based extensions reach this code in parallel 
+       threads---it is a different copy of the code, then, and we 
+       can't have any shared global variable unless it comes from 
+       'libpythonX.Y.so'. 
+ 
+       Idea: 
+ 
+       * _cffi_carefully_make_gil(): &quot;carefully&quot; call 
+         PyEval_InitThreads() (possibly with Py_InitializeEx() first). 
+ 
+       * then we use a (local) custom lock to make sure that a call to this 
+         cffi-based extension will wait if another call to the *same* 
+         extension is running the initialization in another thread. 
+         It is reentrant, so that a recursive call will not block, but 
+         only one from a different thread. 
+ 
+       * then we grab the GIL and (Python 2) we call Py_InitializeEx(). 
+         At this point, concurrent calls to Py_InitializeEx() are not 
+         possible: we have the GIL. 
+ 
+       * do the rest of the specific initialization, which may 
+         temporarily release the GIL but not the custom lock. 
+         Only release the custom lock when we are done. 
+    */</span>
+    <span class="s2">static char </span><span class="s0">called = </span><span class="s4">0</span><span class="s0">;</span>
+
+    <span class="s2">if </span><span class="s0">(_cffi_carefully_make_gil() != </span><span class="s4">0</span><span class="s0">)</span>
+        <span class="s2">return </span><span class="s0">NULL;</span>
+
+    <span class="s0">_cffi_acquire_reentrant_mutex();</span>
+
+    <span class="s1">/* Here the GIL exists, but we don't have it.  We're only protected 
+       from concurrency by the reentrant mutex. */</span>
+
+    <span class="s1">/* This file only initializes the embedded module once, the first 
+       time this is called, even if there are subinterpreters. */</span>
+    <span class="s2">if </span><span class="s0">(!called) {</span>
+        <span class="s0">called = </span><span class="s4">1</span><span class="s0">;  </span><span class="s1">/* invoke _cffi_initialize_python() only once, 
+                        but don't set '_cffi_call_python' right now, 
+                        otherwise concurrent threads won't call 
+                        this function at all (we need them to wait) */</span>
+        <span class="s2">if </span><span class="s0">(_cffi_initialize_python() == </span><span class="s4">0</span><span class="s0">) {</span>
+            <span class="s1">/* now initialization is finished.  Switch to the fast-path. */</span>
+
+            <span class="s1">/* We would like nobody to see the new value of 
+               '_cffi_call_python' without also seeing the rest of the 
+               data initialized.  However, this is not possible.  But 
+               the new value of '_cffi_call_python' is the function 
+               'cffi_call_python()' from _cffi_backend.  So:  */</span>
+            <span class="s0">cffi_write_barrier();</span>
+            <span class="s1">/* ^^^ we put a write barrier here, and a corresponding 
+               read barrier at the start of cffi_call_python().  This 
+               ensures that after that read barrier, we see everything 
+               done here before the write barrier. 
+            */</span>
+
+            <span class="s0">assert(_cffi_call_python_org != NULL);</span>
+            <span class="s0">_cffi_call_python = (_cffi_call_python_fnptr)_cffi_call_python_org;</span>
+        <span class="s0">}</span>
+        <span class="s2">else </span><span class="s0">{</span>
+            <span class="s1">/* initialization failed.  Reset this to NULL, even if it was 
+               already set to some other value.  Future calls to 
+               _cffi_start_python() are still forced to occur, and will 
+               always return NULL from now on. */</span>
+            <span class="s0">_cffi_call_python_org = NULL;</span>
+        <span class="s0">}</span>
+    <span class="s0">}</span>
+
+    <span class="s0">_cffi_release_reentrant_mutex();</span>
+
+    <span class="s2">return </span><span class="s0">(_cffi_call_python_fnptr)_cffi_call_python_org;</span>
+<span class="s0">}</span>
+
+<span class="s2">static</span>
+<span class="s2">void </span><span class="s0">_cffi_start_and_call_python(</span><span class="s2">struct </span><span class="s0">_cffi_externpy_s *externpy, </span><span class="s2">char </span><span class="s0">*args)</span>
+<span class="s0">{</span>
+    <span class="s0">_cffi_call_python_fnptr fnptr;</span>
+    <span class="s2">int </span><span class="s0">current_err = errno;</span>
+<span class="s2">#ifdef </span><span class="s0">_MSC_VER</span>
+    <span class="s2">int </span><span class="s0">current_lasterr = GetLastError();</span>
+<span class="s2">#endif</span>
+    <span class="s0">fnptr = _cffi_start_python();</span>
+    <span class="s2">if </span><span class="s0">(fnptr == NULL) {</span>
+        <span class="s0">fprintf(stderr, </span><span class="s3">&quot;function %s() called, but initialization code &quot;</span>
+                        <span class="s3">&quot;failed.  Returning 0.</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s0">, externpy</span><span class="s5">-&gt;</span><span class="s0">name);</span>
+        <span class="s0">memset(args, </span><span class="s4">0</span><span class="s0">, externpy</span><span class="s5">-&gt;</span><span class="s0">size_of_result);</span>
+    <span class="s0">}</span>
+<span class="s2">#ifdef </span><span class="s0">_MSC_VER</span>
+    <span class="s0">SetLastError(current_lasterr);</span>
+<span class="s2">#endif</span>
+    <span class="s0">errno = current_err;</span>
+
+    <span class="s2">if </span><span class="s0">(fnptr != NULL)</span>
+        <span class="s0">fnptr(externpy, args);</span>
+<span class="s0">}</span>
+
+
+<span class="s1">/* The cffi_start_python() function makes sure Python is initialized 
+   and our cffi module is set up.  It can be called manually from the 
+   user C code.  The same effect is obtained automatically from any 
+   dll-exported ``extern &quot;Python&quot;`` function.  This function returns 
+   -1 if initialization failed, 0 if all is OK.  */</span>
+<span class="s0">_CFFI_UNUSED_FN</span>
+<span class="s2">static int </span><span class="s0">cffi_start_python(</span><span class="s2">void</span><span class="s0">)</span>
+<span class="s0">{</span>
+    <span class="s2">if </span><span class="s0">(_cffi_call_python == &amp;_cffi_start_and_call_python) {</span>
+        <span class="s2">if </span><span class="s0">(_cffi_start_python() == NULL)</span>
+            <span class="s2">return </span><span class="s0">-</span><span class="s4">1</span><span class="s0">;</span>
+    <span class="s0">}</span>
+    <span class="s0">cffi_read_barrier();</span>
+    <span class="s2">return </span><span class="s4">0</span><span class="s0">;</span>
+<span class="s0">}</span>
+
+<span class="s2">#undef </span><span class="s0">cffi_compare_and_swap</span>
+<span class="s2">#undef </span><span class="s0">cffi_write_barrier</span>
+<span class="s2">#undef </span><span class="s0">cffi_read_barrier</span>
+
+<span class="s2">#ifdef </span><span class="s0">__cplusplus</span>
+<span class="s0">}</span>
+<span class="s2">#endif</span>
+</pre>
+</body>
+</html>

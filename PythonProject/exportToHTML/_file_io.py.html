@@ -1,0 +1,536 @@
+<html>
+<head>
+<title>_file_io.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_file_io.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">io</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">Iterable</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">IO</span><span class="s2">,</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">AnyStr</span><span class="s2">,</span>
+    <span class="s1">BinaryIO</span><span class="s2">,</span>
+    <span class="s1">Generic</span><span class="s2">,</span>
+    <span class="s1">TypeVar</span><span class="s2">,</span>
+    <span class="s1">Union</span><span class="s2">,</span>
+    <span class="s1">overload</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">async_wraps</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncResource</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">_typeshed </span><span class="s0">import </span><span class="s2">(</span>
+        <span class="s1">OpenBinaryMode</span><span class="s2">,</span>
+        <span class="s1">OpenBinaryModeReading</span><span class="s2">,</span>
+        <span class="s1">OpenBinaryModeUpdating</span><span class="s2">,</span>
+        <span class="s1">OpenBinaryModeWriting</span><span class="s2">,</span>
+        <span class="s1">OpenTextMode</span><span class="s2">,</span>
+        <span class="s1">StrOrBytesPath</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Literal</span>
+
+    <span class="s0">from </span><span class="s2">.</span><span class="s1">_sync </span><span class="s0">import </span><span class="s1">CapacityLimiter</span>
+
+<span class="s3"># This list is also in the docs, make sure to keep them in sync</span>
+<span class="s1">_FILE_SYNC_ATTRS</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = {</span>
+    <span class="s4">&quot;closed&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;encoding&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;errors&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;fileno&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;isatty&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;newlines&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;readable&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;seekable&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;writable&quot;</span><span class="s2">,</span>
+    <span class="s3"># not defined in *IOBase:</span>
+    <span class="s4">&quot;buffer&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;raw&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;line_buffering&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;closefd&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;name&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;mode&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;getvalue&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;getbuffer&quot;</span><span class="s2">,</span>
+<span class="s2">}</span>
+
+<span class="s3"># This list is also in the docs, make sure to keep them in sync</span>
+<span class="s1">_FILE_ASYNC_METHODS</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = {</span>
+    <span class="s4">&quot;flush&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;read&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;read1&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;readall&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;readinto&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;readline&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;readlines&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;seek&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;tell&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;truncate&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;write&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;writelines&quot;</span><span class="s2">,</span>
+    <span class="s3"># not defined in *IOBase:</span>
+    <span class="s4">&quot;readinto1&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;peek&quot;</span><span class="s2">,</span>
+<span class="s2">}</span>
+
+
+<span class="s1">FileT </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;FileT&quot;</span><span class="s2">)</span>
+<span class="s1">FileT_co </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;FileT_co&quot;</span><span class="s2">, </span><span class="s1">covariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s1">T </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;T&quot;</span><span class="s2">)</span>
+<span class="s1">T_co </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;T_co&quot;</span><span class="s2">, </span><span class="s1">covariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s1">T_contra </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;T_contra&quot;</span><span class="s2">, </span><span class="s1">contravariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s1">AnyStr_co </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;AnyStr_co&quot;</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">covariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+<span class="s1">AnyStr_contra </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s4">&quot;AnyStr_contra&quot;</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">contravariant</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+<span class="s3"># This is a little complicated. IO objects have a lot of methods, and which are available on</span>
+<span class="s3"># different types varies wildly. We want to match the interface of whatever file we're wrapping.</span>
+<span class="s3"># This pile of protocols each has one sync method/property, meaning they're going to be compatible</span>
+<span class="s3"># with a file class that supports that method/property. The ones parameterized with AnyStr take</span>
+<span class="s3"># either str or bytes depending.</span>
+
+<span class="s3"># The wrapper is then a generic class, where the typevar is set to the type of the sync file we're</span>
+<span class="s3"># wrapping. For generics, adding a type to self has a special meaning - properties/methods can be</span>
+<span class="s3"># conditional - it's only valid to call them if the object you're accessing them on is compatible</span>
+<span class="s3"># with that type hint. By using the protocols, the type checker will be checking to see if the</span>
+<span class="s3"># wrapped type has that method, and only allow the methods that do to be called. We can then alter</span>
+<span class="s3"># the signature however it needs to match runtime behaviour.</span>
+<span class="s3"># More info: https://mypy.readthedocs.io/en/stable/more_types.html#advanced-uses-of-self-types</span>
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Buffer</span><span class="s2">, </span><span class="s1">Protocol</span>
+
+    <span class="s3"># fmt: off</span>
+
+    <span class="s0">class </span><span class="s1">_HasClosed</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">closed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasEncoding</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">encoding</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasErrors</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">errors</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasFileNo</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">fileno</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasIsATTY</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">isatty</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasNewlines</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">T_co</span><span class="s2">]):</span>
+        <span class="s3"># Type varies here - documented to be None, tuple of strings, strings. Typeshed uses Any.</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">newlines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; T_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasReadable</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasSeekable</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">seekable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasWritable</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">writable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasBuffer</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">buffer</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; BinaryIO</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasRaw</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">raw</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; io</span><span class="s2">.</span><span class="s1">RawIOBase</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasLineBuffering</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">line_buffering</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasCloseFD</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">closefd</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasName</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_HasMode</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">mode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanGetValue</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">AnyStr_co</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">getvalue</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; AnyStr_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanGetBuffer</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">getbuffer</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; memoryview</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanFlush</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">flush</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanRead</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">AnyStr_co</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">read</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= ..., /) </span><span class="s1">-&gt; AnyStr_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanRead1</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">read1</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= ..., /) </span><span class="s1">-&gt; bytes</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanReadAll</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">AnyStr_co</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">readall</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; AnyStr_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanReadInto</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">readinto</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">buf</span><span class="s2">: </span><span class="s1">Buffer</span><span class="s2">, /) </span><span class="s1">-&gt; int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanReadInto1</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">readinto1</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">buffer</span><span class="s2">: </span><span class="s1">Buffer</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanReadLine</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">AnyStr_co</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">readline</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= ..., /) </span><span class="s1">-&gt; AnyStr_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanReadLines</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">readlines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">hint</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= ..., /) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanSeek</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">seek</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">target</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">whence</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanTell</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">tell</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanTruncate</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">truncate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= ..., /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanWrite</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">T_contra</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">write</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">: </span><span class="s1">T_contra</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanWriteLines</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">T_contra</span><span class="s2">]):</span>
+        <span class="s3"># The lines parameter varies for bytes/str, so use a typevar to make the async match.</span>
+        <span class="s0">def </span><span class="s1">writelines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">lines</span><span class="s2">: </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">T_contra</span><span class="s2">], /) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanPeek</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">AnyStr_co</span><span class="s2">]):</span>
+        <span class="s0">def </span><span class="s1">peek</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span><span class="s2">, /) </span><span class="s1">-&gt; AnyStr_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanDetach</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">[</span><span class="s1">T_co</span><span class="s2">]):</span>
+        <span class="s3"># The T typevar will be the unbuffered/binary file this file wraps.</span>
+        <span class="s0">def </span><span class="s1">detach</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; T_co</span><span class="s2">: ...</span>
+
+    <span class="s0">class </span><span class="s1">_CanClose</span><span class="s2">(</span><span class="s1">Protocol</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+
+
+<span class="s3"># FileT needs to be covariant for the protocol trick to work - the real IO types are effectively a</span>
+<span class="s3"># subtype of the protocols.</span>
+<span class="s0">class </span><span class="s1">AsyncIOWrapper</span><span class="s2">(</span><span class="s1">AsyncResource</span><span class="s2">, </span><span class="s1">Generic</span><span class="s2">[</span><span class="s1">FileT_co</span><span class="s2">]):</span>
+    <span class="s6">&quot;&quot;&quot;A generic :class:`~io.IOBase` wrapper that implements the :term:`asynchronous 
+    file object` interface. Wrapped methods that could block are executed in 
+    :meth:`trio.to_thread.run_sync`. 
+ 
+    All properties and methods defined in :mod:`~io` are exposed by this 
+    wrapper, if they exist in the wrapped file object. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">file</span><span class="s2">: </span><span class="s1">FileT_co</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped </span><span class="s2">= </span><span class="s1">file</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">wrapped</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; FileT_co</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;object: A reference to the wrapped file object&quot;&quot;&quot;</span>
+
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped</span>
+
+    <span class="s0">if not </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+
+        <span class="s0">def </span><span class="s1">__getattr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; object</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">name </span><span class="s0">in </span><span class="s1">_FILE_SYNC_ATTRS</span><span class="s2">:</span>
+                <span class="s0">return </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">name </span><span class="s0">in </span><span class="s1">_FILE_ASYNC_METHODS</span><span class="s2">:</span>
+                <span class="s1">meth </span><span class="s2">= </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+
+                <span class="s2">@</span><span class="s1">async_wraps</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">__class__</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped</span><span class="s2">.</span><span class="s1">__class__</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+                <span class="s0">async def </span><span class="s1">wrapper</span><span class="s2">(</span>
+                    <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">T</span><span class="s2">],</span>
+                    <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">object </span><span class="s2">| </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bool </span><span class="s2">| </span><span class="s1">CapacityLimiter </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+                <span class="s2">) </span><span class="s1">-&gt; T</span><span class="s2">:</span>
+                    <span class="s1">func </span><span class="s2">= </span><span class="s1">partial</span><span class="s2">(</span><span class="s1">meth</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+                    <span class="s0">return await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span><span class="s1">func</span><span class="s2">)</span>
+
+                <span class="s3"># cache the generated method</span>
+                <span class="s1">setattr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">wrapper</span><span class="s2">)</span>
+                <span class="s0">return </span><span class="s1">wrapper</span>
+
+            <span class="s0">raise </span><span class="s1">AttributeError</span><span class="s2">(</span><span class="s1">name</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__dir__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; Iterable</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s1">attrs </span><span class="s2">= </span><span class="s1">set</span><span class="s2">(</span><span class="s1">super</span><span class="s2">().</span><span class="s1">__dir__</span><span class="s2">())</span>
+        <span class="s1">attrs</span><span class="s2">.</span><span class="s1">update</span><span class="s2">(</span><span class="s1">a </span><span class="s0">for </span><span class="s1">a </span><span class="s0">in </span><span class="s1">_FILE_SYNC_ATTRS </span><span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">wrapped</span><span class="s2">, </span><span class="s1">a</span><span class="s2">))</span>
+        <span class="s1">attrs</span><span class="s2">.</span><span class="s1">update</span><span class="s2">(</span><span class="s1">a </span><span class="s0">for </span><span class="s1">a </span><span class="s0">in </span><span class="s1">_FILE_ASYNC_METHODS </span><span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">wrapped</span><span class="s2">, </span><span class="s1">a</span><span class="s2">))</span>
+        <span class="s0">return </span><span class="s1">attrs</span>
+
+    <span class="s0">def </span><span class="s1">__aiter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">FileT_co</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">async def </span><span class="s1">__anext__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanReadLine</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]]) </span><span class="s1">-&gt; AnyStr</span><span class="s2">:</span>
+        <span class="s1">line </span><span class="s2">= </span><span class="s0">await </span><span class="s1">self</span><span class="s2">.</span><span class="s1">readline</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">line</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">line</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">StopAsyncIteration</span>
+
+    <span class="s0">async def </span><span class="s1">detach</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanDetach</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]]) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]:</span>
+        <span class="s6">&quot;&quot;&quot;Like :meth:`io.BufferedIOBase.detach`, but async. 
+ 
+        This also re-wraps the result in a new :term:`asynchronous file object` 
+        wrapper. 
+ 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">raw </span><span class="s2">= </span><span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped</span><span class="s2">.</span><span class="s1">detach</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">wrap_file</span><span class="s2">(</span><span class="s1">raw</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanClose</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s6">&quot;&quot;&quot;Like :meth:`io.IOBase.close`, but async. 
+ 
+        This is also shielded from cancellation; if a cancellation scope is 
+        cancelled, the wrapped file object will still be safely closed. 
+ 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3"># ensure the underling file is closed during cancellation</span>
+        <span class="s0">with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">CancelScope</span><span class="s2">(</span><span class="s1">shield</span><span class="s2">=</span><span class="s0">True</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_wrapped</span><span class="s2">.</span><span class="s1">close</span><span class="s2">)</span>
+
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint_if_cancelled</span><span class="s2">()</span>
+
+    <span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+        <span class="s3"># fmt: off</span>
+        <span class="s3"># Based on typing.IO and io stubs.</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">closed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasClosed</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">encoding</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasEncoding</span><span class="s2">]) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">errors</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasErrors</span><span class="s2">]) </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">newlines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasNewlines</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]]) </span><span class="s1">-&gt; T</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">buffer</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasBuffer</span><span class="s2">]) </span><span class="s1">-&gt; BinaryIO</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">raw</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasRaw</span><span class="s2">]) </span><span class="s1">-&gt; io</span><span class="s2">.</span><span class="s1">RawIOBase</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">line_buffering</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasLineBuffering</span><span class="s2">]) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">closefd</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasCloseFD</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">name</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasName</span><span class="s2">]) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+        <span class="s2">@</span><span class="s1">property</span>
+        <span class="s0">def </span><span class="s1">mode</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasMode</span><span class="s2">]) </span><span class="s1">-&gt; str</span><span class="s2">: ...</span>
+
+        <span class="s0">def </span><span class="s1">fileno</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasFileNo</span><span class="s2">]) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s0">def </span><span class="s1">isatty</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasIsATTY</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+        <span class="s0">def </span><span class="s1">readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasReadable</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+        <span class="s0">def </span><span class="s1">seekable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasSeekable</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+        <span class="s0">def </span><span class="s1">writable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_HasWritable</span><span class="s2">]) </span><span class="s1">-&gt; bool</span><span class="s2">: ...</span>
+        <span class="s0">def </span><span class="s1">getvalue</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanGetValue</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]]) </span><span class="s1">-&gt; AnyStr</span><span class="s2">: ...</span>
+        <span class="s0">def </span><span class="s1">getbuffer</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanGetBuffer</span><span class="s2">]) </span><span class="s1">-&gt; memoryview</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">flush</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanFlush</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">read</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanRead</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]], </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= -</span><span class="s5">1</span><span class="s2">, /) </span><span class="s1">-&gt; AnyStr</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">read1</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanRead1</span><span class="s2">], </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= -</span><span class="s5">1</span><span class="s2">, /) </span><span class="s1">-&gt; bytes</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">readall</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanReadAll</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]]) </span><span class="s1">-&gt; AnyStr</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">readinto</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanReadInto</span><span class="s2">], </span><span class="s1">buf</span><span class="s2">: </span><span class="s1">Buffer</span><span class="s2">, /) </span><span class="s1">-&gt; int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">readline</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanReadLine</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]], </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s5">1</span><span class="s2">, /) </span><span class="s1">-&gt; AnyStr</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">readlines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanReadLines</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]]) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]: ...</span>
+        <span class="s0">async def </span><span class="s1">seek</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanSeek</span><span class="s2">], </span><span class="s1">target</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">whence</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">tell</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanTell</span><span class="s2">]) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">truncate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanTruncate</span><span class="s2">], </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">write</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanWrite</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]], </span><span class="s1">data</span><span class="s2">: </span><span class="s1">T</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">writelines</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanWriteLines</span><span class="s2">[</span><span class="s1">T</span><span class="s2">]], </span><span class="s1">lines</span><span class="s2">: </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">T</span><span class="s2">], /) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">readinto1</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanReadInto1</span><span class="s2">], </span><span class="s1">buffer</span><span class="s2">: </span><span class="s1">Buffer</span><span class="s2">, /) </span><span class="s1">-&gt; int</span><span class="s2">: ...</span>
+        <span class="s0">async def </span><span class="s1">peek</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">AsyncIOWrapper</span><span class="s2">[</span><span class="s1">_CanPeek</span><span class="s2">[</span><span class="s1">AnyStr</span><span class="s2">]], </span><span class="s1">size</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span><span class="s2">, /) </span><span class="s1">-&gt; AnyStr</span><span class="s2">: ...</span>
+
+
+<span class="s3"># Type hints are copied from builtin open.</span>
+<span class="s1">_OpenFile </span><span class="s2">= </span><span class="s1">Union</span><span class="s2">[</span><span class="s4">&quot;StrOrBytesPath&quot;</span><span class="s2">, </span><span class="s1">int</span><span class="s2">]</span>
+<span class="s1">_Opener </span><span class="s2">= </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">], </span><span class="s1">int</span><span class="s2">]</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">OpenTextMode </span><span class="s2">= </span><span class="s4">&quot;r&quot;</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s5">1</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">io</span><span class="s2">.</span><span class="s1">TextIOWrapper</span><span class="s2">]: ...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">OpenBinaryMode</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[</span><span class="s5">0</span><span class="s2">],</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">io</span><span class="s2">.</span><span class="s1">FileIO</span><span class="s2">]: ...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">OpenBinaryModeUpdating</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">, </span><span class="s5">1</span><span class="s2">] = -</span><span class="s5">1</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">io</span><span class="s2">.</span><span class="s1">BufferedRandom</span><span class="s2">]: ...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">OpenBinaryModeWriting</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">, </span><span class="s5">1</span><span class="s2">] = -</span><span class="s5">1</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">io</span><span class="s2">.</span><span class="s1">BufferedWriter</span><span class="s2">]: ...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">OpenBinaryModeReading</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">Literal</span><span class="s2">[-</span><span class="s5">1</span><span class="s2">, </span><span class="s5">1</span><span class="s2">] = -</span><span class="s5">1</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">io</span><span class="s2">.</span><span class="s1">BufferedReader</span><span class="s2">]: ...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">OpenBinaryMode</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">BinaryIO</span><span class="s2">]: ...</span>
+
+
+<span class="s2">@</span><span class="s1">overload</span>
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(  </span><span class="s3"># type: ignore[explicit-any, misc]  # Any usage matches builtins.open().</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">str</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s5">1</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">IO</span><span class="s2">[</span><span class="s1">Any</span><span class="s2">]]: ...</span>
+
+
+<span class="s0">async def </span><span class="s1">open_file</span><span class="s2">(</span>
+    <span class="s1">file</span><span class="s2">: </span><span class="s1">_OpenFile</span><span class="s2">,</span>
+    <span class="s1">mode</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s4">&quot;r&quot;</span><span class="s2">,</span>
+    <span class="s1">buffering</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s5">1</span><span class="s2">,</span>
+    <span class="s1">encoding</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">errors</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">newline</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">closefd</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">opener</span><span class="s2">: </span><span class="s1">_Opener </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;Asynchronous version of :func:`open`. 
+ 
+    Returns: 
+        An :term:`asynchronous file object` 
+ 
+    Example:: 
+ 
+        async with await trio.open_file(filename) as f: 
+            async for line in f: 
+                pass 
+ 
+        assert f.closed 
+ 
+    See also: 
+      :func:`trio.Path.open` 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">file_ </span><span class="s2">= </span><span class="s1">wrap_file</span><span class="s2">(</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">to_thread</span><span class="s2">.</span><span class="s1">run_sync</span><span class="s2">(</span>
+            <span class="s1">io</span><span class="s2">.</span><span class="s1">open</span><span class="s2">,</span>
+            <span class="s1">file</span><span class="s2">,</span>
+            <span class="s1">mode</span><span class="s2">,</span>
+            <span class="s1">buffering</span><span class="s2">,</span>
+            <span class="s1">encoding</span><span class="s2">,</span>
+            <span class="s1">errors</span><span class="s2">,</span>
+            <span class="s1">newline</span><span class="s2">,</span>
+            <span class="s1">closefd</span><span class="s2">,</span>
+            <span class="s1">opener</span><span class="s2">,</span>
+        <span class="s2">),</span>
+    <span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">file_</span>
+
+
+<span class="s0">def </span><span class="s1">wrap_file</span><span class="s2">(</span><span class="s1">file</span><span class="s2">: </span><span class="s1">FileT</span><span class="s2">) </span><span class="s1">-&gt; AsyncIOWrapper</span><span class="s2">[</span><span class="s1">FileT</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;This wraps any file object in a wrapper that provides an asynchronous 
+    file object interface. 
+ 
+    Args: 
+        file: a :term:`file object` 
+ 
+    Returns: 
+        An :term:`asynchronous file object` that wraps ``file`` 
+ 
+    Example:: 
+ 
+        async_file = trio.wrap_file(StringIO('asdf')) 
+ 
+        assert await async_file.read() == 'asdf' 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">has</span><span class="s2">(</span><span class="s1">attr</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">file</span><span class="s2">, </span><span class="s1">attr</span><span class="s2">) </span><span class="s0">and </span><span class="s1">callable</span><span class="s2">(</span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">file</span><span class="s2">, </span><span class="s1">attr</span><span class="s2">))</span>
+
+    <span class="s0">if not </span><span class="s2">(</span><span class="s1">has</span><span class="s2">(</span><span class="s4">&quot;close&quot;</span><span class="s2">) </span><span class="s0">and </span><span class="s2">(</span><span class="s1">has</span><span class="s2">(</span><span class="s4">&quot;read&quot;</span><span class="s2">) </span><span class="s0">or </span><span class="s1">has</span><span class="s2">(</span><span class="s4">&quot;write&quot;</span><span class="s2">))):</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span>
+            <span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">file</span><span class="s0">} </span><span class="s4">does not implement required duck-file methods: &quot;</span>
+            <span class="s4">&quot;close and (read or write)&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">AsyncIOWrapper</span><span class="s2">(</span><span class="s1">file</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,124 @@
+<html>
+<head>
+<title>glibc.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+glibc.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+
+
+<span class="s0">def </span><span class="s1">glibc_version_string</span><span class="s2">() </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3">&quot;Returns glibc version string, or None if not using glibc.&quot;</span>
+    <span class="s0">return </span><span class="s1">glibc_version_string_confstr</span><span class="s2">() </span><span class="s0">or </span><span class="s1">glibc_version_string_ctypes</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">glibc_version_string_confstr</span><span class="s2">() </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3">&quot;Primary implementation of glibc_version_string using os.confstr.&quot;</span>
+    <span class="s4"># os.confstr is quite a bit faster than ctypes.DLL. It's also less likely</span>
+    <span class="s4"># to be broken or missing. This strategy is used in the standard library</span>
+    <span class="s4"># platform module:</span>
+    <span class="s4"># https://github.com/python/cpython/blob/fcf1d003bf4f0100c9d0921ff3d70e1127ca1b71/Lib/platform.py#L175-L183</span>
+    <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s5">&quot;win32&quot;</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">gnu_libc_version </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">confstr</span><span class="s2">(</span><span class="s5">&quot;CS_GNU_LIBC_VERSION&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">gnu_libc_version </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return None</span>
+        <span class="s4"># os.confstr(&quot;CS_GNU_LIBC_VERSION&quot;) returns a string like &quot;glibc 2.17&quot;:</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">version </span><span class="s2">= </span><span class="s1">gnu_libc_version</span><span class="s2">.</span><span class="s1">split</span><span class="s2">()</span>
+    <span class="s0">except </span><span class="s2">(</span><span class="s1">AttributeError</span><span class="s2">, </span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">ValueError</span><span class="s2">):</span>
+        <span class="s4"># os.confstr() or CS_GNU_LIBC_VERSION not available (or a bad value)...</span>
+        <span class="s0">return None</span>
+    <span class="s0">return </span><span class="s1">version</span>
+
+
+<span class="s0">def </span><span class="s1">glibc_version_string_ctypes</span><span class="s2">() </span><span class="s1">-&gt; str </span><span class="s2">| </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s3">&quot;Fallback implementation of glibc_version_string using ctypes.&quot;</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">import </span><span class="s1">ctypes</span>
+    <span class="s0">except </span><span class="s1">ImportError</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+
+    <span class="s4"># ctypes.CDLL(None) internally calls dlopen(NULL), and as the dlopen</span>
+    <span class="s4"># manpage says, &quot;If filename is NULL, then the returned handle is for the</span>
+    <span class="s4"># main program&quot;. This way we can let the linker do the work to figure out</span>
+    <span class="s4"># which libc our process is actually using.</span>
+    <span class="s4">#</span>
+    <span class="s4"># We must also handle the special case where the executable is not a</span>
+    <span class="s4"># dynamically linked executable. This can occur when using musl libc,</span>
+    <span class="s4"># for example. In this situation, dlopen() will error, leading to an</span>
+    <span class="s4"># OSError. Interestingly, at least in the case of musl, there is no</span>
+    <span class="s4"># errno set on the OSError. The single string argument used to construct</span>
+    <span class="s4"># OSError comes from libc itself and is therefore not portable to</span>
+    <span class="s4"># hard code here. In any case, failure to call dlopen() means we</span>
+    <span class="s4"># can't proceed, so we bail on our attempt.</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">process_namespace </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">CDLL</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">gnu_get_libc_version </span><span class="s2">= </span><span class="s1">process_namespace</span><span class="s2">.</span><span class="s1">gnu_get_libc_version</span>
+    <span class="s0">except </span><span class="s1">AttributeError</span><span class="s2">:</span>
+        <span class="s4"># Symbol doesn't exist -&gt; therefore, we are not linked to</span>
+        <span class="s4"># glibc.</span>
+        <span class="s0">return None</span>
+
+    <span class="s4"># Call gnu_get_libc_version, which returns a string like &quot;2.5&quot;</span>
+    <span class="s1">gnu_get_libc_version</span><span class="s2">.</span><span class="s1">restype </span><span class="s2">= </span><span class="s1">ctypes</span><span class="s2">.</span><span class="s1">c_char_p</span>
+    <span class="s1">version_str</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">gnu_get_libc_version</span><span class="s2">()</span>
+    <span class="s4"># py2 / py3 compatibility:</span>
+    <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">version_str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+        <span class="s1">version_str </span><span class="s2">= </span><span class="s1">version_str</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s5">&quot;ascii&quot;</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">version_str</span>
+
+
+<span class="s4"># platform.libc_ver regularly returns completely nonsensical glibc</span>
+<span class="s4"># versions. E.g. on my computer, platform says:</span>
+<span class="s4">#</span>
+<span class="s4">#   ~$ python2.7 -c 'import platform; print(platform.libc_ver())'</span>
+<span class="s4">#   ('glibc', '2.7')</span>
+<span class="s4">#   ~$ python3.5 -c 'import platform; print(platform.libc_ver())'</span>
+<span class="s4">#   ('glibc', '2.9')</span>
+<span class="s4">#</span>
+<span class="s4"># But the truth is:</span>
+<span class="s4">#</span>
+<span class="s4">#   ~$ ldd --version</span>
+<span class="s4">#   ldd (Debian GLIBC 2.22-11) 2.22</span>
+<span class="s4">#</span>
+<span class="s4"># This is unfortunate, because it means that the linehaul data on libc</span>
+<span class="s4"># versions that was generated by pip 8.1.2 and earlier is useless and</span>
+<span class="s4"># misleading. Solution: instead of using platform, use our code that actually</span>
+<span class="s4"># works.</span>
+<span class="s0">def </span><span class="s1">libc_ver</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot;Try to determine the glibc version 
+ 
+    Returns a tuple of strings (lib, version) which default to empty strings 
+    in case the lookup fails. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">glibc_version </span><span class="s2">= </span><span class="s1">glibc_version_string</span><span class="s2">()</span>
+    <span class="s0">if </span><span class="s1">glibc_version </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s5">&quot;&quot;</span><span class="s2">, </span><span class="s5">&quot;&quot;</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s5">&quot;glibc&quot;</span><span class="s2">, </span><span class="s1">glibc_version</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

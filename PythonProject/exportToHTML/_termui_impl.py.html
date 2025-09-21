@@ -1,0 +1,863 @@
+<html>
+<head>
+<title>_termui_impl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_termui_impl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+This module contains implementations for the termui module. To keep the 
+import time of Click down, some infrequently used functionality is 
+placed in this module and only imported as needed. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">as </span><span class="s1">cabc</span>
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">math</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">shlex</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">from </span><span class="s1">gettext </span><span class="s2">import </span><span class="s1">gettext </span><span class="s2">as </span><span class="s1">_</span>
+<span class="s2">from </span><span class="s1">io </span><span class="s2">import </span><span class="s1">StringIO</span>
+<span class="s2">from </span><span class="s1">pathlib </span><span class="s2">import </span><span class="s1">Path</span>
+<span class="s2">from </span><span class="s1">shutil </span><span class="s2">import </span><span class="s1">which</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">TracebackType</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">_default_text_stdout</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">CYGWIN</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">get_best_encoding</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">isatty</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">open_stream</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">strip_ansi</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">term_len</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_compat </span><span class="s2">import </span><span class="s1">WIN</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s1">ClickException</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s1">echo</span>
+
+<span class="s1">V </span><span class="s3">= </span><span class="s1">t</span><span class="s3">.</span><span class="s1">TypeVar</span><span class="s3">(</span><span class="s4">&quot;V&quot;</span><span class="s3">)</span>
+
+<span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">name </span><span class="s3">== </span><span class="s4">&quot;nt&quot;</span><span class="s3">:</span>
+    <span class="s1">BEFORE_BAR </span><span class="s3">= </span><span class="s4">&quot;</span><span class="s2">\r</span><span class="s4">&quot;</span>
+    <span class="s1">AFTER_BAR </span><span class="s3">= </span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span>
+<span class="s2">else</span><span class="s3">:</span>
+    <span class="s1">BEFORE_BAR </span><span class="s3">= </span><span class="s4">&quot;</span><span class="s2">\r\033</span><span class="s4">[?25l&quot;</span>
+    <span class="s1">AFTER_BAR </span><span class="s3">= </span><span class="s4">&quot;</span><span class="s2">\033</span><span class="s4">[?25h</span><span class="s2">\n</span><span class="s4">&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">ProgressBar</span><span class="s3">(</span><span class="s1">t</span><span class="s3">.</span><span class="s1">Generic</span><span class="s3">[</span><span class="s1">V</span><span class="s3">]):</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">iterable</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">V</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">length</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">fill_char</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot;#&quot;</span><span class="s3">,</span>
+        <span class="s1">empty_char</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot; &quot;</span><span class="s3">,</span>
+        <span class="s1">bar_template</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot;%(bar)s&quot;</span><span class="s3">,</span>
+        <span class="s1">info_sep</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot;  &quot;</span><span class="s3">,</span>
+        <span class="s1">hidden</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">show_eta</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">show_percent</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">show_pos</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">item_show_func</span><span class="s3">: </span><span class="s1">t</span><span class="s3">.</span><span class="s1">Callable</span><span class="s3">[[</span><span class="s1">V </span><span class="s3">| </span><span class="s2">None</span><span class="s3">], </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">label</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">file</span><span class="s3">: </span><span class="s1">t</span><span class="s3">.</span><span class="s1">TextIO </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">color</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">update_min_steps</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s5">1</span><span class="s3">,</span>
+        <span class="s1">width</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s5">30</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">fill_char </span><span class="s3">= </span><span class="s1">fill_char</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">empty_char </span><span class="s3">= </span><span class="s1">empty_char</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bar_template </span><span class="s3">= </span><span class="s1">bar_template</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">info_sep </span><span class="s3">= </span><span class="s1">info_sep</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">hidden </span><span class="s3">= </span><span class="s1">hidden</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">show_eta </span><span class="s3">= </span><span class="s1">show_eta</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">show_percent </span><span class="s3">= </span><span class="s1">show_percent</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">show_pos </span><span class="s3">= </span><span class="s1">show_pos</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">item_show_func </span><span class="s3">= </span><span class="s1">item_show_func</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">label</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s1">label </span><span class="s2">or </span><span class="s4">&quot;&quot;</span>
+
+        <span class="s2">if </span><span class="s1">file </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">file </span><span class="s3">= </span><span class="s1">_default_text_stdout</span><span class="s3">()</span>
+
+            <span class="s6"># There are no standard streams attached to write to. For example,</span>
+            <span class="s6"># pythonw on Windows.</span>
+            <span class="s2">if </span><span class="s1">file </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s1">file </span><span class="s3">= </span><span class="s1">StringIO</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">file </span><span class="s3">= </span><span class="s1">file</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">color </span><span class="s3">= </span><span class="s1">color</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">update_min_steps </span><span class="s3">= </span><span class="s1">update_min_steps</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_completed_intervals </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">width</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">width</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">autowidth</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s1">width </span><span class="s3">== </span><span class="s5">0</span>
+
+        <span class="s2">if </span><span class="s1">length </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">from </span><span class="s1">operator </span><span class="s2">import </span><span class="s1">length_hint</span>
+
+            <span class="s1">length </span><span class="s3">= </span><span class="s1">length_hint</span><span class="s3">(</span><span class="s1">iterable</span><span class="s3">, -</span><span class="s5">1</span><span class="s3">)</span>
+
+            <span class="s2">if </span><span class="s1">length </span><span class="s3">== -</span><span class="s5">1</span><span class="s3">:</span>
+                <span class="s1">length </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">iterable </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">length </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s4">&quot;iterable or length is required&quot;</span><span class="s3">)</span>
+            <span class="s1">iterable </span><span class="s3">= </span><span class="s1">t</span><span class="s3">.</span><span class="s1">cast</span><span class="s3">(</span><span class="s4">&quot;cabc.Iterable[V]&quot;</span><span class="s3">, </span><span class="s1">range</span><span class="s3">(</span><span class="s1">length</span><span class="s3">))</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">iter</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">V</span><span class="s3">] = </span><span class="s1">iter</span><span class="s3">(</span><span class="s1">iterable</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s3">= </span><span class="s1">length</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">pos</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">avg</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">float</span><span class="s3">] = []</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">last_eta</span><span class="s3">: </span><span class="s1">float</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">start</span><span class="s3">: </span><span class="s1">float</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">start </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">last_eta </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">eta_known</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">finished</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">max_width</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">entered</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">current_item</span><span class="s3">: </span><span class="s1">V </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_is_atty </span><span class="s3">= </span><span class="s1">isatty</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">file</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_last_line</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; ProgressBar</span><span class="s3">[</span><span class="s1">V</span><span class="s3">]:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">entered </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">render_progress</span><span class="s3">()</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">exc_type</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">BaseException</span><span class="s3">] | </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">exc_value</span><span class="s3">: </span><span class="s1">BaseException </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">tb</span><span class="s3">: </span><span class="s1">TracebackType </span><span class="s3">| </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">render_finish</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">__iter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; cabc</span><span class="s3">.</span><span class="s1">Iterator</span><span class="s3">[</span><span class="s1">V</span><span class="s3">]:</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">entered</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s4">&quot;You need to use progress bars in a with block.&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">render_progress</span><span class="s3">()</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">generator</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">__next__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; V</span><span class="s3">:</span>
+        <span class="s6"># Iteration is defined in terms of a generator function,</span>
+        <span class="s6"># returned by iter(self); use that to define next(). This works</span>
+        <span class="s6"># because `self.iter` is an iterable consumed by that generator,</span>
+        <span class="s6"># so it is re-entry safe. Calling `next(self.generator())`</span>
+        <span class="s6"># twice works and does &quot;what you want&quot;.</span>
+        <span class="s2">return </span><span class="s1">next</span><span class="s3">(</span><span class="s1">iter</span><span class="s3">(</span><span class="s1">self</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">render_finish</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">hidden </span><span class="s2">or not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_atty</span><span class="s3">:</span>
+            <span class="s2">return</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">file</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">AFTER_BAR</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">file</span><span class="s3">.</span><span class="s1">flush</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">pct</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; float</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s5">1.0</span>
+        <span class="s2">return </span><span class="s1">min</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos </span><span class="s3">/ (</span><span class="s1">float</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">or </span><span class="s5">1</span><span class="s3">) </span><span class="s2">or </span><span class="s5">1</span><span class="s3">), </span><span class="s5">1.0</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">time_per_iteration</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; float</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">avg</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s5">0.0</span>
+        <span class="s2">return </span><span class="s1">sum</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">avg</span><span class="s3">) / </span><span class="s1">float</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">avg</span><span class="s3">))</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">eta</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; float</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">is not None and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">time_per_iteration </span><span class="s3">* (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s3">- </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s5">0.0</span>
+
+    <span class="s2">def </span><span class="s1">format_eta</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">eta_known</span><span class="s3">:</span>
+            <span class="s1">t </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">eta</span><span class="s3">)</span>
+            <span class="s1">seconds </span><span class="s3">= </span><span class="s1">t </span><span class="s3">% </span><span class="s5">60</span>
+            <span class="s1">t </span><span class="s3">//= </span><span class="s5">60</span>
+            <span class="s1">minutes </span><span class="s3">= </span><span class="s1">t </span><span class="s3">% </span><span class="s5">60</span>
+            <span class="s1">t </span><span class="s3">//= </span><span class="s5">60</span>
+            <span class="s1">hours </span><span class="s3">= </span><span class="s1">t </span><span class="s3">% </span><span class="s5">24</span>
+            <span class="s1">t </span><span class="s3">//= </span><span class="s5">24</span>
+            <span class="s2">if </span><span class="s1">t </span><span class="s3">&gt; </span><span class="s5">0</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">t</span><span class="s2">}</span><span class="s4">d </span><span class="s2">{</span><span class="s1">hours</span><span class="s2">:</span><span class="s4">02</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">minutes</span><span class="s2">:</span><span class="s4">02</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">seconds</span><span class="s2">:</span><span class="s4">02</span><span class="s2">}</span><span class="s4">&quot;</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">hours</span><span class="s2">:</span><span class="s4">02</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">minutes</span><span class="s2">:</span><span class="s4">02</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">seconds</span><span class="s2">:</span><span class="s4">02</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">return </span><span class="s4">&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">format_pos</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s1">pos </span><span class="s3">= </span><span class="s1">str</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">pos </span><span class="s3">+= </span><span class="s4">f&quot;/</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">length</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">return </span><span class="s1">pos</span>
+
+    <span class="s2">def </span><span class="s1">format_pct</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">int</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">pct </span><span class="s3">* </span><span class="s5">100</span><span class="s3">)</span><span class="s2">: </span><span class="s4">4</span><span class="s2">}</span><span class="s4">%&quot;</span><span class="s3">[</span><span class="s5">1</span><span class="s3">:]</span>
+
+    <span class="s2">def </span><span class="s1">format_bar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">bar_length </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">pct </span><span class="s3">* </span><span class="s1">self</span><span class="s3">.</span><span class="s1">width</span><span class="s3">)</span>
+            <span class="s1">bar </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">fill_char </span><span class="s3">* </span><span class="s1">bar_length</span>
+            <span class="s1">bar </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">empty_char </span><span class="s3">* (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">width </span><span class="s3">- </span><span class="s1">bar_length</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s1">bar </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">fill_char </span><span class="s3">* </span><span class="s1">self</span><span class="s3">.</span><span class="s1">width</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">chars </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">empty_char </span><span class="s3">* (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">width </span><span class="s2">or </span><span class="s5">1</span><span class="s3">))</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">time_per_iteration </span><span class="s3">!= </span><span class="s5">0</span><span class="s3">:</span>
+                <span class="s1">chars</span><span class="s3">[</span>
+                    <span class="s1">int</span><span class="s3">(</span>
+                        <span class="s3">(</span><span class="s1">math</span><span class="s3">.</span><span class="s1">cos</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos </span><span class="s3">* </span><span class="s1">self</span><span class="s3">.</span><span class="s1">time_per_iteration</span><span class="s3">) / </span><span class="s5">2.0 </span><span class="s3">+ </span><span class="s5">0.5</span><span class="s3">)</span>
+                        <span class="s3">* </span><span class="s1">self</span><span class="s3">.</span><span class="s1">width</span>
+                    <span class="s3">)</span>
+                <span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">fill_char</span>
+            <span class="s1">bar </span><span class="s3">= </span><span class="s4">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">chars</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">bar</span>
+
+    <span class="s2">def </span><span class="s1">format_progress_line</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s1">show_percent </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">show_percent</span>
+
+        <span class="s1">info_bits </span><span class="s3">= []</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">is not None and </span><span class="s1">show_percent </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">show_percent </span><span class="s3">= </span><span class="s2">not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">show_pos</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">show_pos</span><span class="s3">:</span>
+            <span class="s1">info_bits</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_pos</span><span class="s3">())</span>
+        <span class="s2">if </span><span class="s1">show_percent</span><span class="s3">:</span>
+            <span class="s1">info_bits</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_pct</span><span class="s3">())</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">show_eta </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">eta_known </span><span class="s2">and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s1">info_bits</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_eta</span><span class="s3">())</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">item_show_func </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">item_info </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">item_show_func</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">current_item</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">item_info </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s1">info_bits</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">item_info</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">bar_template</span>
+            <span class="s3">% {</span>
+                <span class="s4">&quot;label&quot;</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">label</span><span class="s3">,</span>
+                <span class="s4">&quot;bar&quot;</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_bar</span><span class="s3">(),</span>
+                <span class="s4">&quot;info&quot;</span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">info_sep</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">info_bits</span><span class="s3">),</span>
+            <span class="s3">}</span>
+        <span class="s3">).</span><span class="s1">rstrip</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">render_progress</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">import </span><span class="s1">shutil</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">hidden</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_atty</span><span class="s3">:</span>
+            <span class="s6"># Only output the label once if the output is not a TTY.</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_last_line </span><span class="s3">!= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">label</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_last_line </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">label</span>
+                <span class="s1">echo</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">label</span><span class="s3">, </span><span class="s1">file</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">file</span><span class="s3">, </span><span class="s1">color</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">color</span><span class="s3">)</span>
+            <span class="s2">return</span>
+
+        <span class="s1">buf </span><span class="s3">= []</span>
+        <span class="s6"># Update width in case the terminal has been resized</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">autowidth</span><span class="s3">:</span>
+            <span class="s1">old_width </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">width</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">width </span><span class="s3">= </span><span class="s5">0</span>
+            <span class="s1">clutter_length </span><span class="s3">= </span><span class="s1">term_len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_progress_line</span><span class="s3">())</span>
+            <span class="s1">new_width </span><span class="s3">= </span><span class="s1">max</span><span class="s3">(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">shutil</span><span class="s3">.</span><span class="s1">get_terminal_size</span><span class="s3">().</span><span class="s1">columns </span><span class="s3">- </span><span class="s1">clutter_length</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">new_width </span><span class="s3">&lt; </span><span class="s1">old_width </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_width </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s1">buf</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">BEFORE_BAR</span><span class="s3">)</span>
+                <span class="s1">buf</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot; &quot; </span><span class="s3">* </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_width</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">max_width </span><span class="s3">= </span><span class="s1">new_width</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">width </span><span class="s3">= </span><span class="s1">new_width</span>
+
+        <span class="s1">clear_width </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">width</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_width </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">clear_width </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_width</span>
+
+        <span class="s1">buf</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">BEFORE_BAR</span><span class="s3">)</span>
+        <span class="s1">line </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">format_progress_line</span><span class="s3">()</span>
+        <span class="s1">line_len </span><span class="s3">= </span><span class="s1">term_len</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_width </span><span class="s2">is None or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_width </span><span class="s3">&lt; </span><span class="s1">line_len</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">max_width </span><span class="s3">= </span><span class="s1">line_len</span>
+
+        <span class="s1">buf</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">line</span><span class="s3">)</span>
+        <span class="s1">buf</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot; &quot; </span><span class="s3">* (</span><span class="s1">clear_width </span><span class="s3">- </span><span class="s1">line_len</span><span class="s3">))</span>
+        <span class="s1">line </span><span class="s3">= </span><span class="s4">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">buf</span><span class="s3">)</span>
+        <span class="s6"># Render the line only if it changed.</span>
+
+        <span class="s2">if </span><span class="s1">line </span><span class="s3">!= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_last_line</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_last_line </span><span class="s3">= </span><span class="s1">line</span>
+            <span class="s1">echo</span><span class="s3">(</span><span class="s1">line</span><span class="s3">, </span><span class="s1">file</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">file</span><span class="s3">, </span><span class="s1">color</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">color</span><span class="s3">, </span><span class="s1">nl</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">file</span><span class="s3">.</span><span class="s1">flush</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">make_step</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">n_steps</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">pos </span><span class="s3">+= </span><span class="s1">n_steps</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">is not None and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos </span><span class="s3">&gt;= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">finished </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s2">if </span><span class="s3">(</span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() - </span><span class="s1">self</span><span class="s3">.</span><span class="s1">last_eta</span><span class="s3">) &lt; </span><span class="s5">1.0</span><span class="s3">:</span>
+            <span class="s2">return</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">last_eta </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">()</span>
+
+        <span class="s6"># self.avg is a rolling list of length &lt;= 7 of steps where steps are</span>
+        <span class="s6"># defined as time elapsed divided by the total progress through</span>
+        <span class="s6"># self.length.</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos</span><span class="s3">:</span>
+            <span class="s1">step </span><span class="s3">= (</span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() - </span><span class="s1">self</span><span class="s3">.</span><span class="s1">start</span><span class="s3">) / </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pos</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">step </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() - </span><span class="s1">self</span><span class="s3">.</span><span class="s1">start</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">avg </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">avg</span><span class="s3">[-</span><span class="s5">6</span><span class="s3">:] + [</span><span class="s1">step</span><span class="s3">]</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">eta_known </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">length </span><span class="s2">is not None</span>
+
+    <span class="s2">def </span><span class="s1">update</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">n_steps</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">current_item</span><span class="s3">: </span><span class="s1">V </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Update the progress bar by advancing a specified number of 
+        steps, and optionally set the ``current_item`` for this new 
+        position. 
+ 
+        :param n_steps: Number of steps to advance. 
+        :param current_item: Optional item to set as ``current_item`` 
+            for the updated position. 
+ 
+        .. versionchanged:: 8.0 
+            Added the ``current_item`` optional parameter. 
+ 
+        .. versionchanged:: 8.0 
+            Only render when the number of steps meets the 
+            ``update_min_steps`` threshold. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">current_item </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">current_item </span><span class="s3">= </span><span class="s1">current_item</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_completed_intervals </span><span class="s3">+= </span><span class="s1">n_steps</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_completed_intervals </span><span class="s3">&gt;= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">update_min_steps</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">make_step</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_completed_intervals</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">render_progress</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_completed_intervals </span><span class="s3">= </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">finish</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">eta_known </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">current_item </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">finished </span><span class="s3">= </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">generator</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; cabc</span><span class="s3">.</span><span class="s1">Iterator</span><span class="s3">[</span><span class="s1">V</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Return a generator which yields the items added to the bar 
+        during construction, and updates the progress bar *after* the 
+        yielded block returns. 
+        &quot;&quot;&quot;</span>
+        <span class="s6"># WARNING: the iterator interface for `ProgressBar` relies on</span>
+        <span class="s6"># this and only works because this is a simple generator which</span>
+        <span class="s6"># doesn't create or manage additional state. If this function</span>
+        <span class="s6"># changes, the impact should be evaluated both against</span>
+        <span class="s6"># `iter(bar)` and `next(bar)`. `next()` in particular may call</span>
+        <span class="s6"># `self.generator()` repeatedly, and this must remain safe in</span>
+        <span class="s6"># order for that interface to work.</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">entered</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError</span><span class="s3">(</span><span class="s4">&quot;You need to use progress bars in a with block.&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_atty</span><span class="s3">:</span>
+            <span class="s2">yield from </span><span class="s1">self</span><span class="s3">.</span><span class="s1">iter</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">rv </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">iter</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">current_item </span><span class="s3">= </span><span class="s1">rv</span>
+
+                <span class="s6"># This allows show_item_func to be updated before the</span>
+                <span class="s6"># item is processed. Only trigger at the beginning of</span>
+                <span class="s6"># the update interval.</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_completed_intervals </span><span class="s3">== </span><span class="s5">0</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">render_progress</span><span class="s3">()</span>
+
+                <span class="s2">yield </span><span class="s1">rv</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s5">1</span><span class="s3">)</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">finish</span><span class="s3">()</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">render_progress</span><span class="s3">()</span>
+
+
+<span class="s2">def </span><span class="s1">pager</span><span class="s3">(</span><span class="s1">generator</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">color</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Decide what method to use for paging through text.&quot;&quot;&quot;</span>
+    <span class="s1">stdout </span><span class="s3">= </span><span class="s1">_default_text_stdout</span><span class="s3">()</span>
+
+    <span class="s6"># There are no standard streams attached to write to. For example,</span>
+    <span class="s6"># pythonw on Windows.</span>
+    <span class="s2">if </span><span class="s1">stdout </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">stdout </span><span class="s3">= </span><span class="s1">StringIO</span><span class="s3">()</span>
+
+    <span class="s2">if not </span><span class="s1">isatty</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">stdin</span><span class="s3">) </span><span class="s2">or not </span><span class="s1">isatty</span><span class="s3">(</span><span class="s1">stdout</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">_nullpager</span><span class="s3">(</span><span class="s1">stdout</span><span class="s3">, </span><span class="s1">generator</span><span class="s3">, </span><span class="s1">color</span><span class="s3">)</span>
+
+    <span class="s6"># Split and normalize the pager command into parts.</span>
+    <span class="s1">pager_cmd_parts </span><span class="s3">= </span><span class="s1">shlex</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;PAGER&quot;</span><span class="s3">, </span><span class="s4">&quot;&quot;</span><span class="s3">), </span><span class="s1">posix</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">pager_cmd_parts</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">WIN</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">_tempfilepager</span><span class="s3">(</span><span class="s1">generator</span><span class="s3">, </span><span class="s1">pager_cmd_parts</span><span class="s3">, </span><span class="s1">color</span><span class="s3">):</span>
+                <span class="s2">return</span>
+        <span class="s2">elif </span><span class="s1">_pipepager</span><span class="s3">(</span><span class="s1">generator</span><span class="s3">, </span><span class="s1">pager_cmd_parts</span><span class="s3">, </span><span class="s1">color</span><span class="s3">):</span>
+            <span class="s2">return</span>
+
+    <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;TERM&quot;</span><span class="s3">) </span><span class="s2">in </span><span class="s3">(</span><span class="s4">&quot;dumb&quot;</span><span class="s3">, </span><span class="s4">&quot;emacs&quot;</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">_nullpager</span><span class="s3">(</span><span class="s1">stdout</span><span class="s3">, </span><span class="s1">generator</span><span class="s3">, </span><span class="s1">color</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s3">(</span><span class="s1">WIN </span><span class="s2">or </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;os2&quot;</span><span class="s3">)) </span><span class="s2">and </span><span class="s1">_tempfilepager</span><span class="s3">(</span>
+        <span class="s1">generator</span><span class="s3">, [</span><span class="s4">&quot;more&quot;</span><span class="s3">], </span><span class="s1">color</span>
+    <span class="s3">):</span>
+        <span class="s2">return</span>
+    <span class="s2">if </span><span class="s1">_pipepager</span><span class="s3">(</span><span class="s1">generator</span><span class="s3">, [</span><span class="s4">&quot;less&quot;</span><span class="s3">], </span><span class="s1">color</span><span class="s3">):</span>
+        <span class="s2">return</span>
+
+    <span class="s2">import </span><span class="s1">tempfile</span>
+
+    <span class="s1">fd</span><span class="s3">, </span><span class="s1">filename </span><span class="s3">= </span><span class="s1">tempfile</span><span class="s3">.</span><span class="s1">mkstemp</span><span class="s3">()</span>
+    <span class="s1">os</span><span class="s3">.</span><span class="s1">close</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">_pipepager</span><span class="s3">(</span><span class="s1">generator</span><span class="s3">, [</span><span class="s4">&quot;more&quot;</span><span class="s3">], </span><span class="s1">color</span><span class="s3">):</span>
+            <span class="s2">return</span>
+        <span class="s2">return </span><span class="s1">_nullpager</span><span class="s3">(</span><span class="s1">stdout</span><span class="s3">, </span><span class="s1">generator</span><span class="s3">, </span><span class="s1">color</span><span class="s3">)</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">_pipepager</span><span class="s3">(</span>
+    <span class="s1">generator</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">cmd_parts</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">color</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None</span>
+<span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Page through text by feeding it to another program. Invoking a 
+    pager through this might support colors. 
+ 
+    Returns `True` if the command was found, `False` otherwise and thus another 
+    pager should be attempted. 
+    &quot;&quot;&quot;</span>
+    <span class="s6"># Split the command into the invoked CLI and its parameters.</span>
+    <span class="s2">if not </span><span class="s1">cmd_parts</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s1">cmd </span><span class="s3">= </span><span class="s1">cmd_parts</span><span class="s3">[</span><span class="s5">0</span><span class="s3">]</span>
+    <span class="s1">cmd_params </span><span class="s3">= </span><span class="s1">cmd_parts</span><span class="s3">[</span><span class="s5">1</span><span class="s3">:]</span>
+
+    <span class="s1">cmd_filepath </span><span class="s3">= </span><span class="s1">which</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">cmd_filepath</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s6"># Resolves symlinks and produces a normalized absolute path string.</span>
+    <span class="s1">cmd_path </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">cmd_filepath</span><span class="s3">).</span><span class="s1">resolve</span><span class="s3">()</span>
+    <span class="s1">cmd_name </span><span class="s3">= </span><span class="s1">cmd_path</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">import </span><span class="s1">subprocess</span>
+
+    <span class="s6"># Make a local copy of the environment to not affect the global one.</span>
+    <span class="s1">env </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">)</span>
+
+    <span class="s6"># If we're piping to less and the user hasn't decided on colors, we enable</span>
+    <span class="s6"># them by default we find the -R flag in the command line arguments.</span>
+    <span class="s2">if </span><span class="s1">color </span><span class="s2">is None and </span><span class="s1">cmd_name </span><span class="s3">== </span><span class="s4">&quot;less&quot;</span><span class="s3">:</span>
+        <span class="s1">less_flags </span><span class="s3">= </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">'LESS'</span><span class="s3">, </span><span class="s4">''</span><span class="s3">)</span><span class="s2">}{</span><span class="s4">' '</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">cmd_params</span><span class="s3">)</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">if not </span><span class="s1">less_flags</span><span class="s3">:</span>
+            <span class="s1">env</span><span class="s3">[</span><span class="s4">&quot;LESS&quot;</span><span class="s3">] = </span><span class="s4">&quot;-R&quot;</span>
+            <span class="s1">color </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">elif </span><span class="s4">&quot;r&quot; </span><span class="s2">in </span><span class="s1">less_flags </span><span class="s2">or </span><span class="s4">&quot;R&quot; </span><span class="s2">in </span><span class="s1">less_flags</span><span class="s3">:</span>
+            <span class="s1">color </span><span class="s3">= </span><span class="s2">True</span>
+
+    <span class="s1">c </span><span class="s3">= </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">Popen</span><span class="s3">(</span>
+        <span class="s3">[</span><span class="s1">str</span><span class="s3">(</span><span class="s1">cmd_path</span><span class="s3">)] + </span><span class="s1">cmd_params</span><span class="s3">,</span>
+        <span class="s1">shell</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">stdin</span><span class="s3">=</span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">PIPE</span><span class="s3">,</span>
+        <span class="s1">env</span><span class="s3">=</span><span class="s1">env</span><span class="s3">,</span>
+        <span class="s1">errors</span><span class="s3">=</span><span class="s4">&quot;replace&quot;</span><span class="s3">,</span>
+        <span class="s1">text</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s2">assert </span><span class="s1">c</span><span class="s3">.</span><span class="s1">stdin </span><span class="s2">is not None</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">for </span><span class="s1">text </span><span class="s2">in </span><span class="s1">generator</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">color</span><span class="s3">:</span>
+                <span class="s1">text </span><span class="s3">= </span><span class="s1">strip_ansi</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+
+            <span class="s1">c</span><span class="s3">.</span><span class="s1">stdin</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">BrokenPipeError</span><span class="s3">:</span>
+        <span class="s6"># In case the pager exited unexpectedly, ignore the broken pipe error.</span>
+        <span class="s2">pass</span>
+    <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+        <span class="s6"># In case there is an exception we want to close the pager immediately</span>
+        <span class="s6"># and let the caller handle it.</span>
+        <span class="s6"># Otherwise the pager will keep running, and the user may not notice</span>
+        <span class="s6"># the error message, or worse yet it may leave the terminal in a broken state.</span>
+        <span class="s1">c</span><span class="s3">.</span><span class="s1">terminate</span><span class="s3">()</span>
+        <span class="s2">raise </span><span class="s1">e</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s6"># We must close stdin and wait for the pager to exit before we continue</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">c</span><span class="s3">.</span><span class="s1">stdin</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s6"># Close implies flush, so it might throw a BrokenPipeError if the pager</span>
+        <span class="s6"># process exited already.</span>
+        <span class="s2">except </span><span class="s1">BrokenPipeError</span><span class="s3">:</span>
+            <span class="s2">pass</span>
+
+        <span class="s6"># Less doesn't respect ^C, but catches it for its own UI purposes (aborting</span>
+        <span class="s6"># search or other commands inside less).</span>
+        <span class="s6">#</span>
+        <span class="s6"># That means when the user hits ^C, the parent process (click) terminates,</span>
+        <span class="s6"># but less is still alive, paging the output and messing up the terminal.</span>
+        <span class="s6">#</span>
+        <span class="s6"># If the user wants to make the pager exit on ^C, they should set</span>
+        <span class="s6"># `LESS='-K'`. It's not our decision to make.</span>
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">c</span><span class="s3">.</span><span class="s1">wait</span><span class="s3">()</span>
+            <span class="s2">except </span><span class="s1">KeyboardInterrupt</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">break</span>
+
+    <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_tempfilepager</span><span class="s3">(</span>
+    <span class="s1">generator</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">cmd_parts</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">color</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None</span>
+<span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Page through text by invoking a program on a temporary file. 
+ 
+    Returns `True` if the command was found, `False` otherwise and thus another 
+    pager should be attempted. 
+    &quot;&quot;&quot;</span>
+    <span class="s6"># Split the command into the invoked CLI and its parameters.</span>
+    <span class="s2">if not </span><span class="s1">cmd_parts</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s1">cmd </span><span class="s3">= </span><span class="s1">cmd_parts</span><span class="s3">[</span><span class="s5">0</span><span class="s3">]</span>
+
+    <span class="s1">cmd_filepath </span><span class="s3">= </span><span class="s1">which</span><span class="s3">(</span><span class="s1">cmd</span><span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">cmd_filepath</span><span class="s3">:</span>
+        <span class="s2">return False</span>
+    <span class="s6"># Resolves symlinks and produces a normalized absolute path string.</span>
+    <span class="s1">cmd_path </span><span class="s3">= </span><span class="s1">Path</span><span class="s3">(</span><span class="s1">cmd_filepath</span><span class="s3">).</span><span class="s1">resolve</span><span class="s3">()</span>
+
+    <span class="s2">import </span><span class="s1">subprocess</span>
+    <span class="s2">import </span><span class="s1">tempfile</span>
+
+    <span class="s1">fd</span><span class="s3">, </span><span class="s1">filename </span><span class="s3">= </span><span class="s1">tempfile</span><span class="s3">.</span><span class="s1">mkstemp</span><span class="s3">()</span>
+    <span class="s6"># TODO: This never terminates if the passed generator never terminates.</span>
+    <span class="s1">text </span><span class="s3">= </span><span class="s4">&quot;&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">generator</span><span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">color</span><span class="s3">:</span>
+        <span class="s1">text </span><span class="s3">= </span><span class="s1">strip_ansi</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+    <span class="s1">encoding </span><span class="s3">= </span><span class="s1">get_best_encoding</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">stdout</span><span class="s3">)</span>
+    <span class="s2">with </span><span class="s1">open_stream</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">, </span><span class="s4">&quot;wb&quot;</span><span class="s3">)[</span><span class="s5">0</span><span class="s3">] </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+        <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">text</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s1">encoding</span><span class="s3">))</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">subprocess</span><span class="s3">.</span><span class="s1">call</span><span class="s3">([</span><span class="s1">str</span><span class="s3">(</span><span class="s1">cmd_path</span><span class="s3">), </span><span class="s1">filename</span><span class="s3">])</span>
+    <span class="s2">except </span><span class="s1">OSError</span><span class="s3">:</span>
+        <span class="s6"># Command not found</span>
+        <span class="s2">pass</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">close</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">)</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">)</span>
+
+    <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_nullpager</span><span class="s3">(</span>
+    <span class="s1">stream</span><span class="s3">: </span><span class="s1">t</span><span class="s3">.</span><span class="s1">TextIO</span><span class="s3">, </span><span class="s1">generator</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">], </span><span class="s1">color</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s2">None</span>
+<span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Simply print unformatted text.  This is the ultimate fallback.&quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">text </span><span class="s2">in </span><span class="s1">generator</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">color</span><span class="s3">:</span>
+            <span class="s1">text </span><span class="s3">= </span><span class="s1">strip_ansi</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+        <span class="s1">stream</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">text</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Editor</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">editor</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">env</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">require_save</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">extension</span><span class="s3">: </span><span class="s1">str </span><span class="s3">= </span><span class="s4">&quot;.txt&quot;</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">editor </span><span class="s3">= </span><span class="s1">editor</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">env </span><span class="s3">= </span><span class="s1">env</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">require_save </span><span class="s3">= </span><span class="s1">require_save</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">extension </span><span class="s3">= </span><span class="s1">extension</span>
+
+    <span class="s2">def </span><span class="s1">get_editor</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">editor </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">editor</span>
+        <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s4">&quot;VISUAL&quot;</span><span class="s3">, </span><span class="s4">&quot;EDITOR&quot;</span><span class="s3">:</span>
+            <span class="s1">rv </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">key</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">rv</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">rv</span>
+        <span class="s2">if </span><span class="s1">WIN</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s4">&quot;notepad&quot;</span>
+        <span class="s2">for </span><span class="s1">editor </span><span class="s2">in </span><span class="s4">&quot;sensible-editor&quot;</span><span class="s3">, </span><span class="s4">&quot;vim&quot;</span><span class="s3">, </span><span class="s4">&quot;nano&quot;</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">which</span><span class="s3">(</span><span class="s1">editor</span><span class="s3">) </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">editor</span>
+        <span class="s2">return </span><span class="s4">&quot;vi&quot;</span>
+
+    <span class="s2">def </span><span class="s1">edit_files</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">filenames</span><span class="s3">: </span><span class="s1">cabc</span><span class="s3">.</span><span class="s1">Iterable</span><span class="s3">[</span><span class="s1">str</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">import </span><span class="s1">subprocess</span>
+
+        <span class="s1">editor </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_editor</span><span class="s3">()</span>
+        <span class="s1">environ</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">env</span><span class="s3">:</span>
+            <span class="s1">environ </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">()</span>
+            <span class="s1">environ</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">env</span><span class="s3">)</span>
+
+        <span class="s1">exc_filename </span><span class="s3">= </span><span class="s4">&quot; &quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s4">f'&quot;</span><span class="s2">{</span><span class="s1">filename</span><span class="s2">}</span><span class="s4">&quot;' </span><span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames</span><span class="s3">)</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">c </span><span class="s3">= </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">Popen</span><span class="s3">(</span>
+                <span class="s1">args</span><span class="s3">=</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">editor</span><span class="s2">} {</span><span class="s1">exc_filename</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s1">env</span><span class="s3">=</span><span class="s1">environ</span><span class="s3">, </span><span class="s1">shell</span><span class="s3">=</span><span class="s2">True</span>
+            <span class="s3">)</span>
+            <span class="s1">exit_code </span><span class="s3">= </span><span class="s1">c</span><span class="s3">.</span><span class="s1">wait</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">exit_code </span><span class="s3">!= </span><span class="s5">0</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ClickException</span><span class="s3">(</span>
+                    <span class="s1">_</span><span class="s3">(</span><span class="s4">&quot;{editor}: Editing failed&quot;</span><span class="s3">).</span><span class="s1">format</span><span class="s3">(</span><span class="s1">editor</span><span class="s3">=</span><span class="s1">editor</span><span class="s3">)</span>
+                <span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ClickException</span><span class="s3">(</span>
+                <span class="s1">_</span><span class="s3">(</span><span class="s4">&quot;{editor}: Editing failed: {e}&quot;</span><span class="s3">).</span><span class="s1">format</span><span class="s3">(</span><span class="s1">editor</span><span class="s3">=</span><span class="s1">editor</span><span class="s3">, </span><span class="s1">e</span><span class="s3">=</span><span class="s1">e</span><span class="s3">)</span>
+            <span class="s3">) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s3">@</span><span class="s1">t</span><span class="s3">.</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">edit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">bytearray</span><span class="s3">) </span><span class="s1">-&gt; bytes </span><span class="s3">| </span><span class="s2">None</span><span class="s3">: ...</span>
+
+    <span class="s6"># We cannot know whether or not the type expected is str or bytes when None</span>
+    <span class="s6"># is passed, so str is returned as that was what was done before.</span>
+    <span class="s3">@</span><span class="s1">t</span><span class="s3">.</span><span class="s1">overload</span>
+    <span class="s2">def </span><span class="s1">edit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s2">None</span><span class="s3">: ...</span>
+
+    <span class="s2">def </span><span class="s1">edit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">text</span><span class="s3">: </span><span class="s1">str </span><span class="s3">| </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">bytearray </span><span class="s3">| </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; str </span><span class="s3">| </span><span class="s1">bytes </span><span class="s3">| </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">import </span><span class="s1">tempfile</span>
+
+        <span class="s2">if </span><span class="s1">text </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s7">b&quot;&quot;</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">text</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">)):</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">text</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">text </span><span class="s2">and not </span><span class="s1">text</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">):</span>
+                <span class="s1">text </span><span class="s3">+= </span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span>
+
+            <span class="s2">if </span><span class="s1">WIN</span><span class="s3">:</span>
+                <span class="s1">data </span><span class="s3">= </span><span class="s1">text</span><span class="s3">.</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s4">&quot;</span><span class="s2">\r\n</span><span class="s4">&quot;</span><span class="s3">).</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;utf-8-sig&quot;</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">data </span><span class="s3">= </span><span class="s1">text</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;utf-8&quot;</span><span class="s3">)</span>
+
+        <span class="s1">fd</span><span class="s3">, </span><span class="s1">name </span><span class="s3">= </span><span class="s1">tempfile</span><span class="s3">.</span><span class="s1">mkstemp</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">=</span><span class="s4">&quot;editor-&quot;</span><span class="s3">, </span><span class="s1">suffix</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">extension</span><span class="s3">)</span>
+        <span class="s1">f</span><span class="s3">: </span><span class="s1">t</span><span class="s3">.</span><span class="s1">BinaryIO</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">os</span><span class="s3">.</span><span class="s1">fdopen</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">, </span><span class="s4">&quot;wb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+                <span class="s1">f</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+            <span class="s6"># If the filesystem resolution is 1 second, like Mac OS</span>
+            <span class="s6"># 10.12 Extended, or 2 seconds, like FAT32, and the editor</span>
+            <span class="s6"># closes very fast, require_save can fail. Set the modified</span>
+            <span class="s6"># time to be 2 seconds in the past to work around this.</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">utime</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, (</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">getatime</span><span class="s3">(</span><span class="s1">name</span><span class="s3">), </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">getmtime</span><span class="s3">(</span><span class="s1">name</span><span class="s3">) - </span><span class="s5">2</span><span class="s3">))</span>
+            <span class="s6"># Depending on the resolution, the exact value might not be</span>
+            <span class="s6"># recorded, so get the new recorded value.</span>
+            <span class="s1">timestamp </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">getmtime</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">edit_files</span><span class="s3">((</span><span class="s1">name</span><span class="s3">,))</span>
+
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">require_save </span><span class="s2">and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">getmtime</span><span class="s3">(</span><span class="s1">name</span><span class="s3">) == </span><span class="s1">timestamp</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+
+            <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s4">&quot;rb&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">f</span><span class="s3">:</span>
+                <span class="s1">rv </span><span class="s3">= </span><span class="s1">f</span><span class="s3">.</span><span class="s1">read</span><span class="s3">()</span>
+
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">text</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">)):</span>
+                <span class="s2">return </span><span class="s1">rv</span>
+
+            <span class="s2">return </span><span class="s1">rv</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s4">&quot;utf-8-sig&quot;</span><span class="s3">).</span><span class="s1">replace</span><span class="s3">(</span><span class="s4">&quot;</span><span class="s2">\r\n</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s3">)</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">name</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">open_url</span><span class="s3">(</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">wait</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">, </span><span class="s1">locate</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+    <span class="s2">import </span><span class="s1">subprocess</span>
+
+    <span class="s2">def </span><span class="s1">_unquote_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">from </span><span class="s1">urllib</span><span class="s3">.</span><span class="s1">parse </span><span class="s2">import </span><span class="s1">unquote</span>
+
+        <span class="s2">if </span><span class="s1">url</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s4">&quot;file://&quot;</span><span class="s3">):</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">unquote</span><span class="s3">(</span><span class="s1">url</span><span class="s3">[</span><span class="s5">7</span><span class="s3">:])</span>
+
+        <span class="s2">return </span><span class="s1">url</span>
+
+    <span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform </span><span class="s3">== </span><span class="s4">&quot;darwin&quot;</span><span class="s3">:</span>
+        <span class="s1">args </span><span class="s3">= [</span><span class="s4">&quot;open&quot;</span><span class="s3">]</span>
+        <span class="s2">if </span><span class="s1">wait</span><span class="s3">:</span>
+            <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;-W&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">locate</span><span class="s3">:</span>
+            <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;-R&quot;</span><span class="s3">)</span>
+        <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">_unquote_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">))</span>
+        <span class="s1">null </span><span class="s3">= </span><span class="s1">open</span><span class="s3">(</span><span class="s4">&quot;/dev/null&quot;</span><span class="s3">, </span><span class="s4">&quot;w&quot;</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">Popen</span><span class="s3">(</span><span class="s1">args</span><span class="s3">, </span><span class="s1">stderr</span><span class="s3">=</span><span class="s1">null</span><span class="s3">).</span><span class="s1">wait</span><span class="s3">()</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">null</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+    <span class="s2">elif </span><span class="s1">WIN</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">locate</span><span class="s3">:</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">_unquote_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+            <span class="s1">args </span><span class="s3">= [</span><span class="s4">&quot;explorer&quot;</span><span class="s3">, </span><span class="s4">f&quot;/select,</span><span class="s2">{</span><span class="s1">url</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s3">]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">args </span><span class="s3">= [</span><span class="s4">&quot;start&quot;</span><span class="s3">]</span>
+            <span class="s2">if </span><span class="s1">wait</span><span class="s3">:</span>
+                <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;/WAIT&quot;</span><span class="s3">)</span>
+            <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;&quot;</span><span class="s3">)</span>
+            <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">call</span><span class="s3">(</span><span class="s1">args</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">OSError</span><span class="s3">:</span>
+            <span class="s6"># Command not found</span>
+            <span class="s2">return </span><span class="s5">127</span>
+    <span class="s2">elif </span><span class="s1">CYGWIN</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">locate</span><span class="s3">:</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">_unquote_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+            <span class="s1">args </span><span class="s3">= [</span><span class="s4">&quot;cygstart&quot;</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">args </span><span class="s3">= [</span><span class="s4">&quot;cygstart&quot;</span><span class="s3">]</span>
+            <span class="s2">if </span><span class="s1">wait</span><span class="s3">:</span>
+                <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s4">&quot;-w&quot;</span><span class="s3">)</span>
+            <span class="s1">args</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">call</span><span class="s3">(</span><span class="s1">args</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">OSError</span><span class="s3">:</span>
+            <span class="s6"># Command not found</span>
+            <span class="s2">return </span><span class="s5">127</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">locate</span><span class="s3">:</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">_unquote_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)) </span><span class="s2">or </span><span class="s4">&quot;.&quot;</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">_unquote_file</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+        <span class="s1">c </span><span class="s3">= </span><span class="s1">subprocess</span><span class="s3">.</span><span class="s1">Popen</span><span class="s3">([</span><span class="s4">&quot;xdg-open&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">])</span>
+        <span class="s2">if </span><span class="s1">wait</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">c</span><span class="s3">.</span><span class="s1">wait</span><span class="s3">()</span>
+        <span class="s2">return </span><span class="s5">0</span>
+    <span class="s2">except </span><span class="s1">OSError</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">url</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">((</span><span class="s4">&quot;http://&quot;</span><span class="s3">, </span><span class="s4">&quot;https://&quot;</span><span class="s3">)) </span><span class="s2">and not </span><span class="s1">locate </span><span class="s2">and not </span><span class="s1">wait</span><span class="s3">:</span>
+            <span class="s2">import </span><span class="s1">webbrowser</span>
+
+            <span class="s1">webbrowser</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s5">0</span>
+        <span class="s2">return </span><span class="s5">1</span>
+
+
+<span class="s2">def </span><span class="s1">_translate_ch_to_exc</span><span class="s3">(</span><span class="s1">ch</span><span class="s3">: </span><span class="s1">str</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">ch </span><span class="s3">== </span><span class="s4">&quot;</span><span class="s2">\x03</span><span class="s4">&quot;</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">KeyboardInterrupt</span><span class="s3">()</span>
+
+    <span class="s2">if </span><span class="s1">ch </span><span class="s3">== </span><span class="s4">&quot;</span><span class="s2">\x04</span><span class="s4">&quot; </span><span class="s2">and not </span><span class="s1">WIN</span><span class="s3">:  </span><span class="s6"># Unix-like, Ctrl+D</span>
+        <span class="s2">raise </span><span class="s1">EOFError</span><span class="s3">()</span>
+
+    <span class="s2">if </span><span class="s1">ch </span><span class="s3">== </span><span class="s4">&quot;</span><span class="s2">\x1a</span><span class="s4">&quot; </span><span class="s2">and </span><span class="s1">WIN</span><span class="s3">:  </span><span class="s6"># Windows, Ctrl+Z</span>
+        <span class="s2">raise </span><span class="s1">EOFError</span><span class="s3">()</span>
+
+    <span class="s2">return None</span>
+
+
+<span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform </span><span class="s3">== </span><span class="s4">&quot;win32&quot;</span><span class="s3">:</span>
+    <span class="s2">import </span><span class="s1">msvcrt</span>
+
+    <span class="s3">@</span><span class="s1">contextlib</span><span class="s3">.</span><span class="s1">contextmanager</span>
+    <span class="s2">def </span><span class="s1">raw_terminal</span><span class="s3">() </span><span class="s1">-&gt; cabc</span><span class="s3">.</span><span class="s1">Iterator</span><span class="s3">[</span><span class="s1">int</span><span class="s3">]:</span>
+        <span class="s2">yield </span><span class="s3">-</span><span class="s5">1</span>
+
+    <span class="s2">def </span><span class="s1">getchar</span><span class="s3">(</span><span class="s1">echo</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s6"># The function `getch` will return a bytes object corresponding to</span>
+        <span class="s6"># the pressed character. Since Windows 10 build 1803, it will also</span>
+        <span class="s6"># return \x00 when called a second time after pressing a regular key.</span>
+        <span class="s6">#</span>
+        <span class="s6"># `getwch` does not share this probably-bugged behavior. Moreover, it</span>
+        <span class="s6"># returns a Unicode object by default, which is what we want.</span>
+        <span class="s6">#</span>
+        <span class="s6"># Either of these functions will return \x00 or \xe0 to indicate</span>
+        <span class="s6"># a special key, and you need to call the same function again to get</span>
+        <span class="s6"># the &quot;rest&quot; of the code. The fun part is that \u00e0 is</span>
+        <span class="s6"># &quot;latin small letter a with grave&quot;, so if you type that on a French</span>
+        <span class="s6"># keyboard, you _also_ get a \xe0.</span>
+        <span class="s6"># E.g., consider the Up arrow. This returns \xe0 and then \x48. The</span>
+        <span class="s6"># resulting Unicode string reads as &quot;a with grave&quot; + &quot;capital H&quot;.</span>
+        <span class="s6"># This is indistinguishable from when the user actually types</span>
+        <span class="s6"># &quot;a with grave&quot; and then &quot;capital H&quot;.</span>
+        <span class="s6">#</span>
+        <span class="s6"># When \xe0 is returned, we assume it's part of a special-key sequence</span>
+        <span class="s6"># and call `getwch` again, but that means that when the user types</span>
+        <span class="s6"># the \u00e0 character, `getchar` doesn't return until a second</span>
+        <span class="s6"># character is typed.</span>
+        <span class="s6"># The alternative is returning immediately, but that would mess up</span>
+        <span class="s6"># cross-platform handling of arrow keys and others that start with</span>
+        <span class="s6"># \xe0. Another option is using `getch`, but then we can't reliably</span>
+        <span class="s6"># read non-ASCII characters, because return values of `getch` are</span>
+        <span class="s6"># limited to the current 8-bit codepage.</span>
+        <span class="s6">#</span>
+        <span class="s6"># Anyway, Click doesn't claim to do this Right(tm), and using `getwch`</span>
+        <span class="s6"># is doing the right thing in more situations than with `getch`.</span>
+
+        <span class="s2">if </span><span class="s1">echo</span><span class="s3">:</span>
+            <span class="s1">func </span><span class="s3">= </span><span class="s1">t</span><span class="s3">.</span><span class="s1">cast</span><span class="s3">(</span><span class="s1">t</span><span class="s3">.</span><span class="s1">Callable</span><span class="s3">[[], </span><span class="s1">str</span><span class="s3">], </span><span class="s1">msvcrt</span><span class="s3">.</span><span class="s1">getwche</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">func </span><span class="s3">= </span><span class="s1">t</span><span class="s3">.</span><span class="s1">cast</span><span class="s3">(</span><span class="s1">t</span><span class="s3">.</span><span class="s1">Callable</span><span class="s3">[[], </span><span class="s1">str</span><span class="s3">], </span><span class="s1">msvcrt</span><span class="s3">.</span><span class="s1">getwch</span><span class="s3">)</span>
+
+        <span class="s1">rv </span><span class="s3">= </span><span class="s1">func</span><span class="s3">()</span>
+
+        <span class="s2">if </span><span class="s1">rv </span><span class="s2">in </span><span class="s3">(</span><span class="s4">&quot;</span><span class="s2">\x00</span><span class="s4">&quot;</span><span class="s3">, </span><span class="s4">&quot;</span><span class="s2">\xe0</span><span class="s4">&quot;</span><span class="s3">):</span>
+            <span class="s6"># \x00 and \xe0 are control characters that indicate special key,</span>
+            <span class="s6"># see above.</span>
+            <span class="s1">rv </span><span class="s3">+= </span><span class="s1">func</span><span class="s3">()</span>
+
+        <span class="s1">_translate_ch_to_exc</span><span class="s3">(</span><span class="s1">rv</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+<span class="s2">else</span><span class="s3">:</span>
+    <span class="s2">import </span><span class="s1">termios</span>
+    <span class="s2">import </span><span class="s1">tty</span>
+
+    <span class="s3">@</span><span class="s1">contextlib</span><span class="s3">.</span><span class="s1">contextmanager</span>
+    <span class="s2">def </span><span class="s1">raw_terminal</span><span class="s3">() </span><span class="s1">-&gt; cabc</span><span class="s3">.</span><span class="s1">Iterator</span><span class="s3">[</span><span class="s1">int</span><span class="s3">]:</span>
+        <span class="s1">f</span><span class="s3">: </span><span class="s1">t</span><span class="s3">.</span><span class="s1">TextIO </span><span class="s3">| </span><span class="s2">None</span>
+        <span class="s1">fd</span><span class="s3">: </span><span class="s1">int</span>
+
+        <span class="s2">if not </span><span class="s1">isatty</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">stdin</span><span class="s3">):</span>
+            <span class="s1">f </span><span class="s3">= </span><span class="s1">open</span><span class="s3">(</span><span class="s4">&quot;/dev/tty&quot;</span><span class="s3">)</span>
+            <span class="s1">fd </span><span class="s3">= </span><span class="s1">f</span><span class="s3">.</span><span class="s1">fileno</span><span class="s3">()</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">fd </span><span class="s3">= </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">stdin</span><span class="s3">.</span><span class="s1">fileno</span><span class="s3">()</span>
+            <span class="s1">f </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">old_settings </span><span class="s3">= </span><span class="s1">termios</span><span class="s3">.</span><span class="s1">tcgetattr</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">)</span>
+
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">tty</span><span class="s3">.</span><span class="s1">setraw</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">)</span>
+                <span class="s2">yield </span><span class="s1">fd</span>
+            <span class="s2">finally</span><span class="s3">:</span>
+                <span class="s1">termios</span><span class="s3">.</span><span class="s1">tcsetattr</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">, </span><span class="s1">termios</span><span class="s3">.</span><span class="s1">TCSADRAIN</span><span class="s3">, </span><span class="s1">old_settings</span><span class="s3">)</span>
+                <span class="s1">sys</span><span class="s3">.</span><span class="s1">stdout</span><span class="s3">.</span><span class="s1">flush</span><span class="s3">()</span>
+
+                <span class="s2">if </span><span class="s1">f </span><span class="s2">is not None</span><span class="s3">:</span>
+                    <span class="s1">f</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s2">except </span><span class="s1">termios</span><span class="s3">.</span><span class="s1">error</span><span class="s3">:</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">getchar</span><span class="s3">(</span><span class="s1">echo</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s2">with </span><span class="s1">raw_terminal</span><span class="s3">() </span><span class="s2">as </span><span class="s1">fd</span><span class="s3">:</span>
+            <span class="s1">ch </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">fd</span><span class="s3">, </span><span class="s5">32</span><span class="s3">).</span><span class="s1">decode</span><span class="s3">(</span><span class="s1">get_best_encoding</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">stdin</span><span class="s3">), </span><span class="s4">&quot;replace&quot;</span><span class="s3">)</span>
+
+            <span class="s2">if </span><span class="s1">echo </span><span class="s2">and </span><span class="s1">isatty</span><span class="s3">(</span><span class="s1">sys</span><span class="s3">.</span><span class="s1">stdout</span><span class="s3">):</span>
+                <span class="s1">sys</span><span class="s3">.</span><span class="s1">stdout</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">ch</span><span class="s3">)</span>
+
+            <span class="s1">_translate_ch_to_exc</span><span class="s3">(</span><span class="s1">ch</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">ch</span>
+</pre>
+</body>
+</html>

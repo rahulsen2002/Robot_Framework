@@ -1,0 +1,274 @@
+<html>
+<head>
+<title>_highlevel_open_tcp_listeners.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #2aacb8;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_highlevel_open_tcp_listeners.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+<span class="s0">from </span><span class="s1">trio </span><span class="s0">import </span><span class="s1">TaskStatus</span>
+
+<span class="s0">from </span><span class="s2">. </span><span class="s0">import </span><span class="s1">socket </span><span class="s0">as </span><span class="s1">tsocket</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Awaitable</span><span class="s2">, </span><span class="s1">Callable</span>
+
+<span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&lt; (</span><span class="s3">3</span><span class="s2">, </span><span class="s3">11</span><span class="s2">):</span>
+    <span class="s0">from </span><span class="s1">exceptiongroup </span><span class="s0">import </span><span class="s1">ExceptionGroup</span>
+
+
+<span class="s4"># Default backlog size:</span>
+<span class="s4">#</span>
+<span class="s4"># Having the backlog too low can cause practical problems (a perfectly healthy</span>
+<span class="s4"># service that starts failing to accept connections if they arrive in a</span>
+<span class="s4"># burst).</span>
+<span class="s4">#</span>
+<span class="s4"># Having it too high doesn't really cause any problems. Like any buffer, you</span>
+<span class="s4"># want backlog queue to be zero usually, and it won't save you if you're</span>
+<span class="s4"># getting connection attempts faster than you can call accept() on an ongoing</span>
+<span class="s4"># basis. But unlike other buffers, this one doesn't really provide any</span>
+<span class="s4"># backpressure. If a connection gets stuck waiting in the backlog queue, then</span>
+<span class="s4"># from the peer's point of view the connection succeeded but then their</span>
+<span class="s4"># send/recv will stall until we get to it, possibly for a long time. OTOH if</span>
+<span class="s4"># there isn't room in the backlog queue, then their connect stalls, possibly</span>
+<span class="s4"># for a long time, which is pretty much the same thing.</span>
+<span class="s4">#</span>
+<span class="s4"># A large backlog can also use a bit more kernel memory, but this seems fairly</span>
+<span class="s4"># negligible these days.</span>
+<span class="s4">#</span>
+<span class="s4"># So this suggests we should make the backlog as large as possible. This also</span>
+<span class="s4"># matches what Golang does. However, they do it in a weird way, where they</span>
+<span class="s4"># have a bunch of code to sniff out the configured upper limit for backlog on</span>
+<span class="s4"># different operating systems. But on every system, passing in a too-large</span>
+<span class="s4"># backlog just causes it to be silently truncated to the configured maximum,</span>
+<span class="s4"># so this is unnecessary -- we can just pass in &quot;infinity&quot; and get the maximum</span>
+<span class="s4"># that way. (Verified on Windows, Linux, macOS using</span>
+<span class="s4"># https://github.com/python-trio/trio/wiki/notes-to-self#measure-listen-backlogpy</span>
+<span class="s0">def </span><span class="s1">_compute_backlog</span><span class="s2">(</span><span class="s1">backlog</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+    <span class="s4"># Many systems (Linux, BSDs, ...) store the backlog in a uint16 and are</span>
+    <span class="s4"># missing overflow protection, so we apply our own overflow protection.</span>
+    <span class="s4"># https://github.com/golang/go/issues/5030</span>
+    <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">backlog</span><span class="s2">, </span><span class="s1">int</span><span class="s2">) </span><span class="s0">and </span><span class="s1">backlog </span><span class="s0">is not None</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s5">f&quot;backlog must be an int or None, not </span><span class="s0">{</span><span class="s1">backlog</span><span class="s0">!r}</span><span class="s5">&quot;</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">backlog </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s3">0xFFFF</span>
+    <span class="s0">return </span><span class="s1">min</span><span class="s2">(</span><span class="s1">backlog</span><span class="s2">, </span><span class="s3">0xFFFF</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">open_tcp_listeners</span><span class="s2">(</span>
+    <span class="s1">port</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">*,</span>
+    <span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">backlog</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SocketListener</span><span class="s2">]:</span>
+    <span class="s6">&quot;&quot;&quot;Create :class:`SocketListener` objects to listen for TCP connections. 
+ 
+    Args: 
+ 
+      port (int): The port to listen on. 
+ 
+          If you use 0 as your port, then the kernel will automatically pick 
+          an arbitrary open port. But be careful: if you use this feature when 
+          binding to multiple IP addresses, then each IP address will get its 
+          own random port, and the returned listeners will probably be 
+          listening on different ports. In particular, this will happen if you 
+          use ``host=None`` – which is the default – because in this case 
+          :func:`open_tcp_listeners` will bind to both the IPv4 wildcard 
+          address (``0.0.0.0``) and also the IPv6 wildcard address (``::``). 
+ 
+      host (str, bytes, or None): The local interface to bind to. This is 
+          passed to :func:`~socket.getaddrinfo` with the ``AI_PASSIVE`` flag 
+          set. 
+ 
+          If you want to bind to the wildcard address on both IPv4 and IPv6, 
+          in order to accept connections on all available interfaces, then 
+          pass ``None``. This is the default. 
+ 
+          If you have a specific interface you want to bind to, pass its IP 
+          address or hostname here. If a hostname resolves to multiple IP 
+          addresses, this function will open one listener on each of them. 
+ 
+          If you want to use only IPv4, or only IPv6, but want to accept on 
+          all interfaces, pass the family-specific wildcard address: 
+          ``&quot;0.0.0.0&quot;`` for IPv4-only and ``&quot;::&quot;`` for IPv6-only. 
+ 
+      backlog (int or None): The listen backlog to use. If you leave this as 
+          ``None`` then Trio will pick a good default. (Currently: whatever 
+          your system has configured as the maximum backlog.) 
+ 
+    Returns: 
+      list of :class:`SocketListener` 
+ 
+    Raises: 
+      :class:`TypeError` if invalid arguments. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># getaddrinfo sometimes allows port=None, sometimes not (depending on</span>
+    <span class="s4"># whether host=None). And on some systems it treats &quot;&quot; as 0, others it</span>
+    <span class="s4"># doesn't:</span>
+    <span class="s4">#   http://klickverbot.at/blog/2012/01/getaddrinfo-edge-case-behavior-on-windows-linux-and-osx/</span>
+    <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">port</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s5">f&quot;port must be an int not </span><span class="s0">{</span><span class="s1">port</span><span class="s0">!r}</span><span class="s5">&quot;</span><span class="s2">)</span>
+
+    <span class="s1">computed_backlog </span><span class="s2">= </span><span class="s1">_compute_backlog</span><span class="s2">(</span><span class="s1">backlog</span><span class="s2">)</span>
+
+    <span class="s1">addresses </span><span class="s2">= </span><span class="s0">await </span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">getaddrinfo</span><span class="s2">(</span>
+        <span class="s1">host</span><span class="s2">,</span>
+        <span class="s1">port</span><span class="s2">,</span>
+        <span class="s1">type</span><span class="s2">=</span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">SOCK_STREAM</span><span class="s2">,</span>
+        <span class="s1">flags</span><span class="s2">=</span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">AI_PASSIVE</span><span class="s2">,</span>
+    <span class="s2">)</span>
+
+    <span class="s1">listeners </span><span class="s2">= []</span>
+    <span class="s1">unsupported_address_families </span><span class="s2">= []</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">family</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">sockaddr </span><span class="s0">in </span><span class="s1">addresses</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">sock </span><span class="s2">= </span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">(</span><span class="s1">family</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">ex</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">ex</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EAFNOSUPPORT</span><span class="s2">:</span>
+                    <span class="s4"># If a system only supports IPv4, or only IPv6, it</span>
+                    <span class="s4"># is still likely that getaddrinfo will return</span>
+                    <span class="s4"># both an IPv4 and an IPv6 address. As long as at</span>
+                    <span class="s4"># least one of the returned addresses can be</span>
+                    <span class="s4"># turned into a socket, we won't complain about a</span>
+                    <span class="s4"># failure to create the other.</span>
+                    <span class="s1">unsupported_address_families</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">ex</span><span class="s2">)</span>
+                    <span class="s0">continue</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s0">raise</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s4"># See https://github.com/python-trio/trio/issues/39</span>
+                <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s5">&quot;win32&quot;</span><span class="s2">:</span>
+                    <span class="s1">sock</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">SOL_SOCKET</span><span class="s2">, </span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">SO_REUSEADDR</span><span class="s2">, </span><span class="s3">1</span><span class="s2">)</span>
+
+                <span class="s0">if </span><span class="s1">family </span><span class="s2">== </span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">AF_INET6</span><span class="s2">:</span>
+                    <span class="s1">sock</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">IPPROTO_IPV6</span><span class="s2">, </span><span class="s1">tsocket</span><span class="s2">.</span><span class="s1">IPV6_V6ONLY</span><span class="s2">, </span><span class="s3">1</span><span class="s2">)</span>
+
+                <span class="s0">await </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">bind</span><span class="s2">(</span><span class="s1">sockaddr</span><span class="s2">)</span>
+                <span class="s1">sock</span><span class="s2">.</span><span class="s1">listen</span><span class="s2">(</span><span class="s1">computed_backlog</span><span class="s2">)</span>
+
+                <span class="s1">listeners</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SocketListener</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">))</span>
+            <span class="s0">except</span><span class="s2">:</span>
+                <span class="s1">sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+                <span class="s0">raise</span>
+    <span class="s0">except</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">listener </span><span class="s0">in </span><span class="s1">listeners</span><span class="s2">:</span>
+            <span class="s1">listener</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">raise</span>
+
+    <span class="s0">if </span><span class="s1">unsupported_address_families </span><span class="s0">and not </span><span class="s1">listeners</span><span class="s2">:</span>
+        <span class="s1">msg </span><span class="s2">= (</span>
+            <span class="s5">&quot;This system doesn't support any of the kinds of &quot;</span>
+            <span class="s5">&quot;socket that that address could use&quot;</span>
+        <span class="s2">)</span>
+        <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EAFNOSUPPORT</span><span class="s2">, </span><span class="s1">msg</span><span class="s2">) </span><span class="s0">from </span><span class="s1">ExceptionGroup</span><span class="s2">(</span>
+            <span class="s1">msg</span><span class="s2">,</span>
+            <span class="s1">unsupported_address_families</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s1">listeners</span>
+
+
+<span class="s0">async def </span><span class="s1">serve_tcp</span><span class="s2">(</span>
+    <span class="s1">handler</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SocketStream</span><span class="s2">], </span><span class="s1">Awaitable</span><span class="s2">[</span><span class="s1">object</span><span class="s2">]],</span>
+    <span class="s1">port</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">*,</span>
+    <span class="s1">host</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">bytes </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">backlog</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">handler_nursery</span><span class="s2">: </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">Nursery </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s1">task_status</span><span class="s2">: </span><span class="s1">TaskStatus</span><span class="s2">[</span><span class="s1">list</span><span class="s2">[</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SocketListener</span><span class="s2">]] = </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">TASK_STATUS_IGNORED</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s6">&quot;&quot;&quot;Listen for incoming TCP connections, and for each one start a task 
+    running ``handler(stream)``. 
+ 
+    This is a thin convenience wrapper around :func:`open_tcp_listeners` and 
+    :func:`serve_listeners` – see them for full details. 
+ 
+    .. warning:: 
+ 
+       If ``handler`` raises an exception, then this function doesn't do 
+       anything special to catch it – so by default the exception will 
+       propagate out and crash your server. If you don't want this, then catch 
+       exceptions inside your ``handler``, or use a ``handler_nursery`` object 
+       that responds to exceptions in some other way. 
+ 
+    When used with ``nursery.start`` you get back the newly opened listeners. 
+    So, for example, if you want to start a server in your test suite and then 
+    connect to it to check that it's working properly, you can use something 
+    like:: 
+ 
+        from trio import SocketListener, SocketStream 
+        from trio.testing import open_stream_to_socket_listener 
+ 
+        async with trio.open_nursery() as nursery: 
+            listeners: list[SocketListener] = await nursery.start(serve_tcp, handler, 0) 
+            client_stream: SocketStream = await open_stream_to_socket_listener(listeners[0]) 
+ 
+            # Then send and receive data on 'client_stream', for example: 
+            await client_stream.send_all(b&quot;GET / HTTP/1.0\\r\\n\\r\\n&quot;) 
+ 
+    This avoids several common pitfalls: 
+ 
+    1. It lets the kernel pick a random open port, so your test suite doesn't 
+       depend on any particular port being open. 
+ 
+    2. It waits for the server to be accepting connections on that port before 
+       ``start`` returns, so there's no race condition where the incoming 
+       connection arrives before the server is ready. 
+ 
+    3. It uses the Listener object to find out which port was picked, so it 
+       can connect to the right place. 
+ 
+    Args: 
+      handler: The handler to start for each incoming connection. Passed to 
+          :func:`serve_listeners`. 
+ 
+      port: The port to listen on. Use 0 to let the kernel pick an open port. 
+          Passed to :func:`open_tcp_listeners`. 
+ 
+      host (str, bytes, or None): The host interface to listen on; use 
+          ``None`` to bind to the wildcard address. Passed to 
+          :func:`open_tcp_listeners`. 
+ 
+      backlog: The listen backlog, or None to have a good default picked. 
+          Passed to :func:`open_tcp_listeners`. 
+ 
+      handler_nursery: The nursery to start handlers in, or None to use an 
+          internal nursery. Passed to :func:`serve_listeners`. 
+ 
+      task_status: This function can be used with ``nursery.start``. 
+ 
+    Returns: 
+      This function only returns when cancelled. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">listeners </span><span class="s2">= </span><span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_tcp_listeners</span><span class="s2">(</span><span class="s1">port</span><span class="s2">, </span><span class="s1">host</span><span class="s2">=</span><span class="s1">host</span><span class="s2">, </span><span class="s1">backlog</span><span class="s2">=</span><span class="s1">backlog</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">serve_listeners</span><span class="s2">(</span>
+        <span class="s1">handler</span><span class="s2">,</span>
+        <span class="s1">listeners</span><span class="s2">,</span>
+        <span class="s1">handler_nursery</span><span class="s2">=</span><span class="s1">handler_nursery</span><span class="s2">,</span>
+        <span class="s1">task_status</span><span class="s2">=</span><span class="s1">task_status</span><span class="s2">,</span>
+    <span class="s2">)</span>
+</pre>
+</body>
+</html>

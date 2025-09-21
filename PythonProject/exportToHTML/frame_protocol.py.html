@@ -1,0 +1,697 @@
+<html>
+<head>
+<title>frame_protocol.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #6aab73;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+frame_protocol.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+wsproto/frame_protocol 
+~~~~~~~~~~~~~~~~~~~~~~ 
+ 
+WebSocket frame protocol implementation. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">struct</span>
+<span class="s2">from </span><span class="s1">codecs </span><span class="s2">import </span><span class="s1">getincrementaldecoder</span><span class="s3">, </span><span class="s1">IncrementalDecoder</span>
+<span class="s2">from </span><span class="s1">enum </span><span class="s2">import </span><span class="s1">IntEnum</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Generator</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">NamedTuple</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s3">.</span><span class="s1">extensions </span><span class="s2">import </span><span class="s1">Extension  </span><span class="s4"># pragma: no cover</span>
+
+
+<span class="s1">_XOR_TABLE </span><span class="s3">= [</span><span class="s1">bytes</span><span class="s3">(</span><span class="s1">a </span><span class="s3">^ </span><span class="s1">b </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s5">256</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s5">256</span><span class="s3">)]</span>
+
+
+<span class="s2">class </span><span class="s1">XorMaskerSimple</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">masking_key</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_masking_key </span><span class="s3">= </span><span class="s1">masking_key</span>
+
+    <span class="s2">def </span><span class="s1">process</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">:</span>
+            <span class="s1">data_array </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s1">a</span><span class="s3">, </span><span class="s1">b</span><span class="s3">, </span><span class="s1">c</span><span class="s3">, </span><span class="s1">d </span><span class="s3">= (</span><span class="s1">_XOR_TABLE</span><span class="s3">[</span><span class="s1">n</span><span class="s3">] </span><span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_masking_key</span><span class="s3">)</span>
+            <span class="s1">data_array</span><span class="s3">[::</span><span class="s5">4</span><span class="s3">] = </span><span class="s1">data_array</span><span class="s3">[::</span><span class="s5">4</span><span class="s3">].</span><span class="s1">translate</span><span class="s3">(</span><span class="s1">a</span><span class="s3">)</span>
+            <span class="s1">data_array</span><span class="s3">[</span><span class="s5">1</span><span class="s3">::</span><span class="s5">4</span><span class="s3">] = </span><span class="s1">data_array</span><span class="s3">[</span><span class="s5">1</span><span class="s3">::</span><span class="s5">4</span><span class="s3">].</span><span class="s1">translate</span><span class="s3">(</span><span class="s1">b</span><span class="s3">)</span>
+            <span class="s1">data_array</span><span class="s3">[</span><span class="s5">2</span><span class="s3">::</span><span class="s5">4</span><span class="s3">] = </span><span class="s1">data_array</span><span class="s3">[</span><span class="s5">2</span><span class="s3">::</span><span class="s5">4</span><span class="s3">].</span><span class="s1">translate</span><span class="s3">(</span><span class="s1">c</span><span class="s3">)</span>
+            <span class="s1">data_array</span><span class="s3">[</span><span class="s5">3</span><span class="s3">::</span><span class="s5">4</span><span class="s3">] = </span><span class="s1">data_array</span><span class="s3">[</span><span class="s5">3</span><span class="s3">::</span><span class="s5">4</span><span class="s3">].</span><span class="s1">translate</span><span class="s3">(</span><span class="s1">d</span><span class="s3">)</span>
+
+            <span class="s4"># Rotate the masking key so that the next usage continues</span>
+            <span class="s4"># with the next key element, rather than restarting.</span>
+            <span class="s1">key_rotation </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) % </span><span class="s5">4</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_masking_key </span><span class="s3">= (</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_masking_key</span><span class="s3">[</span><span class="s1">key_rotation</span><span class="s3">:] + </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_masking_key</span><span class="s3">[:</span><span class="s1">key_rotation</span><span class="s3">]</span>
+            <span class="s3">)</span>
+
+            <span class="s2">return </span><span class="s1">bytes</span><span class="s3">(</span><span class="s1">data_array</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+
+<span class="s2">class </span><span class="s1">XorMaskerNull</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">process</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+
+<span class="s4"># RFC6455, Section 5.2 - Base Framing Protocol</span>
+
+<span class="s4"># Payload length constants</span>
+<span class="s1">PAYLOAD_LENGTH_TWO_BYTE </span><span class="s3">= </span><span class="s5">126</span>
+<span class="s1">PAYLOAD_LENGTH_EIGHT_BYTE </span><span class="s3">= </span><span class="s5">127</span>
+<span class="s1">MAX_PAYLOAD_NORMAL </span><span class="s3">= </span><span class="s5">125</span>
+<span class="s1">MAX_PAYLOAD_TWO_BYTE </span><span class="s3">= </span><span class="s5">2</span><span class="s3">**</span><span class="s5">16 </span><span class="s3">- </span><span class="s5">1</span>
+<span class="s1">MAX_PAYLOAD_EIGHT_BYTE </span><span class="s3">= </span><span class="s5">2</span><span class="s3">**</span><span class="s5">64 </span><span class="s3">- </span><span class="s5">1</span>
+<span class="s1">MAX_FRAME_PAYLOAD </span><span class="s3">= </span><span class="s1">MAX_PAYLOAD_EIGHT_BYTE</span>
+
+<span class="s4"># MASK and PAYLOAD LEN are packed into a byte</span>
+<span class="s1">MASK_MASK </span><span class="s3">= </span><span class="s5">0x80</span>
+<span class="s1">PAYLOAD_LEN_MASK </span><span class="s3">= </span><span class="s5">0x7F</span>
+
+<span class="s4"># FIN, RSV[123] and OPCODE are packed into a single byte</span>
+<span class="s1">FIN_MASK </span><span class="s3">= </span><span class="s5">0x80</span>
+<span class="s1">RSV1_MASK </span><span class="s3">= </span><span class="s5">0x40</span>
+<span class="s1">RSV2_MASK </span><span class="s3">= </span><span class="s5">0x20</span>
+<span class="s1">RSV3_MASK </span><span class="s3">= </span><span class="s5">0x10</span>
+<span class="s1">OPCODE_MASK </span><span class="s3">= </span><span class="s5">0x0F</span>
+
+
+<span class="s2">class </span><span class="s1">Opcode</span><span class="s3">(</span><span class="s1">IntEnum</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    RFC 6455, Section 5.2 - Base Framing Protocol 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4">#: Continuation frame</span>
+    <span class="s1">CONTINUATION </span><span class="s3">= </span><span class="s5">0x0</span>
+
+    <span class="s4">#: Text message</span>
+    <span class="s1">TEXT </span><span class="s3">= </span><span class="s5">0x1</span>
+
+    <span class="s4">#: Binary message</span>
+    <span class="s1">BINARY </span><span class="s3">= </span><span class="s5">0x2</span>
+
+    <span class="s4">#: Close frame</span>
+    <span class="s1">CLOSE </span><span class="s3">= </span><span class="s5">0x8</span>
+
+    <span class="s4">#: Ping frame</span>
+    <span class="s1">PING </span><span class="s3">= </span><span class="s5">0x9</span>
+
+    <span class="s4">#: Pong frame</span>
+    <span class="s1">PONG </span><span class="s3">= </span><span class="s5">0xA</span>
+
+    <span class="s2">def </span><span class="s1">iscontrol</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">self </span><span class="s3">&amp; </span><span class="s5">0x08</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">CloseReason</span><span class="s3">(</span><span class="s1">IntEnum</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    RFC 6455, Section 7.4.1 - Defined Status Codes 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4">#: indicates a normal closure, meaning that the purpose for</span>
+    <span class="s4">#: which the connection was established has been fulfilled.</span>
+    <span class="s1">NORMAL_CLOSURE </span><span class="s3">= </span><span class="s5">1000</span>
+
+    <span class="s4">#: indicates that an endpoint is &quot;going away&quot;, such as a server</span>
+    <span class="s4">#: going down or a browser having navigated away from a page.</span>
+    <span class="s1">GOING_AWAY </span><span class="s3">= </span><span class="s5">1001</span>
+
+    <span class="s4">#: indicates that an endpoint is terminating the connection due</span>
+    <span class="s4">#: to a protocol error.</span>
+    <span class="s1">PROTOCOL_ERROR </span><span class="s3">= </span><span class="s5">1002</span>
+
+    <span class="s4">#: indicates that an endpoint is terminating the connection</span>
+    <span class="s4">#: because it has received a type of data it cannot accept (e.g., an</span>
+    <span class="s4">#: endpoint that understands only text data MAY send this if it</span>
+    <span class="s4">#: receives a binary message).</span>
+    <span class="s1">UNSUPPORTED_DATA </span><span class="s3">= </span><span class="s5">1003</span>
+
+    <span class="s4">#: Reserved.  The specific meaning might be defined in the future.</span>
+    <span class="s4"># DON'T DEFINE THIS: RESERVED_1004 = 1004</span>
+
+    <span class="s4">#: is a reserved value and MUST NOT be set as a status code in a</span>
+    <span class="s4">#: Close control frame by an endpoint.  It is designated for use in</span>
+    <span class="s4">#: applications expecting a status code to indicate that no status</span>
+    <span class="s4">#: code was actually present.</span>
+    <span class="s1">NO_STATUS_RCVD </span><span class="s3">= </span><span class="s5">1005</span>
+
+    <span class="s4">#: is a reserved value and MUST NOT be set as a status code in a</span>
+    <span class="s4">#: Close control frame by an endpoint.  It is designated for use in</span>
+    <span class="s4">#: applications expecting a status code to indicate that the</span>
+    <span class="s4">#: connection was closed abnormally, e.g., without sending or</span>
+    <span class="s4">#: receiving a Close control frame.</span>
+    <span class="s1">ABNORMAL_CLOSURE </span><span class="s3">= </span><span class="s5">1006</span>
+
+    <span class="s4">#: indicates that an endpoint is terminating the connection</span>
+    <span class="s4">#: because it has received data within a message that was not</span>
+    <span class="s4">#: consistent with the type of the message (e.g., non-UTF-8 [RFC3629]</span>
+    <span class="s4">#: data within a text message).</span>
+    <span class="s1">INVALID_FRAME_PAYLOAD_DATA </span><span class="s3">= </span><span class="s5">1007</span>
+
+    <span class="s4">#: indicates that an endpoint is terminating the connection</span>
+    <span class="s4">#: because it has received a message that violates its policy.  This</span>
+    <span class="s4">#: is a generic status code that can be returned when there is no</span>
+    <span class="s4">#: other more suitable status code (e.g., 1003 or 1009) or if there</span>
+    <span class="s4">#: is a need to hide specific details about the policy.</span>
+    <span class="s1">POLICY_VIOLATION </span><span class="s3">= </span><span class="s5">1008</span>
+
+    <span class="s4">#: indicates that an endpoint is terminating the connection</span>
+    <span class="s4">#: because it has received a message that is too big for it to</span>
+    <span class="s4">#: process.</span>
+    <span class="s1">MESSAGE_TOO_BIG </span><span class="s3">= </span><span class="s5">1009</span>
+
+    <span class="s4">#: indicates that an endpoint (client) is terminating the</span>
+    <span class="s4">#: connection because it has expected the server to negotiate one or</span>
+    <span class="s4">#: more extension, but the server didn't return them in the response</span>
+    <span class="s4">#: message of the WebSocket handshake.  The list of extensions that</span>
+    <span class="s4">#: are needed SHOULD appear in the /reason/ part of the Close frame.</span>
+    <span class="s4">#: Note that this status code is not used by the server, because it</span>
+    <span class="s4">#: can fail the WebSocket handshake instead.</span>
+    <span class="s1">MANDATORY_EXT </span><span class="s3">= </span><span class="s5">1010</span>
+
+    <span class="s4">#: indicates that a server is terminating the connection because</span>
+    <span class="s4">#: it encountered an unexpected condition that prevented it from</span>
+    <span class="s4">#: fulfilling the request.</span>
+    <span class="s1">INTERNAL_ERROR </span><span class="s3">= </span><span class="s5">1011</span>
+
+    <span class="s4">#: Server/service is restarting</span>
+    <span class="s4">#: (not part of RFC6455)</span>
+    <span class="s1">SERVICE_RESTART </span><span class="s3">= </span><span class="s5">1012</span>
+
+    <span class="s4">#: Temporary server condition forced blocking client's request</span>
+    <span class="s4">#: (not part of RFC6455)</span>
+    <span class="s1">TRY_AGAIN_LATER </span><span class="s3">= </span><span class="s5">1013</span>
+
+    <span class="s4">#: is a reserved value and MUST NOT be set as a status code in a</span>
+    <span class="s4">#: Close control frame by an endpoint.  It is designated for use in</span>
+    <span class="s4">#: applications expecting a status code to indicate that the</span>
+    <span class="s4">#: connection was closed due to a failure to perform a TLS handshake</span>
+    <span class="s4">#: (e.g., the server certificate can't be verified).</span>
+    <span class="s1">TLS_HANDSHAKE_FAILED </span><span class="s3">= </span><span class="s5">1015</span>
+
+
+<span class="s4"># RFC 6455, Section 7.4.1 - Defined Status Codes</span>
+<span class="s1">LOCAL_ONLY_CLOSE_REASONS </span><span class="s3">= (</span>
+    <span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">NO_STATUS_RCVD</span><span class="s3">,</span>
+    <span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">ABNORMAL_CLOSURE</span><span class="s3">,</span>
+    <span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">TLS_HANDSHAKE_FAILED</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+
+<span class="s4"># RFC 6455, Section 7.4.2 - Status Code Ranges</span>
+<span class="s1">MIN_CLOSE_REASON </span><span class="s3">= </span><span class="s5">1000</span>
+<span class="s1">MIN_PROTOCOL_CLOSE_REASON </span><span class="s3">= </span><span class="s5">1000</span>
+<span class="s1">MAX_PROTOCOL_CLOSE_REASON </span><span class="s3">= </span><span class="s5">2999</span>
+<span class="s1">MIN_LIBRARY_CLOSE_REASON </span><span class="s3">= </span><span class="s5">3000</span>
+<span class="s1">MAX_LIBRARY_CLOSE_REASON </span><span class="s3">= </span><span class="s5">3999</span>
+<span class="s1">MIN_PRIVATE_CLOSE_REASON </span><span class="s3">= </span><span class="s5">4000</span>
+<span class="s1">MAX_PRIVATE_CLOSE_REASON </span><span class="s3">= </span><span class="s5">4999</span>
+<span class="s1">MAX_CLOSE_REASON </span><span class="s3">= </span><span class="s5">4999</span>
+
+
+<span class="s1">NULL_MASK </span><span class="s3">= </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">pack</span><span class="s3">(</span><span class="s6">&quot;!I&quot;</span><span class="s3">, </span><span class="s5">0</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">msg</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">code</span><span class="s3">: </span><span class="s1">CloseReason </span><span class="s3">= </span><span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">PROTOCOL_ERROR</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">msg</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">code </span><span class="s3">= </span><span class="s1">code</span>
+
+
+<span class="s2">class </span><span class="s1">RsvBits</span><span class="s3">(</span><span class="s1">NamedTuple</span><span class="s3">):</span>
+    <span class="s1">rsv1</span><span class="s3">: </span><span class="s1">bool</span>
+    <span class="s1">rsv2</span><span class="s3">: </span><span class="s1">bool</span>
+    <span class="s1">rsv3</span><span class="s3">: </span><span class="s1">bool</span>
+
+
+<span class="s2">class </span><span class="s1">Header</span><span class="s3">(</span><span class="s1">NamedTuple</span><span class="s3">):</span>
+    <span class="s1">fin</span><span class="s3">: </span><span class="s1">bool</span>
+    <span class="s1">rsv</span><span class="s3">: </span><span class="s1">RsvBits</span>
+    <span class="s1">opcode</span><span class="s3">: </span><span class="s1">Opcode</span>
+    <span class="s1">payload_len</span><span class="s3">: </span><span class="s1">int</span>
+    <span class="s1">masking_key</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">Frame</span><span class="s3">(</span><span class="s1">NamedTuple</span><span class="s3">):</span>
+    <span class="s1">opcode</span><span class="s3">: </span><span class="s1">Opcode</span>
+    <span class="s1">payload</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]</span>
+    <span class="s1">frame_finished</span><span class="s3">: </span><span class="s1">bool</span>
+    <span class="s1">message_finished</span><span class="s3">: </span><span class="s1">bool</span>
+
+
+<span class="s2">def </span><span class="s1">_truncate_utf8</span><span class="s3">(</span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">nbytes</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+    <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) &lt;= </span><span class="s1">nbytes</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s4"># Truncate</span>
+    <span class="s1">data </span><span class="s3">= </span><span class="s1">data</span><span class="s3">[:</span><span class="s1">nbytes</span><span class="s3">]</span>
+    <span class="s4"># But we might have cut a codepoint in half, in which case we want to</span>
+    <span class="s4"># discard the partial character so the data is at least</span>
+    <span class="s4"># well-formed. This is a little inefficient since it processes the</span>
+    <span class="s4"># whole message twice when in theory we could just peek at the last</span>
+    <span class="s4"># few characters, but since this is only used for close messages (max</span>
+    <span class="s4"># length = 125 bytes) it really doesn't matter.</span>
+    <span class="s1">data </span><span class="s3">= </span><span class="s1">data</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s6">&quot;utf-8&quot;</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">=</span><span class="s6">&quot;ignore&quot;</span><span class="s3">).</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;utf-8&quot;</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">data</span>
+
+
+<span class="s2">class </span><span class="s1">Buffer</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">initial_bytes</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s2">if </span><span class="s1">initial_bytes</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">initial_bytes</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">feed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">new_bytes</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer </span><span class="s3">+= </span><span class="s1">new_bytes</span>
+
+    <span class="s2">def </span><span class="s1">consume_at_most</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">nbytes</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s1">nbytes</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">bytearray</span><span class="s3">()</span>
+
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">[</span><span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">+ </span><span class="s1">nbytes</span><span class="s3">]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">+= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">consume_exactly</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">nbytes</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">) - </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">&lt; </span><span class="s1">nbytes</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">consume_at_most</span><span class="s3">(</span><span class="s1">nbytes</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">commit</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s4"># In CPython 3.4+, del[:n] is amortized O(n), *not* quadratic</span>
+        <span class="s2">del </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">[: </span><span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used</span><span class="s3">]</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">= </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">rollback</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">bytes_used </span><span class="s3">= </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">__len__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">MessageDecoder</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Opcode</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">decoder</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">IncrementalDecoder</span><span class="s3">] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">process_frame</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">frame</span><span class="s3">: </span><span class="s1">Frame</span><span class="s3">) </span><span class="s1">-&gt; Frame</span><span class="s3">:</span>
+        <span class="s2">assert not </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">.</span><span class="s1">iscontrol</span><span class="s3">()</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CONTINUATION</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;unexpected CONTINUATION&quot;</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">opcode </span><span class="s3">= </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode</span>
+        <span class="s2">elif </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is not </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CONTINUATION</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;expected CONTINUATION, got %r&quot; </span><span class="s3">% </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">TEXT</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">decoder </span><span class="s3">= </span><span class="s1">getincrementaldecoder</span><span class="s3">(</span><span class="s6">&quot;utf-8&quot;</span><span class="s3">)()</span>
+
+        <span class="s1">finished </span><span class="s3">= </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished </span><span class="s2">and </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">message_finished</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">decoder </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">))</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">decoder</span><span class="s3">.</span><span class="s1">decode</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, </span><span class="s1">finished</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">UnicodeDecodeError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">), </span><span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">INVALID_FRAME_PAYLOAD_DATA</span><span class="s3">)</span>
+
+        <span class="s1">frame </span><span class="s3">= </span><span class="s1">Frame</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished</span><span class="s3">, </span><span class="s1">finished</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">opcode </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">decoder </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s2">return </span><span class="s1">frame</span>
+
+
+<span class="s2">class </span><span class="s1">FrameDecoder</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">client</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">, </span><span class="s1">extensions</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">List</span><span class="s3">[</span><span class="s6">&quot;Extension&quot;</span><span class="s3">]] = </span><span class="s2">None</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">client </span><span class="s3">= </span><span class="s1">client</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">extensions </span><span class="s3">= </span><span class="s1">extensions </span><span class="s2">or </span><span class="s3">[]</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer </span><span class="s3">= </span><span class="s1">Buffer</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Header</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">effective_opcode</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Opcode</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">masker</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s2">None</span><span class="s3">, </span><span class="s1">XorMaskerNull</span><span class="s3">, </span><span class="s1">XorMaskerSimple</span><span class="s3">] = </span><span class="s2">None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">payload_required </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">payload_consumed </span><span class="s3">= </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">receive_bytes</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">feed</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">process_buffer</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">Frame</span><span class="s3">]:</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">:</span>
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">parse_header</span><span class="s3">():</span>
+                <span class="s2">return None</span>
+        <span class="s4"># parse_header() sets these.</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header </span><span class="s2">is not None</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">masker </span><span class="s2">is not None</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">effective_opcode </span><span class="s2">is not None</span>
+
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">) &lt; </span><span class="s1">self</span><span class="s3">.</span><span class="s1">payload_required</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+        <span class="s1">payload_remaining </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">payload_len </span><span class="s3">- </span><span class="s1">self</span><span class="s3">.</span><span class="s1">payload_consumed</span>
+        <span class="s1">payload </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">consume_at_most</span><span class="s3">(</span><span class="s1">payload_remaining</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">payload </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">payload_len </span><span class="s3">&gt; </span><span class="s5">0</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">commit</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">payload_consumed </span><span class="s3">+= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">)</span>
+        <span class="s1">finished </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">payload_consumed </span><span class="s3">== </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">payload_len</span>
+
+        <span class="s1">payload </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">masker</span><span class="s3">.</span><span class="s1">process</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">)</span>
+
+        <span class="s2">for </span><span class="s1">extension </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+            <span class="s1">payload_ </span><span class="s3">= </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">frame_inbound_payload_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">payload_</span><span class="s3">, </span><span class="s1">CloseReason</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;error in extension&quot;</span><span class="s3">, </span><span class="s1">payload_</span><span class="s3">)</span>
+            <span class="s1">payload </span><span class="s3">= </span><span class="s1">payload_</span>
+
+        <span class="s2">if </span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s1">final </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">()</span>
+            <span class="s2">for </span><span class="s1">extension </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+                <span class="s1">result </span><span class="s3">= </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">frame_inbound_complete</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">fin</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">result</span><span class="s3">, </span><span class="s1">CloseReason</span><span class="s3">):</span>
+                    <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;error in extension&quot;</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">result </span><span class="s2">is not None</span><span class="s3">:</span>
+                    <span class="s1">final </span><span class="s3">+= </span><span class="s1">result</span>
+            <span class="s1">payload </span><span class="s3">+= </span><span class="s1">final</span>
+
+        <span class="s1">frame </span><span class="s3">= </span><span class="s1">Frame</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">effective_opcode</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">, </span><span class="s1">finished</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">fin</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">finished</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">header </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">effective_opcode </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">masker </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">effective_opcode </span><span class="s3">= </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CONTINUATION</span>
+
+        <span class="s2">return </span><span class="s1">frame</span>
+
+    <span class="s2">def </span><span class="s1">parse_header</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">consume_exactly</span><span class="s3">(</span><span class="s5">2</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">rollback</span><span class="s3">()</span>
+            <span class="s2">return False</span>
+
+        <span class="s1">fin </span><span class="s3">= </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &amp; </span><span class="s1">FIN_MASK</span><span class="s3">)</span>
+        <span class="s1">rsv </span><span class="s3">= </span><span class="s1">RsvBits</span><span class="s3">(</span>
+            <span class="s1">bool</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &amp; </span><span class="s1">RSV1_MASK</span><span class="s3">),</span>
+            <span class="s1">bool</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &amp; </span><span class="s1">RSV2_MASK</span><span class="s3">),</span>
+            <span class="s1">bool</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &amp; </span><span class="s1">RSV3_MASK</span><span class="s3">),</span>
+        <span class="s3">)</span>
+        <span class="s1">opcode </span><span class="s3">= </span><span class="s1">data</span><span class="s3">[</span><span class="s5">0</span><span class="s3">] &amp; </span><span class="s1">OPCODE_MASK</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">opcode </span><span class="s3">= </span><span class="s1">Opcode</span><span class="s3">(</span><span class="s1">opcode</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">f&quot;Invalid opcode </span><span class="s2">{</span><span class="s1">opcode</span><span class="s2">:</span><span class="s6">#x</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">opcode</span><span class="s3">.</span><span class="s1">iscontrol</span><span class="s3">() </span><span class="s2">and not </span><span class="s1">fin</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;Invalid attempt to fragment control frame&quot;</span><span class="s3">)</span>
+
+        <span class="s1">has_mask </span><span class="s3">= </span><span class="s1">bool</span><span class="s3">(</span><span class="s1">data</span><span class="s3">[</span><span class="s5">1</span><span class="s3">] &amp; </span><span class="s1">MASK_MASK</span><span class="s3">)</span>
+        <span class="s1">payload_len_short </span><span class="s3">= </span><span class="s1">data</span><span class="s3">[</span><span class="s5">1</span><span class="s3">] &amp; </span><span class="s1">PAYLOAD_LEN_MASK</span>
+        <span class="s1">payload_len </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">parse_extended_payload_length</span><span class="s3">(</span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">payload_len_short</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">payload_len </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">rollback</span><span class="s3">()</span>
+            <span class="s2">return False</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">extension_processing</span><span class="s3">(</span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">, </span><span class="s1">payload_len</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">has_mask </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;client received unexpected masked frame&quot;</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">has_mask </span><span class="s2">and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;server received unexpected unmasked frame&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">has_mask</span><span class="s3">:</span>
+            <span class="s1">masking_key </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">consume_exactly</span><span class="s3">(</span><span class="s5">4</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">masking_key </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">rollback</span><span class="s3">()</span>
+                <span class="s2">return False</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">masker </span><span class="s3">= </span><span class="s1">XorMaskerSimple</span><span class="s3">(</span><span class="s1">masking_key</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">masker </span><span class="s3">= </span><span class="s1">XorMaskerNull</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">commit</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">header </span><span class="s3">= </span><span class="s1">Header</span><span class="s3">(</span><span class="s1">fin</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">payload_len</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">effective_opcode </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">opcode</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">header</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">.</span><span class="s1">iscontrol</span><span class="s3">():</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">payload_required </span><span class="s3">= </span><span class="s1">payload_len</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">payload_required </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">payload_consumed </span><span class="s3">= </span><span class="s5">0</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">parse_extended_payload_length</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">: </span><span class="s1">Opcode</span><span class="s3">, </span><span class="s1">payload_len</span><span class="s3">: </span><span class="s1">int</span>
+    <span class="s3">) </span><span class="s1">-&gt; Optional</span><span class="s3">[</span><span class="s1">int</span><span class="s3">]:</span>
+        <span class="s2">if </span><span class="s1">opcode</span><span class="s3">.</span><span class="s1">iscontrol</span><span class="s3">() </span><span class="s2">and </span><span class="s1">payload_len </span><span class="s3">&gt; </span><span class="s1">MAX_PAYLOAD_NORMAL</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;Control frame with payload len &gt; 125&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">payload_len </span><span class="s3">== </span><span class="s1">PAYLOAD_LENGTH_TWO_BYTE</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">consume_exactly</span><span class="s3">(</span><span class="s5">2</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s3">(</span><span class="s1">payload_len</span><span class="s3">,) = </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">unpack</span><span class="s3">(</span><span class="s6">&quot;!H&quot;</span><span class="s3">, </span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">payload_len </span><span class="s3">&lt;= </span><span class="s1">MAX_PAYLOAD_NORMAL</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span>
+                    <span class="s6">&quot;Payload length used 2 bytes when 1 would have sufficed&quot;</span>
+                <span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">payload_len </span><span class="s3">== </span><span class="s1">PAYLOAD_LENGTH_EIGHT_BYTE</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">buffer</span><span class="s3">.</span><span class="s1">consume_exactly</span><span class="s3">(</span><span class="s5">8</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s3">(</span><span class="s1">payload_len</span><span class="s3">,) = </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">unpack</span><span class="s3">(</span><span class="s6">&quot;!Q&quot;</span><span class="s3">, </span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">payload_len </span><span class="s3">&lt;= </span><span class="s1">MAX_PAYLOAD_TWO_BYTE</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span>
+                    <span class="s6">&quot;Payload length used 8 bytes when 2 would have sufficed&quot;</span>
+                <span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">payload_len </span><span class="s3">&gt;&gt; </span><span class="s5">63</span><span class="s3">:</span>
+                <span class="s4"># I'm not sure why this is illegal, but that's what the RFC</span>
+                <span class="s4"># says, so...</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;8-byte payload length with non-zero MSB&quot;</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">payload_len</span>
+
+    <span class="s2">def </span><span class="s1">extension_processing</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">: </span><span class="s1">Opcode</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">: </span><span class="s1">RsvBits</span><span class="s3">, </span><span class="s1">payload_len</span><span class="s3">: </span><span class="s1">int</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">rsv_used </span><span class="s3">= [</span><span class="s2">False</span><span class="s3">, </span><span class="s2">False</span><span class="s3">, </span><span class="s2">False</span><span class="s3">]</span>
+        <span class="s2">for </span><span class="s1">extension </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">:</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">frame_inbound_header</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">, </span><span class="s1">payload_len</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">result</span><span class="s3">, </span><span class="s1">CloseReason</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;error in extension&quot;</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">bit</span><span class="s3">, </span><span class="s1">used </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">result</span><span class="s3">):</span>
+                <span class="s2">if </span><span class="s1">used</span><span class="s3">:</span>
+                    <span class="s1">rsv_used</span><span class="s3">[</span><span class="s1">bit</span><span class="s3">] = </span><span class="s2">True</span>
+        <span class="s2">for </span><span class="s1">expected</span><span class="s3">, </span><span class="s1">found </span><span class="s2">in </span><span class="s1">zip</span><span class="s3">(</span><span class="s1">rsv_used</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">found </span><span class="s2">and not </span><span class="s1">expected</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;Reserved bit set unexpectedly&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">FrameProtocol</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">client</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">, </span><span class="s1">extensions</span><span class="s3">: </span><span class="s1">List</span><span class="s3">[</span><span class="s6">&quot;Extension&quot;</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">client </span><span class="s3">= </span><span class="s1">client</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">extensions </span><span class="s3">= [</span><span class="s1">ext </span><span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">extensions </span><span class="s2">if </span><span class="s1">ext</span><span class="s3">.</span><span class="s1">enabled</span><span class="s3">()]</span>
+
+        <span class="s4"># Global state</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_frame_decoder </span><span class="s3">= </span><span class="s1">FrameDecoder</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_message_decoder </span><span class="s3">= </span><span class="s1">MessageDecoder</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_parse_more </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_parse_more_gen</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_outbound_opcode</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Opcode</span><span class="s3">] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_process_close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">frame</span><span class="s3">: </span><span class="s1">Frame</span><span class="s3">) </span><span class="s1">-&gt; Frame</span><span class="s3">:</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span>
+        <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">))</span>
+
+        <span class="s2">if not </span><span class="s1">data</span><span class="s3">:</span>
+            <span class="s4"># &quot;If this Close control frame contains no status code, _The</span>
+            <span class="s4"># WebSocket Connection Close Code_ is considered to be 1005&quot;</span>
+            <span class="s1">data </span><span class="s3">= (</span><span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">NO_STATUS_RCVD</span><span class="s3">, </span><span class="s6">&quot;&quot;</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) == </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;CLOSE with 1 byte payload&quot;</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s3">(</span><span class="s1">code</span><span class="s3">,) = </span><span class="s1">struct</span><span class="s3">.</span><span class="s1">unpack</span><span class="s3">(</span><span class="s6">&quot;!H&quot;</span><span class="s3">, </span><span class="s1">data</span><span class="s3">[:</span><span class="s5">2</span><span class="s3">])</span>
+            <span class="s2">if </span><span class="s1">code </span><span class="s3">&lt; </span><span class="s1">MIN_CLOSE_REASON </span><span class="s2">or </span><span class="s1">code </span><span class="s3">&gt; </span><span class="s1">MAX_CLOSE_REASON</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;CLOSE with invalid code&quot;</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">code </span><span class="s3">= </span><span class="s1">CloseReason</span><span class="s3">(</span><span class="s1">code</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">if </span><span class="s1">code </span><span class="s2">in </span><span class="s1">LOCAL_ONLY_CLOSE_REASONS</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;remote CLOSE with local-only reason&quot;</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">code</span><span class="s3">, </span><span class="s1">CloseReason</span><span class="s3">) </span><span class="s2">and </span><span class="s1">code </span><span class="s3">&lt;= </span><span class="s1">MAX_PROTOCOL_CLOSE_REASON</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span><span class="s6">&quot;CLOSE with unknown reserved code&quot;</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">reason </span><span class="s3">= </span><span class="s1">data</span><span class="s3">[</span><span class="s5">2</span><span class="s3">:].</span><span class="s1">decode</span><span class="s3">(</span><span class="s6">&quot;utf-8&quot;</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">UnicodeDecodeError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ParseFailed</span><span class="s3">(</span>
+                    <span class="s6">&quot;Error decoding CLOSE reason: &quot; </span><span class="s3">+ </span><span class="s1">str</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">),</span>
+                    <span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">INVALID_FRAME_PAYLOAD_DATA</span><span class="s3">,</span>
+                <span class="s3">)</span>
+            <span class="s1">data </span><span class="s3">= (</span><span class="s1">code</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">Frame</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished</span><span class="s3">, </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">message_finished</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_parse_more_gen</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Frame</span><span class="s3">], </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s4"># Consume as much as we can from self._buffer, yielding events, and</span>
+        <span class="s4"># then yield None when we need more data. Or raise ParseFailed.</span>
+
+        <span class="s4"># XX FIXME this should probably be refactored so that we never see</span>
+        <span class="s4"># disabled extensions in the first place...</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">extensions </span><span class="s3">= [</span><span class="s1">ext </span><span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">extensions </span><span class="s2">if </span><span class="s1">ext</span><span class="s3">.</span><span class="s1">enabled</span><span class="s3">()]</span>
+        <span class="s1">closed </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s2">while not </span><span class="s1">closed</span><span class="s3">:</span>
+            <span class="s1">frame </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_frame_decoder</span><span class="s3">.</span><span class="s1">process_buffer</span><span class="s3">()</span>
+
+            <span class="s2">if </span><span class="s1">frame </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s2">if not </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode</span><span class="s3">.</span><span class="s1">iscontrol</span><span class="s3">():</span>
+                    <span class="s1">frame </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_message_decoder</span><span class="s3">.</span><span class="s1">process_frame</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">)</span>
+                <span class="s2">elif </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s3">== </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CLOSE</span><span class="s3">:</span>
+                    <span class="s1">frame </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_process_close</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">)</span>
+                    <span class="s1">closed </span><span class="s3">= </span><span class="s2">True</span>
+
+            <span class="s2">yield </span><span class="s1">frame</span>
+
+    <span class="s2">def </span><span class="s1">receive_bytes</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_frame_decoder</span><span class="s3">.</span><span class="s1">receive_bytes</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">received_frames</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s1">Frame</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s2">for </span><span class="s1">event </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_parse_more</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">event </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s2">break</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s1">event</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">code</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">int</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s1">payload </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">code </span><span class="s2">is </span><span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">NO_STATUS_RCVD</span><span class="s3">:</span>
+            <span class="s1">code </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">code </span><span class="s2">is None and </span><span class="s1">reason</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s6">&quot;cannot specify a reason without a code&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">code </span><span class="s2">in </span><span class="s1">LOCAL_ONLY_CLOSE_REASONS</span><span class="s3">:</span>
+            <span class="s1">code </span><span class="s3">= </span><span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">NORMAL_CLOSURE</span>
+        <span class="s2">if </span><span class="s1">code </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">payload </span><span class="s3">+= </span><span class="s1">bytearray</span><span class="s3">(</span><span class="s1">struct</span><span class="s3">.</span><span class="s1">pack</span><span class="s3">(</span><span class="s6">&quot;!H&quot;</span><span class="s3">, </span><span class="s1">code</span><span class="s3">))</span>
+            <span class="s2">if </span><span class="s1">reason </span><span class="s2">is not None</span><span class="s3">:</span>
+                <span class="s1">payload </span><span class="s3">+= </span><span class="s1">_truncate_utf8</span><span class="s3">(</span>
+                    <span class="s1">reason</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;utf-8&quot;</span><span class="s3">), </span><span class="s1">MAX_PAYLOAD_NORMAL </span><span class="s3">- </span><span class="s5">2</span>
+                <span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_serialize_frame</span><span class="s3">(</span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CLOSE</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">ping</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">= </span><span class="s7">b&quot;&quot;</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_serialize_frame</span><span class="s3">(</span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">PING</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">pong</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">= </span><span class="s7">b&quot;&quot;</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_serialize_frame</span><span class="s3">(</span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">PONG</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">send_data</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = </span><span class="s7">b&quot;&quot;</span><span class="s3">, </span><span class="s1">fin</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span>
+    <span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">, </span><span class="s1">memoryview</span><span class="s3">)):</span>
+            <span class="s1">opcode </span><span class="s3">= </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">BINARY</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">, </span><span class="s1">str</span><span class="s3">):</span>
+            <span class="s1">opcode </span><span class="s3">= </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">TEXT</span>
+            <span class="s1">payload </span><span class="s3">= </span><span class="s1">payload</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s6">&quot;utf-8&quot;</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s6">&quot;Must provide bytes or text&quot;</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_outbound_opcode </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_outbound_opcode </span><span class="s3">= </span><span class="s1">opcode</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_outbound_opcode </span><span class="s2">is not </span><span class="s1">opcode</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s6">&quot;Data type mismatch inside message&quot;</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">opcode </span><span class="s3">= </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CONTINUATION</span>
+
+        <span class="s2">if </span><span class="s1">fin</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_outbound_opcode </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_serialize_frame</span><span class="s3">(</span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">, </span><span class="s1">fin</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_make_fin_rsv_opcode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">fin</span><span class="s3">: </span><span class="s1">bool</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">: </span><span class="s1">RsvBits</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">: </span><span class="s1">Opcode</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s1">fin_bits </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">fin</span><span class="s3">) &lt;&lt; </span><span class="s5">7</span>
+        <span class="s1">rsv_bits </span><span class="s3">= (</span><span class="s1">int</span><span class="s3">(</span><span class="s1">rsv</span><span class="s3">.</span><span class="s1">rsv1</span><span class="s3">) &lt;&lt; </span><span class="s5">6</span><span class="s3">) + (</span><span class="s1">int</span><span class="s3">(</span><span class="s1">rsv</span><span class="s3">.</span><span class="s1">rsv2</span><span class="s3">) &lt;&lt; </span><span class="s5">5</span><span class="s3">) + (</span><span class="s1">int</span><span class="s3">(</span><span class="s1">rsv</span><span class="s3">.</span><span class="s1">rsv3</span><span class="s3">) &lt;&lt; </span><span class="s5">4</span><span class="s3">)</span>
+        <span class="s1">opcode_bits </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">opcode</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">fin_bits </span><span class="s3">| </span><span class="s1">rsv_bits </span><span class="s3">| </span><span class="s1">opcode_bits</span>
+
+    <span class="s2">def </span><span class="s1">_serialize_frame</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">: </span><span class="s1">Opcode</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">= </span><span class="s7">b&quot;&quot;</span><span class="s3">, </span><span class="s1">fin</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span>
+    <span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s1">rsv </span><span class="s3">= </span><span class="s1">RsvBits</span><span class="s3">(</span><span class="s2">False</span><span class="s3">, </span><span class="s2">False</span><span class="s3">, </span><span class="s2">False</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">extension </span><span class="s2">in </span><span class="s1">reversed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">extensions</span><span class="s3">):</span>
+            <span class="s1">rsv</span><span class="s3">, </span><span class="s1">payload </span><span class="s3">= </span><span class="s1">extension</span><span class="s3">.</span><span class="s1">frame_outbound</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">, </span><span class="s1">payload</span><span class="s3">, </span><span class="s1">fin</span><span class="s3">)</span>
+
+        <span class="s1">fin_rsv_opcode </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_make_fin_rsv_opcode</span><span class="s3">(</span><span class="s1">fin</span><span class="s3">, </span><span class="s1">rsv</span><span class="s3">, </span><span class="s1">opcode</span><span class="s3">)</span>
+
+        <span class="s1">payload_length </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">)</span>
+        <span class="s1">quad_payload </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">payload_length </span><span class="s3">&lt;= </span><span class="s1">MAX_PAYLOAD_NORMAL</span><span class="s3">:</span>
+            <span class="s1">first_payload </span><span class="s3">= </span><span class="s1">payload_length</span>
+            <span class="s1">second_payload </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">elif </span><span class="s1">payload_length </span><span class="s3">&lt;= </span><span class="s1">MAX_PAYLOAD_TWO_BYTE</span><span class="s3">:</span>
+            <span class="s1">first_payload </span><span class="s3">= </span><span class="s1">PAYLOAD_LENGTH_TWO_BYTE</span>
+            <span class="s1">second_payload </span><span class="s3">= </span><span class="s1">payload_length</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">first_payload </span><span class="s3">= </span><span class="s1">PAYLOAD_LENGTH_EIGHT_BYTE</span>
+            <span class="s1">second_payload </span><span class="s3">= </span><span class="s1">payload_length</span>
+            <span class="s1">quad_payload </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+            <span class="s1">first_payload </span><span class="s3">|= </span><span class="s5">1 </span><span class="s3">&lt;&lt; </span><span class="s5">7</span>
+
+        <span class="s1">header </span><span class="s3">= </span><span class="s1">bytearray</span><span class="s3">([</span><span class="s1">fin_rsv_opcode</span><span class="s3">, </span><span class="s1">first_payload</span><span class="s3">])</span>
+        <span class="s2">if </span><span class="s1">second_payload </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">opcode</span><span class="s3">.</span><span class="s1">iscontrol</span><span class="s3">():</span>
+                <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s6">&quot;payload too long for control frame&quot;</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">quad_payload</span><span class="s3">:</span>
+                <span class="s1">header </span><span class="s3">+= </span><span class="s1">bytearray</span><span class="s3">(</span><span class="s1">struct</span><span class="s3">.</span><span class="s1">pack</span><span class="s3">(</span><span class="s6">&quot;!Q&quot;</span><span class="s3">, </span><span class="s1">second_payload</span><span class="s3">))</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">header </span><span class="s3">+= </span><span class="s1">bytearray</span><span class="s3">(</span><span class="s1">struct</span><span class="s3">.</span><span class="s1">pack</span><span class="s3">(</span><span class="s6">&quot;!H&quot;</span><span class="s3">, </span><span class="s1">second_payload</span><span class="s3">))</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">:</span>
+            <span class="s4"># &quot;The masking key is a 32-bit value chosen at random by the</span>
+            <span class="s4"># client.  When preparing a masked frame, the client MUST pick a</span>
+            <span class="s4"># fresh masking key from the set of allowed 32-bit values.  The</span>
+            <span class="s4"># masking key needs to be unpredictable; thus, the masking key</span>
+            <span class="s4"># MUST be derived from a strong source of entropy, and the masking</span>
+            <span class="s4"># key for a given frame MUST NOT make it simple for a server/proxy</span>
+            <span class="s4"># to predict the masking key for a subsequent frame.  The</span>
+            <span class="s4"># unpredictability of the masking key is essential to prevent</span>
+            <span class="s4"># authors of malicious applications from selecting the bytes that</span>
+            <span class="s4"># appear on the wire.&quot;</span>
+            <span class="s4">#   -- https://tools.ietf.org/html/rfc6455#section-5.3</span>
+            <span class="s1">masking_key </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">urandom</span><span class="s3">(</span><span class="s5">4</span><span class="s3">)</span>
+            <span class="s1">masker </span><span class="s3">= </span><span class="s1">XorMaskerSimple</span><span class="s3">(</span><span class="s1">masking_key</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">header </span><span class="s3">+ </span><span class="s1">masking_key </span><span class="s3">+ </span><span class="s1">masker</span><span class="s3">.</span><span class="s1">process</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">header </span><span class="s3">+ </span><span class="s1">payload</span>
+</pre>
+</body>
+</html>

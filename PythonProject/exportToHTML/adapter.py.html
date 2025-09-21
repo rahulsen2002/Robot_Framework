@@ -1,0 +1,191 @@
+<html>
+<head>
+<title>adapter.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+adapter.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># SPDX-FileCopyrightText: 2015 Eric Larson</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: Apache-2.0</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">types</span>
+<span class="s2">import </span><span class="s1">weakref</span>
+<span class="s2">import </span><span class="s1">zlib</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">TYPE_CHECKING</span><span class="s3">, </span><span class="s1">Any</span><span class="s3">, </span><span class="s1">Collection</span><span class="s3">, </span><span class="s1">Mapping</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">requests</span><span class="s3">.</span><span class="s1">adapters </span><span class="s2">import </span><span class="s1">HTTPAdapter</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">cache </span><span class="s2">import </span><span class="s1">DictCache</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">controller </span><span class="s2">import </span><span class="s1">PERMANENT_REDIRECT_STATUSES</span><span class="s3">, </span><span class="s1">CacheController</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">filewrapper </span><span class="s2">import </span><span class="s1">CallbackFileWrapper</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING</span><span class="s3">:</span>
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">requests </span><span class="s2">import </span><span class="s1">PreparedRequest</span><span class="s3">, </span><span class="s1">Response</span>
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">urllib3 </span><span class="s2">import </span><span class="s1">HTTPResponse</span>
+
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">cache </span><span class="s2">import </span><span class="s1">BaseCache</span>
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">heuristics </span><span class="s2">import </span><span class="s1">BaseHeuristic</span>
+    <span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">cachecontrol</span><span class="s3">.</span><span class="s1">serialize </span><span class="s2">import </span><span class="s1">Serializer</span>
+
+
+<span class="s2">class </span><span class="s1">CacheControlAdapter</span><span class="s3">(</span><span class="s1">HTTPAdapter</span><span class="s3">):</span>
+    <span class="s1">invalidating_methods </span><span class="s3">= {</span><span class="s4">&quot;PUT&quot;</span><span class="s3">, </span><span class="s4">&quot;PATCH&quot;</span><span class="s3">, </span><span class="s4">&quot;DELETE&quot;</span><span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">cache</span><span class="s3">: </span><span class="s1">BaseCache </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">cache_etags</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">controller_class</span><span class="s3">: </span><span class="s1">type</span><span class="s3">[</span><span class="s1">CacheController</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">serializer</span><span class="s3">: </span><span class="s1">Serializer </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">heuristic</span><span class="s3">: </span><span class="s1">BaseHeuristic </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">cacheable_methods</span><span class="s3">: </span><span class="s1">Collection</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s3">*</span><span class="s1">args</span><span class="s3">: </span><span class="s1">Any</span><span class="s3">,</span>
+        <span class="s3">**</span><span class="s1">kw</span><span class="s3">: </span><span class="s1">Any</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(*</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kw</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cache </span><span class="s3">= </span><span class="s1">DictCache</span><span class="s3">() </span><span class="s2">if </span><span class="s1">cache </span><span class="s2">is None else </span><span class="s1">cache</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">heuristic </span><span class="s3">= </span><span class="s1">heuristic</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cacheable_methods </span><span class="s3">= </span><span class="s1">cacheable_methods </span><span class="s2">or </span><span class="s3">(</span><span class="s4">&quot;GET&quot;</span><span class="s3">,)</span>
+
+        <span class="s1">controller_factory </span><span class="s3">= </span><span class="s1">controller_class </span><span class="s2">or </span><span class="s1">CacheController</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">controller </span><span class="s3">= </span><span class="s1">controller_factory</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">cache</span><span class="s3">, </span><span class="s1">cache_etags</span><span class="s3">=</span><span class="s1">cache_etags</span><span class="s3">, </span><span class="s1">serializer</span><span class="s3">=</span><span class="s1">serializer</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">request</span><span class="s3">: </span><span class="s1">PreparedRequest</span><span class="s3">,</span>
+        <span class="s1">stream</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">: </span><span class="s2">None </span><span class="s3">| </span><span class="s1">float </span><span class="s3">| </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">float</span><span class="s3">, </span><span class="s1">float</span><span class="s3">] | </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">float</span><span class="s3">, </span><span class="s2">None</span><span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">verify</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">| </span><span class="s1">str </span><span class="s3">= </span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">cert</span><span class="s3">: (</span><span class="s2">None </span><span class="s3">| </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str </span><span class="s3">| </span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str</span><span class="s3">, </span><span class="s1">bytes </span><span class="s3">| </span><span class="s1">str</span><span class="s3">]) = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">proxies</span><span class="s3">: </span><span class="s1">Mapping</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">cacheable_methods</span><span class="s3">: </span><span class="s1">Collection</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; Response</span><span class="s3">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Send a request. Use the request information to see if it 
+        exists in the cache and cache the response if we need to and can. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cacheable </span><span class="s3">= </span><span class="s1">cacheable_methods </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cacheable_methods</span>
+        <span class="s2">if </span><span class="s1">request</span><span class="s3">.</span><span class="s1">method </span><span class="s2">in </span><span class="s1">cacheable</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">cached_response </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">controller</span><span class="s3">.</span><span class="s1">cached_request</span><span class="s3">(</span><span class="s1">request</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">zlib</span><span class="s3">.</span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s1">cached_response </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s2">if </span><span class="s1">cached_response</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">build_response</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, </span><span class="s1">cached_response</span><span class="s3">, </span><span class="s1">from_cache</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+            <span class="s0"># check for etags and add headers if appropriate</span>
+            <span class="s1">request</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">controller</span><span class="s3">.</span><span class="s1">conditional_headers</span><span class="s3">(</span><span class="s1">request</span><span class="s3">))</span>
+
+        <span class="s1">resp </span><span class="s3">= </span><span class="s1">super</span><span class="s3">().</span><span class="s1">send</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, </span><span class="s1">stream</span><span class="s3">, </span><span class="s1">timeout</span><span class="s3">, </span><span class="s1">verify</span><span class="s3">, </span><span class="s1">cert</span><span class="s3">, </span><span class="s1">proxies</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">resp</span>
+
+    <span class="s2">def </span><span class="s1">build_response</span><span class="s3">(  </span><span class="s0"># type: ignore[override]</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">request</span><span class="s3">: </span><span class="s1">PreparedRequest</span><span class="s3">,</span>
+        <span class="s1">response</span><span class="s3">: </span><span class="s1">HTTPResponse</span><span class="s3">,</span>
+        <span class="s1">from_cache</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">cacheable_methods</span><span class="s3">: </span><span class="s1">Collection</span><span class="s3">[</span><span class="s1">str</span><span class="s3">] | </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; Response</span><span class="s3">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Build a response by making a request or using the cache. 
+ 
+        This will end up calling send and returning a potentially 
+        cached response 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cacheable </span><span class="s3">= </span><span class="s1">cacheable_methods </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cacheable_methods</span>
+        <span class="s2">if not </span><span class="s1">from_cache </span><span class="s2">and </span><span class="s1">request</span><span class="s3">.</span><span class="s1">method </span><span class="s2">in </span><span class="s1">cacheable</span><span class="s3">:</span>
+            <span class="s0"># Check for any heuristics that might update headers</span>
+            <span class="s0"># before trying to cache.</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">heuristic</span><span class="s3">:</span>
+                <span class="s1">response </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">heuristic</span><span class="s3">.</span><span class="s1">apply</span><span class="s3">(</span><span class="s1">response</span><span class="s3">)</span>
+
+            <span class="s0"># apply any expiration heuristics</span>
+            <span class="s2">if </span><span class="s1">response</span><span class="s3">.</span><span class="s1">status </span><span class="s3">== </span><span class="s6">304</span><span class="s3">:</span>
+                <span class="s0"># We must have sent an ETag request. This could mean</span>
+                <span class="s0"># that we've been expired already or that we simply</span>
+                <span class="s0"># have an etag. In either case, we want to try and</span>
+                <span class="s0"># update the cache if that is the case.</span>
+                <span class="s1">cached_response </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">controller</span><span class="s3">.</span><span class="s1">update_cached_response</span><span class="s3">(</span>
+                    <span class="s1">request</span><span class="s3">, </span><span class="s1">response</span>
+                <span class="s3">)</span>
+
+                <span class="s2">if </span><span class="s1">cached_response </span><span class="s2">is not </span><span class="s1">response</span><span class="s3">:</span>
+                    <span class="s1">from_cache </span><span class="s3">= </span><span class="s2">True</span>
+
+                <span class="s0"># We are done with the server response, read a</span>
+                <span class="s0"># possible response body (compliant servers will</span>
+                <span class="s0"># not return one, but we cannot be 100% sure) and</span>
+                <span class="s0"># release the connection back to the pool.</span>
+                <span class="s1">response</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">decode_content</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+                <span class="s1">response</span><span class="s3">.</span><span class="s1">release_conn</span><span class="s3">()</span>
+
+                <span class="s1">response </span><span class="s3">= </span><span class="s1">cached_response</span>
+
+            <span class="s0"># We always cache the 301 responses</span>
+            <span class="s2">elif </span><span class="s1">int</span><span class="s3">(</span><span class="s1">response</span><span class="s3">.</span><span class="s1">status</span><span class="s3">) </span><span class="s2">in </span><span class="s1">PERMANENT_REDIRECT_STATUSES</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">controller</span><span class="s3">.</span><span class="s1">cache_response</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, </span><span class="s1">response</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s0"># Wrap the response file with a wrapper that will cache the</span>
+                <span class="s0">#   response when the stream has been consumed.</span>
+                <span class="s1">response</span><span class="s3">.</span><span class="s1">_fp </span><span class="s3">= </span><span class="s1">CallbackFileWrapper</span><span class="s3">(  </span><span class="s0"># type: ignore[assignment]</span>
+                    <span class="s1">response</span><span class="s3">.</span><span class="s1">_fp</span><span class="s3">,  </span><span class="s0"># type: ignore[arg-type]</span>
+                    <span class="s1">functools</span><span class="s3">.</span><span class="s1">partial</span><span class="s3">(</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">controller</span><span class="s3">.</span><span class="s1">cache_response</span><span class="s3">, </span><span class="s1">request</span><span class="s3">, </span><span class="s1">weakref</span><span class="s3">.</span><span class="s1">ref</span><span class="s3">(</span><span class="s1">response</span><span class="s3">)</span>
+                    <span class="s3">),</span>
+                <span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">response</span><span class="s3">.</span><span class="s1">chunked</span><span class="s3">:</span>
+                    <span class="s1">super_update_chunk_length </span><span class="s3">= </span><span class="s1">response</span><span class="s3">.</span><span class="s1">__class__</span><span class="s3">.</span><span class="s1">_update_chunk_length</span>
+
+                    <span class="s2">def </span><span class="s1">_update_chunk_length</span><span class="s3">(</span>
+                        <span class="s1">weak_self</span><span class="s3">: </span><span class="s1">weakref</span><span class="s3">.</span><span class="s1">ReferenceType</span><span class="s3">[</span><span class="s1">HTTPResponse</span><span class="s3">],</span>
+                    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+                        <span class="s1">self </span><span class="s3">= </span><span class="s1">weak_self</span><span class="s3">()</span>
+                        <span class="s2">if </span><span class="s1">self </span><span class="s2">is None</span><span class="s3">:</span>
+                            <span class="s2">return</span>
+
+                        <span class="s1">super_update_chunk_length</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+                        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">chunk_left </span><span class="s3">== </span><span class="s6">0</span><span class="s3">:</span>
+                            <span class="s1">self</span><span class="s3">.</span><span class="s1">_fp</span><span class="s3">.</span><span class="s1">_close</span><span class="s3">()  </span><span class="s0"># type: ignore[union-attr]</span>
+
+                    <span class="s1">response</span><span class="s3">.</span><span class="s1">_update_chunk_length </span><span class="s3">= </span><span class="s1">functools</span><span class="s3">.</span><span class="s1">partial</span><span class="s3">(  </span><span class="s0"># type: ignore[method-assign]</span>
+                        <span class="s1">_update_chunk_length</span><span class="s3">, </span><span class="s1">weakref</span><span class="s3">.</span><span class="s1">ref</span><span class="s3">(</span><span class="s1">response</span><span class="s3">)</span>
+                    <span class="s3">)</span>
+
+        <span class="s1">resp</span><span class="s3">: </span><span class="s1">Response </span><span class="s3">= </span><span class="s1">super</span><span class="s3">().</span><span class="s1">build_response</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, </span><span class="s1">response</span><span class="s3">)</span>
+
+        <span class="s0"># See if we should invalidate the cache.</span>
+        <span class="s2">if </span><span class="s1">request</span><span class="s3">.</span><span class="s1">method </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">invalidating_methods </span><span class="s2">and </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">ok</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">request</span><span class="s3">.</span><span class="s1">url </span><span class="s2">is not None</span>
+            <span class="s1">cache_url </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">controller</span><span class="s3">.</span><span class="s1">cache_url</span><span class="s3">(</span><span class="s1">request</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">cache</span><span class="s3">.</span><span class="s1">delete</span><span class="s3">(</span><span class="s1">cache_url</span><span class="s3">)</span>
+
+        <span class="s0"># Give the request a from_cache attr to let people use it</span>
+        <span class="s1">resp</span><span class="s3">.</span><span class="s1">from_cache </span><span class="s3">= </span><span class="s1">from_cache  </span><span class="s0"># type: ignore[attr-defined]</span>
+
+        <span class="s2">return </span><span class="s1">resp</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cache</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">close</span><span class="s3">()  </span><span class="s0"># type: ignore[no-untyped-call]</span>
+</pre>
+</body>
+</html>

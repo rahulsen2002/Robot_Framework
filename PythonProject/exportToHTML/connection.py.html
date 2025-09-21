@@ -1,0 +1,213 @@
+<html>
+<head>
+<title>connection.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #a5c261;}
+.s7 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+connection.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+wsproto/connection 
+~~~~~~~~~~~~~~~~~~ 
+ 
+An implementation of a WebSocket connection. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">deque</span>
+<span class="s2">from </span><span class="s1">enum </span><span class="s2">import </span><span class="s1">Enum</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Deque</span><span class="s3">, </span><span class="s1">Generator</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Optional</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">events </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">BytesMessage</span><span class="s3">,</span>
+    <span class="s1">CloseConnection</span><span class="s3">,</span>
+    <span class="s1">Event</span><span class="s3">,</span>
+    <span class="s1">Message</span><span class="s3">,</span>
+    <span class="s1">Ping</span><span class="s3">,</span>
+    <span class="s1">Pong</span><span class="s3">,</span>
+    <span class="s1">TextMessage</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">extensions </span><span class="s2">import </span><span class="s1">Extension</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">frame_protocol </span><span class="s2">import </span><span class="s1">CloseReason</span><span class="s3">, </span><span class="s1">FrameProtocol</span><span class="s3">, </span><span class="s1">Opcode</span><span class="s3">, </span><span class="s1">ParseFailed</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">utilities </span><span class="s2">import </span><span class="s1">LocalProtocolError</span>
+
+
+<span class="s2">class </span><span class="s1">ConnectionState</span><span class="s3">(</span><span class="s1">Enum</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    RFC 6455, Section 4 - Opening Handshake 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4">#: The opening handshake is in progress.</span>
+    <span class="s1">CONNECTING </span><span class="s3">= </span><span class="s5">0</span>
+    <span class="s4">#: The opening handshake is complete.</span>
+    <span class="s1">OPEN </span><span class="s3">= </span><span class="s5">1</span>
+    <span class="s4">#: The remote WebSocket has initiated a connection close.</span>
+    <span class="s1">REMOTE_CLOSING </span><span class="s3">= </span><span class="s5">2</span>
+    <span class="s4">#: The local WebSocket (i.e. this instance) has initiated a connection close.</span>
+    <span class="s1">LOCAL_CLOSING </span><span class="s3">= </span><span class="s5">3</span>
+    <span class="s4">#: The closing handshake has completed.</span>
+    <span class="s1">CLOSED </span><span class="s3">= </span><span class="s5">4</span>
+    <span class="s4">#: The connection was rejected during the opening handshake.</span>
+    <span class="s1">REJECTING </span><span class="s3">= </span><span class="s5">5</span>
+
+
+<span class="s2">class </span><span class="s1">ConnectionType</span><span class="s3">(</span><span class="s1">Enum</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;An enumeration of connection types.&quot;&quot;&quot;</span>
+
+    <span class="s4">#: This connection will act as client and talk to a remote server</span>
+    <span class="s1">CLIENT </span><span class="s3">= </span><span class="s5">1</span>
+
+    <span class="s4">#: This connection will as as server and waits for client connections</span>
+    <span class="s1">SERVER </span><span class="s3">= </span><span class="s5">2</span>
+
+
+<span class="s1">CLIENT </span><span class="s3">= </span><span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">CLIENT</span>
+<span class="s1">SERVER </span><span class="s3">= </span><span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">SERVER</span>
+
+
+<span class="s2">class </span><span class="s1">Connection</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    A low-level WebSocket connection object. 
+ 
+    This wraps two other protocol objects, an HTTP/1.1 protocol object used 
+    to do the initial HTTP upgrade handshake and a WebSocket frame protocol 
+    object used to exchange messages and other control frames. 
+ 
+    :param conn_type: Whether this object is on the client- or server-side of 
+        a connection. To initialise as a client pass ``CLIENT`` otherwise 
+        pass ``SERVER``. 
+    :type conn_type: ``ConnectionType`` 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">connection_type</span><span class="s3">: </span><span class="s1">ConnectionType</span><span class="s3">,</span>
+        <span class="s1">extensions</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">List</span><span class="s3">[</span><span class="s1">Extension</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">trailing_data</span><span class="s3">: </span><span class="s1">bytes </span><span class="s3">= </span><span class="s6">b&quot;&quot;</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">client </span><span class="s3">= </span><span class="s1">connection_type </span><span class="s2">is </span><span class="s1">ConnectionType</span><span class="s3">.</span><span class="s1">CLIENT</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">: </span><span class="s1">Deque</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">] = </span><span class="s1">deque</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_proto </span><span class="s3">= </span><span class="s1">FrameProtocol</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">client</span><span class="s3">, </span><span class="s1">extensions </span><span class="s2">or </span><span class="s3">[])</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">receive_data</span><span class="s3">(</span><span class="s1">trailing_data</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">state</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; ConnectionState</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_state</span>
+
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">event</span><span class="s3">: </span><span class="s1">Event</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s1">data </span><span class="s3">= </span><span class="s6">b&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">Message</span><span class="s3">) </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s3">== </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_proto</span><span class="s3">.</span><span class="s1">send_data</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">data</span><span class="s3">, </span><span class="s1">event</span><span class="s3">.</span><span class="s1">message_finished</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">Ping</span><span class="s3">) </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s3">== </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_proto</span><span class="s3">.</span><span class="s1">ping</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">Pong</span><span class="s3">) </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s3">== </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_proto</span><span class="s3">.</span><span class="s1">pong</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">event</span><span class="s3">, </span><span class="s1">CloseConnection</span><span class="s3">) </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s2">in </span><span class="s3">{</span>
+            <span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span><span class="s3">,</span>
+            <span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">REMOTE_CLOSING</span><span class="s3">,</span>
+        <span class="s3">}:</span>
+            <span class="s1">data </span><span class="s3">+= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_proto</span><span class="s3">.</span><span class="s1">close</span><span class="s3">(</span><span class="s1">event</span><span class="s3">.</span><span class="s1">code</span><span class="s3">, </span><span class="s1">event</span><span class="s3">.</span><span class="s1">reason</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s3">== </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">REMOTE_CLOSING</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">LOCAL_CLOSING</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s7">f&quot;Event </span><span class="s2">{</span><span class="s1">event</span><span class="s2">} </span><span class="s7">cannot be sent in state </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">state</span><span class="s2">}</span><span class="s7">.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">receive_data</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Pass some received data to the connection for handling. 
+ 
+        A list of events that the remote peer triggered by sending this data can 
+        be retrieved with :meth:`~wsproto.connection.Connection.events`. 
+ 
+        :param data: The data received from the remote peer on the network. 
+        :type data: ``bytes`` 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">if </span><span class="s1">data </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s4"># &quot;If _The WebSocket Connection is Closed_ and no Close control</span>
+            <span class="s4"># frame was received by the endpoint (such as could occur if the</span>
+            <span class="s4"># underlying transport connection is lost), _The WebSocket</span>
+            <span class="s4"># Connection Close Code_ is considered to be 1006.&quot;</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">CloseConnection</span><span class="s3">(</span><span class="s1">code</span><span class="s3">=</span><span class="s1">CloseReason</span><span class="s3">.</span><span class="s1">ABNORMAL_CLOSURE</span><span class="s3">))</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+            <span class="s2">return</span>
+
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s2">in </span><span class="s3">(</span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">OPEN</span><span class="s3">, </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">LOCAL_CLOSING</span><span class="s3">):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_proto</span><span class="s3">.</span><span class="s1">receive_bytes</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s2">elif </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s2">is </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s7">&quot;Connection already closed.&quot;</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">pass  </span><span class="s4"># pragma: no cover</span>
+
+    <span class="s2">def </span><span class="s1">events</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return a generator that provides any events that have been generated 
+        by protocol activity. 
+ 
+        :returns: generator of :class:`Event &lt;wsproto.events.Event&gt;` subclasses 
+        &quot;&quot;&quot;</span>
+        <span class="s2">while </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_events</span><span class="s3">.</span><span class="s1">popleft</span><span class="s3">()</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">for </span><span class="s1">frame </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_proto</span><span class="s3">.</span><span class="s1">received_frames</span><span class="s3">():</span>
+                <span class="s2">if </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">PING</span><span class="s3">:</span>
+                    <span class="s2">assert </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished </span><span class="s2">and </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">message_finished</span>
+                    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">))</span>
+                    <span class="s2">yield </span><span class="s1">Ping</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">)</span>
+
+                <span class="s2">elif </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">PONG</span><span class="s3">:</span>
+                    <span class="s2">assert </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished </span><span class="s2">and </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">message_finished</span>
+                    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">))</span>
+                    <span class="s2">yield </span><span class="s1">Pong</span><span class="s3">(</span><span class="s1">payload</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">)</span>
+
+                <span class="s2">elif </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">CLOSE</span><span class="s3">:</span>
+                    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, </span><span class="s1">tuple</span><span class="s3">)</span>
+                    <span class="s1">code</span><span class="s3">, </span><span class="s1">reason </span><span class="s3">= </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span>
+                    <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">state </span><span class="s2">is </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">LOCAL_CLOSING</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">CLOSED</span>
+                    <span class="s2">else</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_state </span><span class="s3">= </span><span class="s1">ConnectionState</span><span class="s3">.</span><span class="s1">REMOTE_CLOSING</span>
+                    <span class="s2">yield </span><span class="s1">CloseConnection</span><span class="s3">(</span><span class="s1">code</span><span class="s3">=</span><span class="s1">code</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">=</span><span class="s1">reason</span><span class="s3">)</span>
+
+                <span class="s2">elif </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">TEXT</span><span class="s3">:</span>
+                    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, </span><span class="s1">str</span><span class="s3">)</span>
+                    <span class="s2">yield </span><span class="s1">TextMessage</span><span class="s3">(</span>
+                        <span class="s1">data</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">,</span>
+                        <span class="s1">frame_finished</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished</span><span class="s3">,</span>
+                        <span class="s1">message_finished</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">message_finished</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+
+                <span class="s2">elif </span><span class="s1">frame</span><span class="s3">.</span><span class="s1">opcode </span><span class="s2">is </span><span class="s1">Opcode</span><span class="s3">.</span><span class="s1">BINARY</span><span class="s3">:</span>
+                    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">, (</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytearray</span><span class="s3">))</span>
+                    <span class="s2">yield </span><span class="s1">BytesMessage</span><span class="s3">(</span>
+                        <span class="s1">data</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">payload</span><span class="s3">,</span>
+                        <span class="s1">frame_finished</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">frame_finished</span><span class="s3">,</span>
+                        <span class="s1">message_finished</span><span class="s3">=</span><span class="s1">frame</span><span class="s3">.</span><span class="s1">message_finished</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s2">pass  </span><span class="s4"># pragma: no cover</span>
+        <span class="s2">except </span><span class="s1">ParseFailed </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">CloseConnection</span><span class="s3">(</span><span class="s1">code</span><span class="s3">=</span><span class="s1">exc</span><span class="s3">.</span><span class="s1">code</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">=</span><span class="s1">str</span><span class="s3">(</span><span class="s1">exc</span><span class="s3">))</span>
+</pre>
+</body>
+</html>

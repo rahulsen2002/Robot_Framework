@@ -1,0 +1,718 @@
+<html>
+<head>
+<title>test_highlevel_open_tcp_stream.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #2aacb8;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #a5c261;}
+.s7 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_highlevel_open_tcp_stream.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">socket </span><span class="s0">import </span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">SocketKind</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_highlevel_open_tcp_stream </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">close_all</span><span class="s2">,</span>
+    <span class="s1">format_host_port</span><span class="s2">,</span>
+    <span class="s1">open_tcp_stream</span><span class="s2">,</span>
+    <span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket </span><span class="s0">import </span><span class="s1">AF_INET</span><span class="s2">, </span><span class="s1">AF_INET6</span><span class="s2">, </span><span class="s1">IPPROTO_TCP</span><span class="s2">, </span><span class="s1">SOCK_STREAM</span><span class="s2">, </span><span class="s1">SocketType</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">Matcher</span><span class="s2">, </span><span class="s1">RaisesGroup</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Sequence</span>
+
+    <span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">MockClock</span>
+
+<span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">version_info </span><span class="s2">&lt; (</span><span class="s3">3</span><span class="s2">, </span><span class="s3">11</span><span class="s2">):</span>
+    <span class="s0">from </span><span class="s1">exceptiongroup </span><span class="s0">import </span><span class="s1">BaseExceptionGroup</span>
+
+
+<span class="s0">def </span><span class="s1">test_close_all</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">class </span><span class="s1">CloseMe</span><span class="s2">(</span><span class="s1">SocketType</span><span class="s2">):</span>
+        <span class="s1">closed </span><span class="s2">= </span><span class="s0">False</span>
+
+        <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">closed </span><span class="s2">= </span><span class="s0">True</span>
+
+    <span class="s0">class </span><span class="s1">CloseKiller</span><span class="s2">(</span><span class="s1">SocketType</span><span class="s2">):</span>
+        <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s4">&quot;os error text&quot;</span><span class="s2">)</span>
+
+    <span class="s1">c</span><span class="s2">: </span><span class="s1">CloseMe </span><span class="s2">= </span><span class="s1">CloseMe</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">close_all</span><span class="s2">() </span><span class="s0">as </span><span class="s1">to_close</span><span class="s2">:</span>
+        <span class="s1">to_close</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">c</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">c</span><span class="s2">.</span><span class="s1">closed</span>
+
+    <span class="s1">c </span><span class="s2">= </span><span class="s1">CloseMe</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">RuntimeError</span><span class="s2">):</span>
+        <span class="s0">with </span><span class="s1">close_all</span><span class="s2">() </span><span class="s0">as </span><span class="s1">to_close</span><span class="s2">:</span>
+            <span class="s1">to_close</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">c</span><span class="s2">)</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError</span>
+    <span class="s0">assert </span><span class="s1">c</span><span class="s2">.</span><span class="s1">closed</span>
+
+    <span class="s1">c </span><span class="s2">= </span><span class="s1">CloseMe</span><span class="s2">()</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s4">&quot;os error text&quot;</span><span class="s2">):</span>
+        <span class="s0">with </span><span class="s1">close_all</span><span class="s2">() </span><span class="s0">as </span><span class="s1">to_close</span><span class="s2">:</span>
+            <span class="s1">to_close</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">CloseKiller</span><span class="s2">())</span>
+            <span class="s1">to_close</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">c</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">c</span><span class="s2">.</span><span class="s1">closed</span>
+
+
+<span class="s0">def </span><span class="s1">test_reorder_for_rfc_6555_section_5_4</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">fake4</span><span class="s2">(</span>
+        <span class="s1">i</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SocketKind</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">]]:</span>
+        <span class="s0">return </span><span class="s2">(</span>
+            <span class="s1">AF_INET</span><span class="s2">,</span>
+            <span class="s1">SOCK_STREAM</span><span class="s2">,</span>
+            <span class="s1">IPPROTO_TCP</span><span class="s2">,</span>
+            <span class="s4">&quot;&quot;</span><span class="s2">,</span>
+            <span class="s2">(</span><span class="s4">f&quot;10.0.0.</span><span class="s0">{</span><span class="s1">i</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s3">80</span><span class="s2">),</span>
+        <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">fake6</span><span class="s2">(</span>
+        <span class="s1">i</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SocketKind</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">]]:</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">AF_INET6</span><span class="s2">, </span><span class="s1">SOCK_STREAM</span><span class="s2">, </span><span class="s1">IPPROTO_TCP</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s2">, (</span><span class="s4">f&quot;::</span><span class="s0">{</span><span class="s1">i</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s3">80</span><span class="s2">))</span>
+
+    <span class="s0">for </span><span class="s1">fake </span><span class="s0">in </span><span class="s1">fake4</span><span class="s2">, </span><span class="s1">fake6</span><span class="s2">:</span>
+        <span class="s5"># No effect on homogeneous lists</span>
+        <span class="s1">targets </span><span class="s2">= [</span><span class="s1">fake</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake</span><span class="s2">(</span><span class="s3">1</span><span class="s2">), </span><span class="s1">fake</span><span class="s2">(</span><span class="s3">2</span><span class="s2">)]</span>
+        <span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">targets </span><span class="s2">== [</span><span class="s1">fake</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake</span><span class="s2">(</span><span class="s3">1</span><span class="s2">), </span><span class="s1">fake</span><span class="s2">(</span><span class="s3">2</span><span class="s2">)]</span>
+
+        <span class="s5"># Single item lists also OK</span>
+        <span class="s1">targets </span><span class="s2">= [</span><span class="s1">fake</span><span class="s2">(</span><span class="s3">0</span><span class="s2">)]</span>
+        <span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">targets </span><span class="s2">== [</span><span class="s1">fake</span><span class="s2">(</span><span class="s3">0</span><span class="s2">)]</span>
+
+    <span class="s5"># If the list starts out with different families in positions 0 and 1,</span>
+    <span class="s5"># then it's left alone</span>
+    <span class="s1">orig </span><span class="s2">= [</span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake6</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">1</span><span class="s2">), </span><span class="s1">fake6</span><span class="s2">(</span><span class="s3">1</span><span class="s2">)]</span>
+    <span class="s1">targets </span><span class="s2">= </span><span class="s1">list</span><span class="s2">(</span><span class="s1">orig</span><span class="s2">)</span>
+    <span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">targets </span><span class="s2">== </span><span class="s1">orig</span>
+
+    <span class="s5"># If not, it's reordered</span>
+    <span class="s1">targets </span><span class="s2">= [</span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">1</span><span class="s2">), </span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">2</span><span class="s2">), </span><span class="s1">fake6</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake6</span><span class="s2">(</span><span class="s3">1</span><span class="s2">)]</span>
+    <span class="s1">reorder_for_rfc_6555_section_5_4</span><span class="s2">(</span><span class="s1">targets</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">targets </span><span class="s2">== [</span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake6</span><span class="s2">(</span><span class="s3">0</span><span class="s2">), </span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">1</span><span class="s2">), </span><span class="s1">fake4</span><span class="s2">(</span><span class="s3">2</span><span class="s2">), </span><span class="s1">fake6</span><span class="s2">(</span><span class="s3">1</span><span class="s2">)]</span>
+
+
+<span class="s0">def </span><span class="s1">test_format_host_port</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">assert </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s4">&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s3">80</span><span class="s2">) == </span><span class="s4">&quot;127.0.0.1:80&quot;</span>
+    <span class="s0">assert </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s6">b&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s3">80</span><span class="s2">) == </span><span class="s4">&quot;127.0.0.1:80&quot;</span>
+    <span class="s0">assert </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s4">&quot;example.com&quot;</span><span class="s2">, </span><span class="s3">443</span><span class="s2">) == </span><span class="s4">&quot;example.com:443&quot;</span>
+    <span class="s0">assert </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s6">b&quot;example.com&quot;</span><span class="s2">, </span><span class="s3">443</span><span class="s2">) == </span><span class="s4">&quot;example.com:443&quot;</span>
+    <span class="s0">assert </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s4">&quot;::1&quot;</span><span class="s2">, </span><span class="s4">&quot;http&quot;</span><span class="s2">) == </span><span class="s4">&quot;[::1]:http&quot;</span>
+    <span class="s0">assert </span><span class="s1">format_host_port</span><span class="s2">(</span><span class="s6">b&quot;::1&quot;</span><span class="s2">, </span><span class="s4">&quot;http&quot;</span><span class="s2">) == </span><span class="s4">&quot;[::1]:http&quot;</span>
+
+
+<span class="s5"># Make sure we can connect to localhost using real kernel sockets</span>
+<span class="s0">async def </span><span class="s1">test_open_tcp_stream_real_socket_smoketest</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">listen_sock </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">()</span>
+    <span class="s0">await </span><span class="s1">listen_sock</span><span class="s2">.</span><span class="s1">bind</span><span class="s2">((</span><span class="s4">&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">))</span>
+    <span class="s1">_</span><span class="s2">, </span><span class="s1">listen_port </span><span class="s2">= </span><span class="s1">listen_sock</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">()</span>
+    <span class="s1">listen_sock</span><span class="s2">.</span><span class="s1">listen</span><span class="s2">(</span><span class="s3">1</span><span class="s2">)</span>
+    <span class="s1">client_stream </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_tcp_stream</span><span class="s2">(</span><span class="s4">&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s1">listen_port</span><span class="s2">)</span>
+    <span class="s1">server_sock</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">= </span><span class="s0">await </span><span class="s1">listen_sock</span><span class="s2">.</span><span class="s1">accept</span><span class="s2">()</span>
+    <span class="s0">await </span><span class="s1">client_stream</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;x&quot;</span><span class="s2">)</span>
+    <span class="s0">assert await </span><span class="s1">server_sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s3">1</span><span class="s2">) == </span><span class="s6">b&quot;x&quot;</span>
+    <span class="s0">await </span><span class="s1">client_stream</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+    <span class="s1">server_sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s1">listen_sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">test_open_tcp_stream_input_validation</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s4">r&quot;^host must be str or bytes, not None$&quot;</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">open_tcp_stream</span><span class="s2">(</span><span class="s0">None</span><span class="s2">, </span><span class="s3">80</span><span class="s2">)  </span><span class="s5"># type: ignore[arg-type]</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">open_tcp_stream</span><span class="s2">(</span><span class="s4">&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s6">b&quot;80&quot;</span><span class="s2">)  </span><span class="s5"># type: ignore[arg-type]</span>
+
+
+<span class="s0">def </span><span class="s1">can_bind_127_0_0_2</span><span class="s2">() </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">() </span><span class="s0">as </span><span class="s1">s</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">s</span><span class="s2">.</span><span class="s1">bind</span><span class="s2">((</span><span class="s4">&quot;127.0.0.2&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">))</span>
+        <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+            <span class="s0">return False</span>
+        <span class="s5"># s.getsockname() is typed as returning Any</span>
+        <span class="s0">return </span><span class="s1">s</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">()[</span><span class="s3">0</span><span class="s2">] == </span><span class="s4">&quot;127.0.0.2&quot;  </span><span class="s5"># type: ignore[no-any-return]</span>
+
+
+<span class="s0">async def </span><span class="s1">test_local_address_real</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">() </span><span class="s0">as </span><span class="s1">listener</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">bind</span><span class="s2">((</span><span class="s4">&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">))</span>
+        <span class="s1">listener</span><span class="s2">.</span><span class="s1">listen</span><span class="s2">()</span>
+
+        <span class="s5"># It's hard to test local_address properly, because you need multiple</span>
+        <span class="s5"># local addresses that you can bind to. Fortunately, on most Linux</span>
+        <span class="s5"># systems, you can bind to any 127.*.*.* address, and they all go</span>
+        <span class="s5"># through the loopback interface. So we can use a non-standard</span>
+        <span class="s5"># loopback address. On other systems, the only address we know for</span>
+        <span class="s5"># certain we have is 127.0.0.1, so we can't really test local_address=</span>
+        <span class="s5"># properly -- passing local_address=127.0.0.1 is indistinguishable</span>
+        <span class="s5"># from not passing local_address= at all. But, we can still do a smoke</span>
+        <span class="s5"># test to make sure the local_address= code doesn't crash.</span>
+        <span class="s1">local_address </span><span class="s2">= </span><span class="s4">&quot;127.0.0.2&quot; </span><span class="s0">if </span><span class="s1">can_bind_127_0_0_2</span><span class="s2">() </span><span class="s0">else </span><span class="s4">&quot;127.0.0.1&quot;</span>
+
+        <span class="s0">async with await </span><span class="s1">open_tcp_stream</span><span class="s2">(</span>
+            <span class="s2">*</span><span class="s1">listener</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">(),</span>
+            <span class="s1">local_address</span><span class="s2">=</span><span class="s1">local_address</span><span class="s2">,</span>
+        <span class="s2">) </span><span class="s0">as </span><span class="s1">client_stream</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">client_stream</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">()[</span><span class="s3">0</span><span class="s2">] == </span><span class="s1">local_address</span>
+            <span class="s0">if </span><span class="s1">hasattr</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s4">&quot;IP_BIND_ADDRESS_NO_PORT&quot;</span><span class="s2">):</span>
+                <span class="s0">assert </span><span class="s1">client_stream</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">getsockopt</span><span class="s2">(</span>
+                    <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">IPPROTO_IP</span><span class="s2">,</span>
+                    <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">IP_BIND_ADDRESS_NO_PORT</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s1">server_sock</span><span class="s2">, </span><span class="s1">remote_addr </span><span class="s2">= </span><span class="s0">await </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">accept</span><span class="s2">()</span>
+            <span class="s0">await </span><span class="s1">client_stream</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+            <span class="s1">server_sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s5"># accept returns tuple[SocketType, object], due to typeshed returning `Any`</span>
+            <span class="s0">assert </span><span class="s1">remote_addr</span><span class="s2">[</span><span class="s3">0</span><span class="s2">] == </span><span class="s1">local_address</span>
+
+        <span class="s5"># Trying to connect to an ipv4 address with the ipv6 wildcard</span>
+        <span class="s5"># local_address should fail</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span>
+            <span class="s1">OSError</span><span class="s2">,</span>
+            <span class="s1">match</span><span class="s2">=</span><span class="s4">r&quot;^all attempts to connect* to *127\.0\.0\.\d:\d+ failed$&quot;</span><span class="s2">,</span>
+        <span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">open_tcp_stream</span><span class="s2">(*</span><span class="s1">listener</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">(), </span><span class="s1">local_address</span><span class="s2">=</span><span class="s4">&quot;::&quot;</span><span class="s2">)</span>
+
+        <span class="s5"># But the ipv4 wildcard address should work</span>
+        <span class="s0">async with await </span><span class="s1">open_tcp_stream</span><span class="s2">(</span>
+            <span class="s2">*</span><span class="s1">listener</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">(),</span>
+            <span class="s1">local_address</span><span class="s2">=</span><span class="s4">&quot;0.0.0.0&quot;</span><span class="s2">,</span>
+        <span class="s2">) </span><span class="s0">as </span><span class="s1">client_stream</span><span class="s2">:</span>
+            <span class="s1">server_sock</span><span class="s2">, </span><span class="s1">remote_addr </span><span class="s2">= </span><span class="s0">await </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">accept</span><span class="s2">()</span>
+            <span class="s1">server_sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+            <span class="s0">assert </span><span class="s1">remote_addr </span><span class="s2">== </span><span class="s1">client_stream</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">()</span>
+
+
+<span class="s5"># Now, thorough tests using fake sockets</span>
+
+
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">eq</span><span class="s2">=</span><span class="s0">False</span><span class="s2">, </span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">FakeSocket</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SocketType</span><span class="s2">):</span>
+    <span class="s1">scenario</span><span class="s2">: </span><span class="s1">Scenario</span>
+    <span class="s1">_family</span><span class="s2">: </span><span class="s1">AddressFamily</span>
+    <span class="s1">_type</span><span class="s2">: </span><span class="s1">SocketKind</span>
+    <span class="s1">_proto</span><span class="s2">: </span><span class="s1">int</span>
+
+    <span class="s1">ip</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">port</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+    <span class="s1">succeeded</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">closed</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">failing</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">type</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; SocketKind</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_type</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">family</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; AddressFamily</span><span class="s2">:  </span><span class="s5"># pragma: no cover</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_family</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">proto</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:  </span><span class="s5"># pragma: no cover</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_proto</span>
+
+    <span class="s0">async def </span><span class="s1">connect</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">sockaddr</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s1">int</span><span class="s2">, </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">]) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">= </span><span class="s1">sockaddr</span><span class="s2">[</span><span class="s3">0</span><span class="s2">]</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">port </span><span class="s2">= </span><span class="s1">sockaddr</span><span class="s2">[</span><span class="s3">1</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ip </span><span class="s0">not in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ip</span><span class="s2">] = </span><span class="s1">self</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times</span><span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ip</span><span class="s2">] = </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">()</span>
+        <span class="s1">delay</span><span class="s2">, </span><span class="s1">result </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">ip_dict</span><span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">ip</span><span class="s2">]</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">sleep</span><span class="s2">(</span><span class="s1">delay</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">result </span><span class="s2">== </span><span class="s4">&quot;error&quot;</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s4">&quot;sorry&quot;</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">result </span><span class="s2">== </span><span class="s4">&quot;postconnect_fail&quot;</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">failing </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">succeeded </span><span class="s2">= </span><span class="s0">True</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">closed </span><span class="s2">= </span><span class="s0">True</span>
+
+    <span class="s5"># called when SocketStream is constructed</span>
+    <span class="s0">def </span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">: </span><span class="s1">object</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">failing</span><span class="s2">:</span>
+            <span class="s5"># raise something that isn't OSError as SocketStream</span>
+            <span class="s5"># ignores those</span>
+            <span class="s0">raise </span><span class="s1">KeyboardInterrupt</span>
+
+
+<span class="s0">class </span><span class="s1">Scenario</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">abc</span><span class="s2">.</span><span class="s1">SocketFactory</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">abc</span><span class="s2">.</span><span class="s1">HostnameResolver</span><span class="s2">):</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">port</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+        <span class="s1">ip_list</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]],</span>
+        <span class="s1">supported_families</span><span class="s2">: </span><span class="s1">set</span><span class="s2">[</span><span class="s1">AddressFamily</span><span class="s2">],</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5"># ip_list have to be unique</span>
+        <span class="s1">ip_order </span><span class="s2">= [</span><span class="s1">ip </span><span class="s0">for </span><span class="s2">(</span><span class="s1">ip</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">) </span><span class="s0">in </span><span class="s1">ip_list</span><span class="s2">]</span>
+        <span class="s0">assert </span><span class="s1">len</span><span class="s2">(</span><span class="s1">set</span><span class="s2">(</span><span class="s1">ip_order</span><span class="s2">)) == </span><span class="s1">len</span><span class="s2">(</span><span class="s1">ip_list</span><span class="s2">)</span>
+        <span class="s1">ip_dict</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s1">int</span><span class="s2">, </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">float</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]] = {}</span>
+        <span class="s0">for </span><span class="s1">ip</span><span class="s2">, </span><span class="s1">delay</span><span class="s2">, </span><span class="s1">result </span><span class="s0">in </span><span class="s1">ip_list</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">delay </span><span class="s2">&gt;= </span><span class="s3">0</span>
+            <span class="s0">assert </span><span class="s1">result </span><span class="s0">in </span><span class="s2">[</span><span class="s4">&quot;error&quot;</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">, </span><span class="s4">&quot;postconnect_fail&quot;</span><span class="s2">]</span>
+            <span class="s1">ip_dict</span><span class="s2">[</span><span class="s1">ip</span><span class="s2">] = (</span><span class="s1">delay</span><span class="s2">, </span><span class="s1">result</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">port </span><span class="s2">= </span><span class="s1">port</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ip_order </span><span class="s2">= </span><span class="s1">ip_order</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ip_dict </span><span class="s2">= </span><span class="s1">ip_dict</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">supported_families </span><span class="s2">= </span><span class="s1">supported_families</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">socket_count </span><span class="s2">= </span><span class="s3">0</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s1">int</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">] = {}</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">connect_times</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str </span><span class="s2">| </span><span class="s1">int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">] = {}</span>
+
+    <span class="s0">def </span><span class="s1">socket</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">family</span><span class="s2">: </span><span class="s1">AddressFamily </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">type_</span><span class="s2">: </span><span class="s1">SocketKind </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">proto</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; SocketType</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">family</span><span class="s2">, </span><span class="s1">AddressFamily</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">type_</span><span class="s2">, </span><span class="s1">SocketKind</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">proto </span><span class="s0">is not None</span>
+        <span class="s0">if </span><span class="s1">family </span><span class="s0">not in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">supported_families</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s4">&quot;pretending not to support this family&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">socket_count </span><span class="s2">+= </span><span class="s3">1</span>
+        <span class="s0">return </span><span class="s1">FakeSocket</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">family</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">proto</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">_ip_to_gai_entry</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">ip</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span>
+        <span class="s1">AddressFamily</span><span class="s2">,</span>
+        <span class="s1">SocketKind</span><span class="s2">,</span>
+        <span class="s1">int</span><span class="s2">,</span>
+        <span class="s1">str</span><span class="s2">,</span>
+        <span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">],</span>
+    <span class="s2">]:</span>
+        <span class="s1">sockaddr</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]</span>
+        <span class="s0">if </span><span class="s4">&quot;:&quot; </span><span class="s0">in </span><span class="s1">ip</span><span class="s2">:</span>
+            <span class="s1">family </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AF_INET6</span>
+            <span class="s1">sockaddr </span><span class="s2">= (</span><span class="s1">ip</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">port</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s3">0</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">family </span><span class="s2">= </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AF_INET</span>
+            <span class="s1">sockaddr </span><span class="s2">= (</span><span class="s1">ip</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">port</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">family</span><span class="s2">, </span><span class="s1">SOCK_STREAM</span><span class="s2">, </span><span class="s1">IPPROTO_TCP</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s1">sockaddr</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">getaddrinfo</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">host</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">port</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">family</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">,</span>
+        <span class="s1">type</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">,</span>
+        <span class="s1">proto</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">,</span>
+        <span class="s1">flags</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= -</span><span class="s3">1</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span>
+        <span class="s1">tuple</span><span class="s2">[</span>
+            <span class="s1">AddressFamily</span><span class="s2">,</span>
+            <span class="s1">SocketKind</span><span class="s2">,</span>
+            <span class="s1">int</span><span class="s2">,</span>
+            <span class="s1">str</span><span class="s2">,</span>
+            <span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">],</span>
+        <span class="s2">]</span>
+    <span class="s2">]:</span>
+        <span class="s0">assert </span><span class="s1">host </span><span class="s2">== </span><span class="s6">b&quot;test.example.com&quot;</span>
+        <span class="s0">assert </span><span class="s1">port </span><span class="s2">== </span><span class="s1">self</span><span class="s2">.</span><span class="s1">port</span>
+        <span class="s0">assert </span><span class="s1">family </span><span class="s2">== </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AF_UNSPEC</span>
+        <span class="s0">assert </span><span class="s1">type </span><span class="s2">== </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOCK_STREAM</span>
+        <span class="s0">assert </span><span class="s1">proto </span><span class="s2">== </span><span class="s3">0</span>
+        <span class="s0">assert </span><span class="s1">flags </span><span class="s2">== </span><span class="s3">0</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_ip_to_gai_entry</span><span class="s2">(</span><span class="s1">ip</span><span class="s2">) </span><span class="s0">for </span><span class="s1">ip </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ip_order</span><span class="s2">]</span>
+
+    <span class="s0">async def </span><span class="s1">getnameinfo</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sockaddr</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">],</span>
+        <span class="s1">flags</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">check</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">succeeded</span><span class="s2">: </span><span class="s1">SocketType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5"># sockets only go into self.sockets when connect is called; make sure</span>
+        <span class="s5"># all the sockets that were created did in fact go in there.</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">socket_count </span><span class="s2">== </span><span class="s1">len</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">)</span>
+
+        <span class="s0">for </span><span class="s1">ip</span><span class="s2">, </span><span class="s1">socket_ </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+            <span class="s0">assert </span><span class="s1">ip </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ip_dict</span>
+            <span class="s0">if </span><span class="s1">socket_ </span><span class="s0">is not </span><span class="s1">succeeded</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">socket_</span><span class="s2">.</span><span class="s1">closed</span>
+            <span class="s0">assert </span><span class="s1">socket_</span><span class="s2">.</span><span class="s1">port </span><span class="s2">== </span><span class="s1">self</span><span class="s2">.</span><span class="s1">port</span>
+
+
+<span class="s0">async def </span><span class="s1">run_scenario</span><span class="s2">(</span>
+    <span class="s5"># The port to connect to</span>
+    <span class="s1">port</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s5"># A list of</span>
+    <span class="s5">#  (ip, delay, result)</span>
+    <span class="s5"># tuples, where delay is in seconds and result is &quot;success&quot; or &quot;error&quot;</span>
+    <span class="s5"># The ip's will be returned from getaddrinfo in this order, and then</span>
+    <span class="s5"># connect() calls to them will have the given result.</span>
+    <span class="s1">ip_list</span><span class="s2">: </span><span class="s1">Sequence</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">str</span><span class="s2">]],</span>
+    <span class="s2">*,</span>
+    <span class="s5"># If False, AF_INET4/6 sockets error out on creation, before connect is</span>
+    <span class="s5"># even called.</span>
+    <span class="s1">ipv4_supported</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s1">ipv6_supported</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s5"># Normally, we return (winning_sock, scenario object)</span>
+    <span class="s5"># If this is True, we require there to be an exception, and return</span>
+    <span class="s5">#   (exception, scenario object)</span>
+    <span class="s1">expect_error</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">], ...] | </span><span class="s1">type</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] = (),</span>
+    <span class="s1">happy_eyeballs_delay</span><span class="s2">: </span><span class="s1">float </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s3">0.25</span><span class="s2">,</span>
+    <span class="s1">local_address</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">SocketType</span><span class="s2">, </span><span class="s1">Scenario</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">, </span><span class="s1">Scenario</span><span class="s2">]:</span>
+    <span class="s1">supported_families </span><span class="s2">= </span><span class="s1">set</span><span class="s2">()</span>
+    <span class="s0">if </span><span class="s1">ipv4_supported</span><span class="s2">:</span>
+        <span class="s1">supported_families</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AF_INET</span><span class="s2">)</span>
+    <span class="s0">if </span><span class="s1">ipv6_supported</span><span class="s2">:</span>
+        <span class="s1">supported_families</span><span class="s2">.</span><span class="s1">add</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">AF_INET6</span><span class="s2">)</span>
+    <span class="s1">scenario </span><span class="s2">= </span><span class="s1">Scenario</span><span class="s2">(</span><span class="s1">port</span><span class="s2">, </span><span class="s1">ip_list</span><span class="s2">, </span><span class="s1">supported_families</span><span class="s2">)</span>
+    <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">set_custom_hostname_resolver</span><span class="s2">(</span><span class="s1">scenario</span><span class="s2">)</span>
+    <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">set_custom_socket_factory</span><span class="s2">(</span><span class="s1">scenario</span><span class="s2">)</span>
+
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">stream </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_tcp_stream</span><span class="s2">(</span>
+            <span class="s4">&quot;test.example.com&quot;</span><span class="s2">,</span>
+            <span class="s1">port</span><span class="s2">,</span>
+            <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s1">happy_eyeballs_delay</span><span class="s2">,</span>
+            <span class="s1">local_address</span><span class="s2">=</span><span class="s1">local_address</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">expect_error </span><span class="s2">== ()</span>
+        <span class="s1">scenario</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">stream</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">stream</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">, </span><span class="s1">scenario</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">AssertionError</span><span class="s2">:  </span><span class="s5"># pragma: no cover</span>
+        <span class="s0">raise</span>
+    <span class="s0">except </span><span class="s1">expect_error </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+        <span class="s1">scenario</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">scenario</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_one_host_quick_success</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">_scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span><span class="s3">80</span><span class="s2">, [(</span><span class="s4">&quot;1.2.3.4&quot;</span><span class="s2">, </span><span class="s3">0.123</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">)])</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;1.2.3.4&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">0.123</span>
+
+
+<span class="s0">async def </span><span class="s1">test_one_host_slow_success</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">_scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span><span class="s3">81</span><span class="s2">, [(</span><span class="s4">&quot;1.2.3.4&quot;</span><span class="s2">, </span><span class="s3">100</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">)])</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;1.2.3.4&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">100</span>
+
+
+<span class="s0">async def </span><span class="s1">test_one_host_quick_fail</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">exc</span><span class="s2">, </span><span class="s1">_scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">82</span><span class="s2">,</span>
+        <span class="s2">[(</span><span class="s4">&quot;1.2.3.4&quot;</span><span class="s2">, </span><span class="s3">0.123</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">)],</span>
+        <span class="s1">expect_error</span><span class="s2">=</span><span class="s1">OSError</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">OSError</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">0.123</span>
+
+
+<span class="s0">async def </span><span class="s1">test_one_host_slow_fail</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">exc</span><span class="s2">, </span><span class="s1">_scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">83</span><span class="s2">,</span>
+        <span class="s2">[(</span><span class="s4">&quot;1.2.3.4&quot;</span><span class="s2">, </span><span class="s3">100</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">)],</span>
+        <span class="s1">expect_error</span><span class="s2">=</span><span class="s1">OSError</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">OSError</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">100</span>
+
+
+<span class="s0">async def </span><span class="s1">test_one_host_failed_after_connect</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">exc</span><span class="s2">, </span><span class="s1">_scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">83</span><span class="s2">,</span>
+        <span class="s2">[(</span><span class="s4">&quot;1.2.3.4&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;postconnect_fail&quot;</span><span class="s2">)],</span>
+        <span class="s1">expect_error</span><span class="s2">=</span><span class="s1">KeyboardInterrupt</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">KeyboardInterrupt</span><span class="s2">)</span>
+
+
+<span class="s5"># With the default 0.250 second delay, the third attempt will win</span>
+<span class="s0">async def </span><span class="s1">test_basic_fallthrough</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">0.2</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;3.3.3.3&quot;</span>
+    <span class="s5"># current time is default time + default time + connection time</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == (</span><span class="s3">0.250 </span><span class="s2">+ </span><span class="s3">0.250 </span><span class="s2">+ </span><span class="s3">0.2</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.250</span><span class="s2">,</span>
+        <span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">: </span><span class="s3">0.500</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_early_success</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">0.1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">0.2</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;2.2.2.2&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == (</span><span class="s3">0.250 </span><span class="s2">+ </span><span class="s3">0.1</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.250</span><span class="s2">,</span>
+        <span class="s5"># 3.3.3.3 was never even started</span>
+    <span class="s2">}</span>
+
+
+<span class="s5"># With a 0.450 second delay, the first attempt will win</span>
+<span class="s0">async def </span><span class="s1">test_custom_delay</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">0.2</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s3">0.450</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;1.1.1.1&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">1</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.450</span><span class="s2">,</span>
+        <span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">: </span><span class="s3">0.900</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_none_default</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s7">&quot;&quot;&quot;Copy of test_basic_fallthrough, but specifying the delay =None&quot;&quot;&quot;</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">0.2</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;3.3.3.3&quot;</span>
+    <span class="s5"># current time is default time + default time + connection time</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == (</span><span class="s3">0.250 </span><span class="s2">+ </span><span class="s3">0.250 </span><span class="s2">+ </span><span class="s3">0.2</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.250</span><span class="s2">,</span>
+        <span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">: </span><span class="s3">0.500</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_custom_errors_expedite</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">0.1</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">0.2</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s5"># .25 is the default timeout</span>
+            <span class="s2">(</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">, </span><span class="s3">0.25</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;4.4.4.4&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == (</span><span class="s3">0.1 </span><span class="s2">+ </span><span class="s3">0.2 </span><span class="s2">+ </span><span class="s3">0.25 </span><span class="s2">+ </span><span class="s3">0.25</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.1</span><span class="s2">,</span>
+        <span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">: </span><span class="s3">0.1 </span><span class="s2">+ </span><span class="s3">0.2</span><span class="s2">,</span>
+        <span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">: </span><span class="s3">0.1 </span><span class="s2">+ </span><span class="s3">0.2 </span><span class="s2">+ </span><span class="s3">0.25</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_all_fail</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">exc</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">0.1</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">0.2</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">, </span><span class="s3">0.250</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">expect_error</span><span class="s2">=</span><span class="s1">OSError</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">OSError</span><span class="s2">)</span>
+
+    <span class="s1">subexceptions </span><span class="s2">= (</span><span class="s1">Matcher</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s4">&quot;^sorry$&quot;</span><span class="s2">),) * </span><span class="s3">4</span>
+    <span class="s0">assert </span><span class="s1">RaisesGroup</span><span class="s2">(</span>
+        <span class="s2">*</span><span class="s1">subexceptions</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">=</span><span class="s4">&quot;all attempts to connect to test.example.com:80 failed&quot;</span><span class="s2">,</span>
+    <span class="s2">).</span><span class="s1">matches</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">.</span><span class="s1">__cause__</span><span class="s2">)</span>
+
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == (</span><span class="s3">0.1 </span><span class="s2">+ </span><span class="s3">0.2 </span><span class="s2">+ </span><span class="s3">10</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.1</span><span class="s2">,</span>
+        <span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">: </span><span class="s3">0.1 </span><span class="s2">+ </span><span class="s3">0.2</span><span class="s2">,</span>
+        <span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">: </span><span class="s3">0.1 </span><span class="s2">+ </span><span class="s3">0.2 </span><span class="s2">+ </span><span class="s3">0.25</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_multi_success</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">0.5</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">10 </span><span class="s2">- </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">, </span><span class="s3">10 </span><span class="s2">- </span><span class="s3">2</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;5.5.5.5&quot;</span><span class="s2">, </span><span class="s3">0.5</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s3">1</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert not </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">[</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">].</span><span class="s1">succeeded</span>
+    <span class="s0">assert </span><span class="s2">(</span>
+        <span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">[</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">].</span><span class="s1">succeeded</span>
+        <span class="s0">or </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">[</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">].</span><span class="s1">succeeded</span>
+        <span class="s0">or </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">[</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">].</span><span class="s1">succeeded</span>
+    <span class="s2">)</span>
+    <span class="s0">assert not </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">sockets</span><span class="s2">[</span><span class="s4">&quot;5.5.5.5&quot;</span><span class="s2">].</span><span class="s1">succeeded</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s0">in </span><span class="s2">[</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">]</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == (</span><span class="s3">0.5 </span><span class="s2">+ </span><span class="s3">10</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0.5</span><span class="s2">,</span>
+        <span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">: </span><span class="s3">1.5</span><span class="s2">,</span>
+        <span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">: </span><span class="s3">2.5</span><span class="s2">,</span>
+        <span class="s4">&quot;5.5.5.5&quot;</span><span class="s2">: </span><span class="s3">3.5</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_does_reorder</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;error&quot;</span><span class="s2">),</span>
+            <span class="s5"># This would win if we tried it first...</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s5"># But in fact we try this first, because of section 5.4</span>
+            <span class="s2">(</span><span class="s4">&quot;::3&quot;</span><span class="s2">, </span><span class="s3">0.5</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s3">1</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;::3&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">1 </span><span class="s2">+ </span><span class="s3">0.5</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;::3&quot;</span><span class="s2">: </span><span class="s3">1</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_handles_no_ipv4</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s5"># Here the ipv6 addresses fail at socket creation time, so the connect</span>
+        <span class="s5"># configuration doesn't matter</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;::1&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;::3&quot;</span><span class="s2">, </span><span class="s3">0.1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s3">1</span><span class="s2">,</span>
+        <span class="s1">ipv4_supported</span><span class="s2">=</span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;::3&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">1 </span><span class="s2">+ </span><span class="s3">0.1</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;::1&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;::3&quot;</span><span class="s2">: </span><span class="s3">1.0</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_handles_no_ipv6</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">sock</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+        <span class="s3">80</span><span class="s2">,</span>
+        <span class="s5"># Here the ipv6 addresses fail at socket creation time, so the connect</span>
+        <span class="s5"># configuration doesn't matter</span>
+        <span class="s2">[</span>
+            <span class="s2">(</span><span class="s4">&quot;::1&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;::3&quot;</span><span class="s2">, </span><span class="s3">0</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">(</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">, </span><span class="s3">0.1</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+        <span class="s2">],</span>
+        <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s3">1</span><span class="s2">,</span>
+        <span class="s1">ipv6_supported</span><span class="s2">=</span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">sock</span><span class="s2">, </span><span class="s1">FakeSocket</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">sock</span><span class="s2">.</span><span class="s1">ip </span><span class="s2">== </span><span class="s4">&quot;4.4.4.4&quot;</span>
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">1 </span><span class="s2">+ </span><span class="s3">0.1</span>
+    <span class="s0">assert </span><span class="s1">scenario</span><span class="s2">.</span><span class="s1">connect_times </span><span class="s2">== {</span>
+        <span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">: </span><span class="s3">0</span><span class="s2">,</span>
+        <span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">: </span><span class="s3">1.0</span><span class="s2">,</span>
+    <span class="s2">}</span>
+
+
+<span class="s0">async def </span><span class="s1">test_no_hosts</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">exc</span><span class="s2">, </span><span class="s1">_scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span><span class="s3">80</span><span class="s2">, [], </span><span class="s1">expect_error</span><span class="s2">=</span><span class="s1">OSError</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s4">&quot;no results found&quot; </span><span class="s0">in </span><span class="s1">str</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_cancel</span><span class="s2">(</span><span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">move_on_after</span><span class="s2">(</span><span class="s3">5</span><span class="s2">) </span><span class="s0">as </span><span class="s1">cancel_scope</span><span class="s2">:</span>
+        <span class="s1">exc</span><span class="s2">, </span><span class="s1">scenario </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_scenario</span><span class="s2">(</span>
+            <span class="s3">80</span><span class="s2">,</span>
+            <span class="s2">[</span>
+                <span class="s2">(</span><span class="s4">&quot;1.1.1.1&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+                <span class="s2">(</span><span class="s4">&quot;2.2.2.2&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+                <span class="s2">(</span><span class="s4">&quot;3.3.3.3&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+                <span class="s2">(</span><span class="s4">&quot;4.4.4.4&quot;</span><span class="s2">, </span><span class="s3">10</span><span class="s2">, </span><span class="s4">&quot;success&quot;</span><span class="s2">),</span>
+            <span class="s2">],</span>
+            <span class="s1">expect_error</span><span class="s2">=</span><span class="s1">BaseExceptionGroup</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">exc</span><span class="s2">, </span><span class="s1">BaseException</span><span class="s2">)</span>
+        <span class="s5"># What comes out should be 1 or more Cancelled errors that all belong</span>
+        <span class="s5"># to this cancel_scope; this is the easiest way to check that</span>
+        <span class="s0">raise </span><span class="s1">exc</span>
+    <span class="s0">assert </span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+
+    <span class="s0">assert </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() == </span><span class="s3">5</span>
+
+    <span class="s5"># This should have been called already, but just to make sure, since the</span>
+    <span class="s5"># exception-handling logic in run_scenario is a bit complicated and the</span>
+    <span class="s5"># main thing we care about here is that all the sockets were cleaned up.</span>
+    <span class="s1">scenario</span><span class="s2">.</span><span class="s1">check</span><span class="s2">(</span><span class="s1">succeeded</span><span class="s2">=</span><span class="s0">None</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,393 @@
+<html>
+<head>
+<title>_events.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #a5c261;}
+.s7 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_events.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># High level events that make up HTTP/1.1 conversations. Loosely inspired by</span>
+<span class="s0"># the corresponding events in hyper-h2:</span>
+<span class="s0">#</span>
+<span class="s0">#     http://python-hyper.org/h2/en/stable/api.html#events</span>
+<span class="s0">#</span>
+<span class="s0"># Don't subclass these. Stuff will break.</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">abc </span><span class="s2">import </span><span class="s1">ABC</span>
+<span class="s2">from </span><span class="s1">dataclasses </span><span class="s2">import </span><span class="s1">dataclass</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_abnf </span><span class="s2">import </span><span class="s1">method</span><span class="s3">, </span><span class="s1">request_target</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_headers </span><span class="s2">import </span><span class="s1">Headers</span><span class="s3">, </span><span class="s1">normalize_and_validate</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_util </span><span class="s2">import </span><span class="s1">bytesify</span><span class="s3">, </span><span class="s1">LocalProtocolError</span><span class="s3">, </span><span class="s1">validate</span>
+
+<span class="s0"># Everything in __all__ gets re-exported as part of the h11 public API.</span>
+<span class="s1">__all__ </span><span class="s3">= [</span>
+    <span class="s4">&quot;Event&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;Request&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;InformationalResponse&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;Response&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;Data&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;EndOfMessage&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;ConnectionClosed&quot;</span><span class="s3">,</span>
+<span class="s3">]</span>
+
+<span class="s1">method_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">method</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;ascii&quot;</span><span class="s3">))</span>
+<span class="s1">request_target_re </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span><span class="s1">request_target</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s4">&quot;ascii&quot;</span><span class="s3">))</span>
+
+
+<span class="s2">class </span><span class="s1">Event</span><span class="s3">(</span><span class="s1">ABC</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Base class for h11 events. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s3">= ()</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">init</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">Request</span><span class="s3">(</span><span class="s1">Event</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot;The beginning of an HTTP request. 
+ 
+    Fields: 
+ 
+    .. attribute:: method 
+ 
+       An HTTP method, e.g. ``b&quot;GET&quot;`` or ``b&quot;POST&quot;``. Always a byte 
+       string. :term:`Bytes-like objects &lt;bytes-like object&gt;` and native 
+       strings containing only ascii characters will be automatically 
+       converted to byte strings. 
+ 
+    .. attribute:: target 
+ 
+       The target of an HTTP request, e.g. ``b&quot;/index.html&quot;``, or one of the 
+       more exotic formats described in `RFC 7320, section 5.3 
+       &lt;https://tools.ietf.org/html/rfc7230#section-5.3&gt;`_. Always a byte 
+       string. :term:`Bytes-like objects &lt;bytes-like object&gt;` and native 
+       strings containing only ascii characters will be automatically 
+       converted to byte strings. 
+ 
+    .. attribute:: headers 
+ 
+       Request headers, represented as a list of (name, value) pairs. See 
+       :ref:`the header normalization rules &lt;headers-format&gt;` for details. 
+ 
+    .. attribute:: http_version 
+ 
+       The HTTP protocol version, represented as a byte string like 
+       ``b&quot;1.1&quot;``. See :ref:`the HTTP version normalization rules 
+       &lt;http_version-format&gt;` for details. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s3">= (</span><span class="s4">&quot;method&quot;</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s4">&quot;target&quot;</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">)</span>
+
+    <span class="s1">method</span><span class="s3">: </span><span class="s1">bytes</span>
+    <span class="s1">headers</span><span class="s3">: </span><span class="s1">Headers</span>
+    <span class="s1">target</span><span class="s3">: </span><span class="s1">bytes</span>
+    <span class="s1">http_version</span><span class="s3">: </span><span class="s1">bytes</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s3">*,</span>
+        <span class="s1">method</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">headers</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Headers</span><span class="s3">, </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">]], </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]],</span>
+        <span class="s1">target</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">],</span>
+        <span class="s1">http_version</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = </span><span class="s6">b&quot;1.1&quot;</span><span class="s3">,</span>
+        <span class="s1">_parsed</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">Headers</span><span class="s3">):</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s1">normalize_and_validate</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">_parsed</span><span class="s3">=</span><span class="s1">_parsed</span><span class="s3">)</span>
+            <span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">_parsed</span><span class="s3">:</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;method&quot;</span><span class="s3">, </span><span class="s1">bytesify</span><span class="s3">(</span><span class="s1">method</span><span class="s3">))</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;target&quot;</span><span class="s3">, </span><span class="s1">bytesify</span><span class="s3">(</span><span class="s1">target</span><span class="s3">))</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">, </span><span class="s1">bytesify</span><span class="s3">(</span><span class="s1">http_version</span><span class="s3">))</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;method&quot;</span><span class="s3">, </span><span class="s1">method</span><span class="s3">)</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;target&quot;</span><span class="s3">, </span><span class="s1">target</span><span class="s3">)</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">, </span><span class="s1">http_version</span><span class="s3">)</span>
+
+        <span class="s0"># &quot;A server MUST respond with a 400 (Bad Request) status code to any</span>
+        <span class="s0"># HTTP/1.1 request message that lacks a Host header field and to any</span>
+        <span class="s0"># request message that contains more than one Host header field or a</span>
+        <span class="s0"># Host header field with an invalid field-value.&quot;</span>
+        <span class="s0"># -- https://tools.ietf.org/html/rfc7230#section-5.4</span>
+        <span class="s1">host_count </span><span class="s3">= </span><span class="s7">0</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s3">== </span><span class="s6">b&quot;host&quot;</span><span class="s3">:</span>
+                <span class="s1">host_count </span><span class="s3">+= </span><span class="s7">1</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">http_version </span><span class="s3">== </span><span class="s6">b&quot;1.1&quot; </span><span class="s2">and </span><span class="s1">host_count </span><span class="s3">== </span><span class="s7">0</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;Missing mandatory Host: header&quot;</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">host_count </span><span class="s3">&gt; </span><span class="s7">1</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;Found multiple Host: headers&quot;</span><span class="s3">)</span>
+
+        <span class="s1">validate</span><span class="s3">(</span><span class="s1">method_re</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">method</span><span class="s3">, </span><span class="s4">&quot;Illegal method characters&quot;</span><span class="s3">)</span>
+        <span class="s1">validate</span><span class="s3">(</span><span class="s1">request_target_re</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">target</span><span class="s3">, </span><span class="s4">&quot;Illegal target characters&quot;</span><span class="s3">)</span>
+
+    <span class="s0"># This is an unhashable type.</span>
+    <span class="s1">__hash__ </span><span class="s3">= </span><span class="s2">None  </span><span class="s0"># type: ignore</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">init</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">_ResponseBase</span><span class="s3">(</span><span class="s1">Event</span><span class="s3">):</span>
+    <span class="s1">__slots__ </span><span class="s3">= (</span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">, </span><span class="s4">&quot;reason&quot;</span><span class="s3">, </span><span class="s4">&quot;status_code&quot;</span><span class="s3">)</span>
+
+    <span class="s1">headers</span><span class="s3">: </span><span class="s1">Headers</span>
+    <span class="s1">http_version</span><span class="s3">: </span><span class="s1">bytes</span>
+    <span class="s1">reason</span><span class="s3">: </span><span class="s1">bytes</span>
+    <span class="s1">status_code</span><span class="s3">: </span><span class="s1">int</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s3">*,</span>
+        <span class="s1">headers</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Headers</span><span class="s3">, </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">]], </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]]],</span>
+        <span class="s1">status_code</span><span class="s3">: </span><span class="s1">int</span><span class="s3">,</span>
+        <span class="s1">http_version</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = </span><span class="s6">b&quot;1.1&quot;</span><span class="s3">,</span>
+        <span class="s1">reason</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = </span><span class="s6">b&quot;&quot;</span><span class="s3">,</span>
+        <span class="s1">_parsed</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">Headers</span><span class="s3">):</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s1">normalize_and_validate</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">_parsed</span><span class="s3">=</span><span class="s1">_parsed</span><span class="s3">)</span>
+            <span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">_parsed</span><span class="s3">:</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;reason&quot;</span><span class="s3">, </span><span class="s1">bytesify</span><span class="s3">(</span><span class="s1">reason</span><span class="s3">))</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">, </span><span class="s1">bytesify</span><span class="s3">(</span><span class="s1">http_version</span><span class="s3">))</span>
+            <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">status_code</span><span class="s3">, </span><span class="s1">int</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span><span class="s4">&quot;status code must be integer&quot;</span><span class="s3">)</span>
+            <span class="s0"># Because IntEnum objects are instances of int, but aren't</span>
+            <span class="s0"># duck-compatible (sigh), see gh-72.</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;status_code&quot;</span><span class="s3">, </span><span class="s1">int</span><span class="s3">(</span><span class="s1">status_code</span><span class="s3">))</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;reason&quot;</span><span class="s3">, </span><span class="s1">reason</span><span class="s3">)</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;http_version&quot;</span><span class="s3">, </span><span class="s1">http_version</span><span class="s3">)</span>
+            <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;status_code&quot;</span><span class="s3">, </span><span class="s1">status_code</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">__post_init__</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">__post_init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">pass</span>
+
+    <span class="s0"># This is an unhashable type.</span>
+    <span class="s1">__hash__ </span><span class="s3">= </span><span class="s2">None  </span><span class="s0"># type: ignore</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">init</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">InformationalResponse</span><span class="s3">(</span><span class="s1">_ResponseBase</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot;An HTTP informational response. 
+ 
+    Fields: 
+ 
+    .. attribute:: status_code 
+ 
+       The status code of this response, as an integer. For an 
+       :class:`InformationalResponse`, this is always in the range [100, 
+       200). 
+ 
+    .. attribute:: headers 
+ 
+       Request headers, represented as a list of (name, value) pairs. See 
+       :ref:`the header normalization rules &lt;headers-format&gt;` for 
+       details. 
+ 
+    .. attribute:: http_version 
+ 
+       The HTTP protocol version, represented as a byte string like 
+       ``b&quot;1.1&quot;``. See :ref:`the HTTP version normalization rules 
+       &lt;http_version-format&gt;` for details. 
+ 
+    .. attribute:: reason 
+ 
+       The reason phrase of this response, as a byte string. For example: 
+       ``b&quot;OK&quot;``, or ``b&quot;Not Found&quot;``. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__post_init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s3">(</span><span class="s7">100 </span><span class="s3">&lt;= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">&lt; </span><span class="s7">200</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s4">&quot;InformationalResponse status_code should be in range &quot;</span>
+                <span class="s4">&quot;[100, 200), not {}&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">status_code</span><span class="s3">)</span>
+            <span class="s3">)</span>
+
+    <span class="s0"># This is an unhashable type.</span>
+    <span class="s1">__hash__ </span><span class="s3">= </span><span class="s2">None  </span><span class="s0"># type: ignore</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">init</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">Response</span><span class="s3">(</span><span class="s1">_ResponseBase</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot;The beginning of an HTTP response. 
+ 
+    Fields: 
+ 
+    .. attribute:: status_code 
+ 
+       The status code of this response, as an integer. For an 
+       :class:`Response`, this is always in the range [200, 
+       1000). 
+ 
+    .. attribute:: headers 
+ 
+       Request headers, represented as a list of (name, value) pairs. See 
+       :ref:`the header normalization rules &lt;headers-format&gt;` for details. 
+ 
+    .. attribute:: http_version 
+ 
+       The HTTP protocol version, represented as a byte string like 
+       ``b&quot;1.1&quot;``. See :ref:`the HTTP version normalization rules 
+       &lt;http_version-format&gt;` for details. 
+ 
+    .. attribute:: reason 
+ 
+       The reason phrase of this response, as a byte string. For example: 
+       ``b&quot;OK&quot;``, or ``b&quot;Not Found&quot;``. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__post_init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if not </span><span class="s3">(</span><span class="s7">200 </span><span class="s3">&lt;= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">&lt; </span><span class="s7">1000</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s4">&quot;Response status_code should be in range [200, 1000), not {}&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">status_code</span>
+                <span class="s3">)</span>
+            <span class="s3">)</span>
+
+    <span class="s0"># This is an unhashable type.</span>
+    <span class="s1">__hash__ </span><span class="s3">= </span><span class="s2">None  </span><span class="s0"># type: ignore</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">init</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">Data</span><span class="s3">(</span><span class="s1">Event</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot;Part of an HTTP message body. 
+ 
+    Fields: 
+ 
+    .. attribute:: data 
+ 
+       A :term:`bytes-like object` containing part of a message body. Or, if 
+       using the ``combine=False`` argument to :meth:`Connection.send`, then 
+       any object that your socket writing code knows what to do with, and for 
+       which calling :func:`len` returns the number of bytes that will be 
+       written -- see :ref:`sendfile` for details. 
+ 
+    .. attribute:: chunk_start 
+ 
+       A marker that indicates whether this data object is from the start of a 
+       chunked transfer encoding chunk. This field is ignored when when a Data 
+       event is provided to :meth:`Connection.send`: it is only valid on 
+       events emitted from :meth:`Connection.next_event`. You probably 
+       shouldn't use this attribute at all; see 
+       :ref:`chunk-delimiters-are-bad` for details. 
+ 
+    .. attribute:: chunk_end 
+ 
+       A marker that indicates whether this data object is the last for a 
+       given chunked transfer encoding chunk. This field is ignored when when 
+       a Data event is provided to :meth:`Connection.send`: it is only valid 
+       on events emitted from :meth:`Connection.next_event`. You probably 
+       shouldn't use this attribute at all; see 
+       :ref:`chunk-delimiters-are-bad` for details. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s3">= (</span><span class="s4">&quot;data&quot;</span><span class="s3">, </span><span class="s4">&quot;chunk_start&quot;</span><span class="s3">, </span><span class="s4">&quot;chunk_end&quot;</span><span class="s3">)</span>
+
+    <span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span>
+    <span class="s1">chunk_start</span><span class="s3">: </span><span class="s1">bool</span>
+    <span class="s1">chunk_end</span><span class="s3">: </span><span class="s1">bool</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">: </span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">chunk_start</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">, </span><span class="s1">chunk_end</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;data&quot;</span><span class="s3">, </span><span class="s1">data</span><span class="s3">)</span>
+        <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;chunk_start&quot;</span><span class="s3">, </span><span class="s1">chunk_start</span><span class="s3">)</span>
+        <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;chunk_end&quot;</span><span class="s3">, </span><span class="s1">chunk_end</span><span class="s3">)</span>
+
+    <span class="s0"># This is an unhashable type.</span>
+    <span class="s1">__hash__ </span><span class="s3">= </span><span class="s2">None  </span><span class="s0"># type: ignore</span>
+
+
+<span class="s0"># XX FIXME: &quot;A recipient MUST ignore (or consider as an error) any fields that</span>
+<span class="s0"># are forbidden to be sent in a trailer, since processing them as if they were</span>
+<span class="s0"># present in the header section might bypass external security filters.&quot;</span>
+<span class="s0"># https://svn.tools.ietf.org/svn/wg/httpbis/specs/rfc7230.html#chunked.trailer.part</span>
+<span class="s0"># Unfortunately, the list of forbidden fields is long and vague :-/</span>
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">init</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">EndOfMessage</span><span class="s3">(</span><span class="s1">Event</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot;The end of an HTTP message. 
+ 
+    Fields: 
+ 
+    .. attribute:: headers 
+ 
+       Default value: ``[]`` 
+ 
+       Any trailing headers attached to this message, represented as a list of 
+       (name, value) pairs. See :ref:`the header normalization rules 
+       &lt;headers-format&gt;` for details. 
+ 
+       Must be empty unless ``Transfer-Encoding: chunked`` is in use. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ </span><span class="s3">= (</span><span class="s4">&quot;headers&quot;</span><span class="s3">,)</span>
+
+    <span class="s1">headers</span><span class="s3">: </span><span class="s1">Headers</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s3">*,</span>
+        <span class="s1">headers</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span>
+            <span class="s1">Headers</span><span class="s3">, </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">bytes</span><span class="s3">, </span><span class="s1">bytes</span><span class="s3">]], </span><span class="s1">List</span><span class="s3">[</span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">]], </span><span class="s2">None</span>
+        <span class="s3">] = </span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">_parsed</span><span class="s3">: </span><span class="s1">bool </span><span class="s3">= </span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">headers </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">headers </span><span class="s3">= </span><span class="s1">Headers</span><span class="s3">([])</span>
+        <span class="s2">elif not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">Headers</span><span class="s3">):</span>
+            <span class="s1">headers </span><span class="s3">= </span><span class="s1">normalize_and_validate</span><span class="s3">(</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">_parsed</span><span class="s3">=</span><span class="s1">_parsed</span><span class="s3">)</span>
+
+        <span class="s1">object</span><span class="s3">.</span><span class="s1">__setattr__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;headers&quot;</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">)</span>
+
+    <span class="s0"># This is an unhashable type.</span>
+    <span class="s1">__hash__ </span><span class="s3">= </span><span class="s2">None  </span><span class="s0"># type: ignore</span>
+
+
+<span class="s3">@</span><span class="s1">dataclass</span><span class="s3">(</span><span class="s1">frozen</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+<span class="s2">class </span><span class="s1">ConnectionClosed</span><span class="s3">(</span><span class="s1">Event</span><span class="s3">):</span>
+    <span class="s5">&quot;&quot;&quot;This event indicates that the sender has closed their outgoing 
+    connection. 
+ 
+    Note that this does not necessarily mean that they can't *receive* further 
+    data, because TCP connections are composed to two one-way channels which 
+    can be closed independently. See :ref:`closing` for details. 
+ 
+    No fields. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">pass</span>
+</pre>
+</body>
+</html>

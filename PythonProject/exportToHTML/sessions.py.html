@@ -1,0 +1,854 @@
+<html>
+<head>
+<title>sessions.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #6aab73;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+sessions.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+requests.sessions 
+~~~~~~~~~~~~~~~~~ 
+ 
+This module provides a Session object to manage and persist settings across 
+requests (cookies, auth, proxies). 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">OrderedDict</span>
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">timedelta</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_internal_utils </span><span class="s2">import </span><span class="s1">to_native_string</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">adapters </span><span class="s2">import </span><span class="s1">HTTPAdapter</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">auth </span><span class="s2">import </span><span class="s1">_basic_auth_str</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">compat </span><span class="s2">import </span><span class="s1">Mapping</span><span class="s3">, </span><span class="s1">cookielib</span><span class="s3">, </span><span class="s1">urljoin</span><span class="s3">, </span><span class="s1">urlparse</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">cookies </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">RequestsCookieJar</span><span class="s3">,</span>
+    <span class="s1">cookiejar_from_dict</span><span class="s3">,</span>
+    <span class="s1">extract_cookies_to_jar</span><span class="s3">,</span>
+    <span class="s1">merge_cookies</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">exceptions </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">ChunkedEncodingError</span><span class="s3">,</span>
+    <span class="s1">ContentDecodingError</span><span class="s3">,</span>
+    <span class="s1">InvalidSchema</span><span class="s3">,</span>
+    <span class="s1">TooManyRedirects</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">hooks </span><span class="s2">import </span><span class="s1">default_hooks</span><span class="s3">, </span><span class="s1">dispatch_hook</span>
+
+<span class="s4"># formerly defined here, reexposed here for backward compatibility</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">models </span><span class="s2">import </span><span class="s3">(  </span><span class="s4"># noqa: F401</span>
+    <span class="s1">DEFAULT_REDIRECT_LIMIT</span><span class="s3">,</span>
+    <span class="s1">REDIRECT_STATI</span><span class="s3">,</span>
+    <span class="s1">PreparedRequest</span><span class="s3">,</span>
+    <span class="s1">Request</span><span class="s3">,</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">status_codes </span><span class="s2">import </span><span class="s1">codes</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">structures </span><span class="s2">import </span><span class="s1">CaseInsensitiveDict</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s3">(  </span><span class="s4"># noqa: F401</span>
+    <span class="s1">DEFAULT_PORTS</span><span class="s3">,</span>
+    <span class="s1">default_headers</span><span class="s3">,</span>
+    <span class="s1">get_auth_from_url</span><span class="s3">,</span>
+    <span class="s1">get_environ_proxies</span><span class="s3">,</span>
+    <span class="s1">get_netrc_auth</span><span class="s3">,</span>
+    <span class="s1">requote_uri</span><span class="s3">,</span>
+    <span class="s1">resolve_proxies</span><span class="s3">,</span>
+    <span class="s1">rewind_body</span><span class="s3">,</span>
+    <span class="s1">should_bypass_proxies</span><span class="s3">,</span>
+    <span class="s1">to_key_val_list</span><span class="s3">,</span>
+<span class="s3">)</span>
+
+<span class="s4"># Preferred clock, based on which one is more accurate on a given system.</span>
+<span class="s2">if </span><span class="s1">sys</span><span class="s3">.</span><span class="s1">platform </span><span class="s3">== </span><span class="s5">&quot;win32&quot;</span><span class="s3">:</span>
+    <span class="s1">preferred_clock </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">perf_counter</span>
+<span class="s2">else</span><span class="s3">:</span>
+    <span class="s1">preferred_clock </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span>
+
+
+<span class="s2">def </span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">request_setting</span><span class="s3">, </span><span class="s1">session_setting</span><span class="s3">, </span><span class="s1">dict_class</span><span class="s3">=</span><span class="s1">OrderedDict</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Determines appropriate setting for a given request, taking into account 
+    the explicit setting on that request, and the setting in the session. If a 
+    setting is a dictionary, they will be merged together using `dict_class` 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if </span><span class="s1">session_setting </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">request_setting</span>
+
+    <span class="s2">if </span><span class="s1">request_setting </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s2">return </span><span class="s1">session_setting</span>
+
+    <span class="s4"># Bypass if not a dictionary (e.g. verify)</span>
+    <span class="s2">if not </span><span class="s3">(</span>
+        <span class="s1">isinstance</span><span class="s3">(</span><span class="s1">session_setting</span><span class="s3">, </span><span class="s1">Mapping</span><span class="s3">) </span><span class="s2">and </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">request_setting</span><span class="s3">, </span><span class="s1">Mapping</span><span class="s3">)</span>
+    <span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">request_setting</span>
+
+    <span class="s1">merged_setting </span><span class="s3">= </span><span class="s1">dict_class</span><span class="s3">(</span><span class="s1">to_key_val_list</span><span class="s3">(</span><span class="s1">session_setting</span><span class="s3">))</span>
+    <span class="s1">merged_setting</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">to_key_val_list</span><span class="s3">(</span><span class="s1">request_setting</span><span class="s3">))</span>
+
+    <span class="s4"># Remove keys that are set to None. Extract keys first to avoid altering</span>
+    <span class="s4"># the dictionary during iteration.</span>
+    <span class="s1">none_keys </span><span class="s3">= [</span><span class="s1">k </span><span class="s2">for </span><span class="s3">(</span><span class="s1">k</span><span class="s3">, </span><span class="s1">v</span><span class="s3">) </span><span class="s2">in </span><span class="s1">merged_setting</span><span class="s3">.</span><span class="s1">items</span><span class="s3">() </span><span class="s2">if </span><span class="s1">v </span><span class="s2">is None</span><span class="s3">]</span>
+    <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">none_keys</span><span class="s3">:</span>
+        <span class="s2">del </span><span class="s1">merged_setting</span><span class="s3">[</span><span class="s1">key</span><span class="s3">]</span>
+
+    <span class="s2">return </span><span class="s1">merged_setting</span>
+
+
+<span class="s2">def </span><span class="s1">merge_hooks</span><span class="s3">(</span><span class="s1">request_hooks</span><span class="s3">, </span><span class="s1">session_hooks</span><span class="s3">, </span><span class="s1">dict_class</span><span class="s3">=</span><span class="s1">OrderedDict</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Properly merges both requests and session hooks. 
+ 
+    This is necessary because when request_hooks == {'response': []}, the 
+    merge breaks Session hooks entirely. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">session_hooks </span><span class="s2">is None or </span><span class="s1">session_hooks</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;response&quot;</span><span class="s3">) == []:</span>
+        <span class="s2">return </span><span class="s1">request_hooks</span>
+
+    <span class="s2">if </span><span class="s1">request_hooks </span><span class="s2">is None or </span><span class="s1">request_hooks</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;response&quot;</span><span class="s3">) == []:</span>
+        <span class="s2">return </span><span class="s1">session_hooks</span>
+
+    <span class="s2">return </span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">request_hooks</span><span class="s3">, </span><span class="s1">session_hooks</span><span class="s3">, </span><span class="s1">dict_class</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">SessionRedirectMixin</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">get_redirect_target</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Receives a Response. Returns a redirect URI or ``None``&quot;&quot;&quot;</span>
+        <span class="s4"># Due to the nature of how requests processes redirects this method will</span>
+        <span class="s4"># be called at least once upon the original response and at least twice</span>
+        <span class="s4"># on each subsequent redirect response (if any).</span>
+        <span class="s4"># If a custom mixin is used to handle this logic, it may be advantageous</span>
+        <span class="s4"># to cache the redirect location onto the response object as a private</span>
+        <span class="s4"># attribute.</span>
+        <span class="s2">if </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">is_redirect</span><span class="s3">:</span>
+            <span class="s1">location </span><span class="s3">= </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">[</span><span class="s5">&quot;location&quot;</span><span class="s3">]</span>
+            <span class="s4"># Currently the underlying http module on py3 decode headers</span>
+            <span class="s4"># in latin1, but empirical evidence suggests that latin1 is very</span>
+            <span class="s4"># rarely used with non-ASCII characters in HTTP headers.</span>
+            <span class="s4"># It is more likely to get UTF8 header rather than latin1.</span>
+            <span class="s4"># This causes incorrect handling of UTF8 encoded location headers.</span>
+            <span class="s4"># To solve this, we re-encode the location in latin1.</span>
+            <span class="s1">location </span><span class="s3">= </span><span class="s1">location</span><span class="s3">.</span><span class="s1">encode</span><span class="s3">(</span><span class="s5">&quot;latin1&quot;</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">to_native_string</span><span class="s3">(</span><span class="s1">location</span><span class="s3">, </span><span class="s5">&quot;utf8&quot;</span><span class="s3">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">should_strip_auth</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">old_url</span><span class="s3">, </span><span class="s1">new_url</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Decide whether Authorization header should be removed when redirecting&quot;&quot;&quot;</span>
+        <span class="s1">old_parsed </span><span class="s3">= </span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">old_url</span><span class="s3">)</span>
+        <span class="s1">new_parsed </span><span class="s3">= </span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">new_url</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">hostname </span><span class="s3">!= </span><span class="s1">new_parsed</span><span class="s3">.</span><span class="s1">hostname</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s4"># Special case: allow http -&gt; https redirect when using the standard</span>
+        <span class="s4"># ports. This isn't specified by RFC 7235, but is kept to avoid</span>
+        <span class="s4"># breaking backwards compatibility with older versions of requests</span>
+        <span class="s4"># that allowed any redirects on the same host.</span>
+        <span class="s2">if </span><span class="s3">(</span>
+            <span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">scheme </span><span class="s3">== </span><span class="s5">&quot;http&quot;</span>
+            <span class="s2">and </span><span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">port </span><span class="s2">in </span><span class="s3">(</span><span class="s6">80</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+            <span class="s2">and </span><span class="s1">new_parsed</span><span class="s3">.</span><span class="s1">scheme </span><span class="s3">== </span><span class="s5">&quot;https&quot;</span>
+            <span class="s2">and </span><span class="s1">new_parsed</span><span class="s3">.</span><span class="s1">port </span><span class="s2">in </span><span class="s3">(</span><span class="s6">443</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s3">):</span>
+            <span class="s2">return False</span>
+
+        <span class="s4"># Handle default port usage corresponding to scheme.</span>
+        <span class="s1">changed_port </span><span class="s3">= </span><span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">port </span><span class="s3">!= </span><span class="s1">new_parsed</span><span class="s3">.</span><span class="s1">port</span>
+        <span class="s1">changed_scheme </span><span class="s3">= </span><span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">scheme </span><span class="s3">!= </span><span class="s1">new_parsed</span><span class="s3">.</span><span class="s1">scheme</span>
+        <span class="s1">default_port </span><span class="s3">= (</span><span class="s1">DEFAULT_PORTS</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">scheme</span><span class="s3">, </span><span class="s2">None</span><span class="s3">), </span><span class="s2">None</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s3">(</span>
+            <span class="s2">not </span><span class="s1">changed_scheme</span>
+            <span class="s2">and </span><span class="s1">old_parsed</span><span class="s3">.</span><span class="s1">port </span><span class="s2">in </span><span class="s1">default_port</span>
+            <span class="s2">and </span><span class="s1">new_parsed</span><span class="s3">.</span><span class="s1">port </span><span class="s2">in </span><span class="s1">default_port</span>
+        <span class="s3">):</span>
+            <span class="s2">return False</span>
+
+        <span class="s4"># Standard case: root URI must match</span>
+        <span class="s2">return </span><span class="s1">changed_port </span><span class="s2">or </span><span class="s1">changed_scheme</span>
+
+    <span class="s2">def </span><span class="s1">resolve_redirects</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">resp</span><span class="s3">,</span>
+        <span class="s1">req</span><span class="s3">,</span>
+        <span class="s1">stream</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">verify</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">cert</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">proxies</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">yield_requests</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s3">**</span><span class="s1">adapter_kwargs</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Receives a Response. Returns a generator of Responses or Requests.&quot;&quot;&quot;</span>
+
+        <span class="s1">hist </span><span class="s3">= []  </span><span class="s4"># keep track of history</span>
+
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_redirect_target</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+        <span class="s1">previous_fragment </span><span class="s3">= </span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">req</span><span class="s3">.</span><span class="s1">url</span><span class="s3">).</span><span class="s1">fragment</span>
+        <span class="s2">while </span><span class="s1">url</span><span class="s3">:</span>
+            <span class="s1">prepared_request </span><span class="s3">= </span><span class="s1">req</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">()</span>
+
+            <span class="s4"># Update history and keep track of redirects.</span>
+            <span class="s4"># resp.history must ignore the original request in this loop</span>
+            <span class="s1">hist</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+            <span class="s1">resp</span><span class="s3">.</span><span class="s1">history </span><span class="s3">= </span><span class="s1">hist</span><span class="s3">[</span><span class="s6">1</span><span class="s3">:]</span>
+
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">resp</span><span class="s3">.</span><span class="s1">content  </span><span class="s4"># Consume socket so it can be released</span>
+            <span class="s2">except </span><span class="s3">(</span><span class="s1">ChunkedEncodingError</span><span class="s3">, </span><span class="s1">ContentDecodingError</span><span class="s3">, </span><span class="s1">RuntimeError</span><span class="s3">):</span>
+                <span class="s1">resp</span><span class="s3">.</span><span class="s1">raw</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">decode_content</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+
+            <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">.</span><span class="s1">history</span><span class="s3">) &gt;= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_redirects</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">TooManyRedirects</span><span class="s3">(</span>
+                    <span class="s5">f&quot;Exceeded </span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_redirects</span><span class="s2">} </span><span class="s5">redirects.&quot;</span><span class="s3">, </span><span class="s1">response</span><span class="s3">=</span><span class="s1">resp</span>
+                <span class="s3">)</span>
+
+            <span class="s4"># Release the connection back into the pool.</span>
+            <span class="s1">resp</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+            <span class="s4"># Handle redirection without scheme (see: RFC 1808 Section 4)</span>
+            <span class="s2">if </span><span class="s1">url</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;//&quot;</span><span class="s3">):</span>
+                <span class="s1">parsed_rurl </span><span class="s3">= </span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+                <span class="s1">url </span><span class="s3">= </span><span class="s5">&quot;:&quot;</span><span class="s3">.</span><span class="s1">join</span><span class="s3">([</span><span class="s1">to_native_string</span><span class="s3">(</span><span class="s1">parsed_rurl</span><span class="s3">.</span><span class="s1">scheme</span><span class="s3">), </span><span class="s1">url</span><span class="s3">])</span>
+
+            <span class="s4"># Normalize url case and attach previous fragment if needed (RFC 7231 7.1.2)</span>
+            <span class="s1">parsed </span><span class="s3">= </span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">parsed</span><span class="s3">.</span><span class="s1">fragment </span><span class="s3">== </span><span class="s5">&quot;&quot; </span><span class="s2">and </span><span class="s1">previous_fragment</span><span class="s3">:</span>
+                <span class="s1">parsed </span><span class="s3">= </span><span class="s1">parsed</span><span class="s3">.</span><span class="s1">_replace</span><span class="s3">(</span><span class="s1">fragment</span><span class="s3">=</span><span class="s1">previous_fragment</span><span class="s3">)</span>
+            <span class="s2">elif </span><span class="s1">parsed</span><span class="s3">.</span><span class="s1">fragment</span><span class="s3">:</span>
+                <span class="s1">previous_fragment </span><span class="s3">= </span><span class="s1">parsed</span><span class="s3">.</span><span class="s1">fragment</span>
+            <span class="s1">url </span><span class="s3">= </span><span class="s1">parsed</span><span class="s3">.</span><span class="s1">geturl</span><span class="s3">()</span>
+
+            <span class="s4"># Facilitate relative 'location' headers, as allowed by RFC 7231.</span>
+            <span class="s4"># (e.g. '/path/to/resource' instead of 'http://domain.tld/path/to/resource')</span>
+            <span class="s4"># Compliant with RFC3986, we percent encode the url.</span>
+            <span class="s2">if not </span><span class="s1">parsed</span><span class="s3">.</span><span class="s1">netloc</span><span class="s3">:</span>
+                <span class="s1">url </span><span class="s3">= </span><span class="s1">urljoin</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">.</span><span class="s1">url</span><span class="s3">, </span><span class="s1">requote_uri</span><span class="s3">(</span><span class="s1">url</span><span class="s3">))</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">url </span><span class="s3">= </span><span class="s1">requote_uri</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+
+            <span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">url </span><span class="s3">= </span><span class="s1">to_native_string</span><span class="s3">(</span><span class="s1">url</span><span class="s3">)</span>
+
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">rebuild_method</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">)</span>
+
+            <span class="s4"># https://github.com/psf/requests/issues/1084</span>
+            <span class="s2">if </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">status_code </span><span class="s2">not in </span><span class="s3">(</span>
+                <span class="s1">codes</span><span class="s3">.</span><span class="s1">temporary_redirect</span><span class="s3">,</span>
+                <span class="s1">codes</span><span class="s3">.</span><span class="s1">permanent_redirect</span><span class="s3">,</span>
+            <span class="s3">):</span>
+                <span class="s4"># https://github.com/psf/requests/issues/3490</span>
+                <span class="s1">purged_headers </span><span class="s3">= (</span><span class="s5">&quot;Content-Length&quot;</span><span class="s3">, </span><span class="s5">&quot;Content-Type&quot;</span><span class="s3">, </span><span class="s5">&quot;Transfer-Encoding&quot;</span><span class="s3">)</span>
+                <span class="s2">for </span><span class="s1">header </span><span class="s2">in </span><span class="s1">purged_headers</span><span class="s3">:</span>
+                    <span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">header</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+                <span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">body </span><span class="s3">= </span><span class="s2">None</span>
+
+            <span class="s1">headers </span><span class="s3">= </span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">headers</span>
+            <span class="s1">headers</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s5">&quot;Cookie&quot;</span><span class="s3">, </span><span class="s2">None</span><span class="s3">)</span>
+
+            <span class="s4"># Extract any cookies sent on the response to the cookiejar</span>
+            <span class="s4"># in the new request. Because we've mutated our copied prepared</span>
+            <span class="s4"># request, use the old one that we haven't yet touched.</span>
+            <span class="s1">extract_cookies_to_jar</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">_cookies</span><span class="s3">, </span><span class="s1">req</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">raw</span><span class="s3">)</span>
+            <span class="s1">merge_cookies</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">_cookies</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cookies</span><span class="s3">)</span>
+            <span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">prepare_cookies</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">_cookies</span><span class="s3">)</span>
+
+            <span class="s4"># Rebuild auth and proxy information.</span>
+            <span class="s1">proxies </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">rebuild_proxies</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">proxies</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">rebuild_auth</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">)</span>
+
+            <span class="s4"># A failed tell() sets `_body_position` to `object()`. This non-None</span>
+            <span class="s4"># value ensures `rewindable` will be True, allowing us to raise an</span>
+            <span class="s4"># UnrewindableBodyError, instead of hanging the connection.</span>
+            <span class="s1">rewindable </span><span class="s3">= </span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">_body_position </span><span class="s2">is not None and </span><span class="s3">(</span>
+                <span class="s5">&quot;Content-Length&quot; </span><span class="s2">in </span><span class="s1">headers </span><span class="s2">or </span><span class="s5">&quot;Transfer-Encoding&quot; </span><span class="s2">in </span><span class="s1">headers</span>
+            <span class="s3">)</span>
+
+            <span class="s4"># Attempt to rewind consumed file-like object.</span>
+            <span class="s2">if </span><span class="s1">rewindable</span><span class="s3">:</span>
+                <span class="s1">rewind_body</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">)</span>
+
+            <span class="s4"># Override the original request.</span>
+            <span class="s1">req </span><span class="s3">= </span><span class="s1">prepared_request</span>
+
+            <span class="s2">if </span><span class="s1">yield_requests</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s1">req</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">resp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span>
+                    <span class="s1">req</span><span class="s3">,</span>
+                    <span class="s1">stream</span><span class="s3">=</span><span class="s1">stream</span><span class="s3">,</span>
+                    <span class="s1">timeout</span><span class="s3">=</span><span class="s1">timeout</span><span class="s3">,</span>
+                    <span class="s1">verify</span><span class="s3">=</span><span class="s1">verify</span><span class="s3">,</span>
+                    <span class="s1">cert</span><span class="s3">=</span><span class="s1">cert</span><span class="s3">,</span>
+                    <span class="s1">proxies</span><span class="s3">=</span><span class="s1">proxies</span><span class="s3">,</span>
+                    <span class="s1">allow_redirects</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+                    <span class="s3">**</span><span class="s1">adapter_kwargs</span><span class="s3">,</span>
+                <span class="s3">)</span>
+
+                <span class="s1">extract_cookies_to_jar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cookies</span><span class="s3">, </span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">raw</span><span class="s3">)</span>
+
+                <span class="s4"># extract redirect url, if any, for the next loop</span>
+                <span class="s1">url </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_redirect_target</span><span class="s3">(</span><span class="s1">resp</span><span class="s3">)</span>
+                <span class="s2">yield </span><span class="s1">resp</span>
+
+    <span class="s2">def </span><span class="s1">rebuild_auth</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">response</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;When being redirected we may want to strip authentication from the 
+        request to avoid leaking credentials. This method intelligently removes 
+        and reapplies authentication where possible to avoid credential loss. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">headers </span><span class="s3">= </span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">headers</span>
+        <span class="s1">url </span><span class="s3">= </span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">url</span>
+
+        <span class="s2">if </span><span class="s5">&quot;Authorization&quot; </span><span class="s2">in </span><span class="s1">headers </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">should_strip_auth</span><span class="s3">(</span>
+            <span class="s1">response</span><span class="s3">.</span><span class="s1">request</span><span class="s3">.</span><span class="s1">url</span><span class="s3">, </span><span class="s1">url</span>
+        <span class="s3">):</span>
+            <span class="s4"># If we get redirected to a new host, we should strip out any</span>
+            <span class="s4"># authentication headers.</span>
+            <span class="s2">del </span><span class="s1">headers</span><span class="s3">[</span><span class="s5">&quot;Authorization&quot;</span><span class="s3">]</span>
+
+        <span class="s4"># .netrc might have more auth for us on our new host.</span>
+        <span class="s1">new_auth </span><span class="s3">= </span><span class="s1">get_netrc_auth</span><span class="s3">(</span><span class="s1">url</span><span class="s3">) </span><span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">trust_env </span><span class="s2">else None</span>
+        <span class="s2">if </span><span class="s1">new_auth </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">prepare_auth</span><span class="s3">(</span><span class="s1">new_auth</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">rebuild_proxies</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">proxies</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;This method re-evaluates the proxy configuration by considering the 
+        environment variables. If we are redirected to a URL covered by 
+        NO_PROXY, we strip the proxy configuration. Otherwise, we set missing 
+        proxy keys for this URL (in case they were stripped by a previous 
+        redirect). 
+ 
+        This method also replaces the Proxy-Authorization header where 
+        necessary. 
+ 
+        :rtype: dict 
+        &quot;&quot;&quot;</span>
+        <span class="s1">headers </span><span class="s3">= </span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">headers</span>
+        <span class="s1">scheme </span><span class="s3">= </span><span class="s1">urlparse</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">url</span><span class="s3">).</span><span class="s1">scheme</span>
+        <span class="s1">new_proxies </span><span class="s3">= </span><span class="s1">resolve_proxies</span><span class="s3">(</span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">proxies</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">trust_env</span><span class="s3">)</span>
+
+        <span class="s2">if </span><span class="s5">&quot;Proxy-Authorization&quot; </span><span class="s2">in </span><span class="s1">headers</span><span class="s3">:</span>
+            <span class="s2">del </span><span class="s1">headers</span><span class="s3">[</span><span class="s5">&quot;Proxy-Authorization&quot;</span><span class="s3">]</span>
+
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">username</span><span class="s3">, </span><span class="s1">password </span><span class="s3">= </span><span class="s1">get_auth_from_url</span><span class="s3">(</span><span class="s1">new_proxies</span><span class="s3">[</span><span class="s1">scheme</span><span class="s3">])</span>
+        <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+            <span class="s1">username</span><span class="s3">, </span><span class="s1">password </span><span class="s3">= </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span>
+
+        <span class="s4"># urllib3 handles proxy authorization for us in the standard adapter.</span>
+        <span class="s4"># Avoid appending this to TLS tunneled requests where it may be leaked.</span>
+        <span class="s2">if not </span><span class="s1">scheme</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s5">&quot;https&quot;</span><span class="s3">) </span><span class="s2">and </span><span class="s1">username </span><span class="s2">and </span><span class="s1">password</span><span class="s3">:</span>
+            <span class="s1">headers</span><span class="s3">[</span><span class="s5">&quot;Proxy-Authorization&quot;</span><span class="s3">] = </span><span class="s1">_basic_auth_str</span><span class="s3">(</span><span class="s1">username</span><span class="s3">, </span><span class="s1">password</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">new_proxies</span>
+
+    <span class="s2">def </span><span class="s1">rebuild_method</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">prepared_request</span><span class="s3">, </span><span class="s1">response</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;When being redirected we may want to change the method of the request 
+        based on certain specs or browser behavior. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">method </span><span class="s3">= </span><span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">method</span>
+
+        <span class="s4"># https://tools.ietf.org/html/rfc7231#section-6.4.4</span>
+        <span class="s2">if </span><span class="s1">response</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">== </span><span class="s1">codes</span><span class="s3">.</span><span class="s1">see_other </span><span class="s2">and </span><span class="s1">method </span><span class="s3">!= </span><span class="s5">&quot;HEAD&quot;</span><span class="s3">:</span>
+            <span class="s1">method </span><span class="s3">= </span><span class="s5">&quot;GET&quot;</span>
+
+        <span class="s4"># Do what the browsers do, despite standards...</span>
+        <span class="s4"># First, turn 302s into GETs.</span>
+        <span class="s2">if </span><span class="s1">response</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">== </span><span class="s1">codes</span><span class="s3">.</span><span class="s1">found </span><span class="s2">and </span><span class="s1">method </span><span class="s3">!= </span><span class="s5">&quot;HEAD&quot;</span><span class="s3">:</span>
+            <span class="s1">method </span><span class="s3">= </span><span class="s5">&quot;GET&quot;</span>
+
+        <span class="s4"># Second, if a POST is responded to with a 301, turn it into a GET.</span>
+        <span class="s4"># This bizarre behaviour is explained in Issue 1704.</span>
+        <span class="s2">if </span><span class="s1">response</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">== </span><span class="s1">codes</span><span class="s3">.</span><span class="s1">moved </span><span class="s2">and </span><span class="s1">method </span><span class="s3">== </span><span class="s5">&quot;POST&quot;</span><span class="s3">:</span>
+            <span class="s1">method </span><span class="s3">= </span><span class="s5">&quot;GET&quot;</span>
+
+        <span class="s1">prepared_request</span><span class="s3">.</span><span class="s1">method </span><span class="s3">= </span><span class="s1">method</span>
+
+
+<span class="s2">class </span><span class="s1">Session</span><span class="s3">(</span><span class="s1">SessionRedirectMixin</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;A Requests session. 
+ 
+    Provides cookie persistence, connection-pooling, and configuration. 
+ 
+    Basic Usage:: 
+ 
+      &gt;&gt;&gt; import requests 
+      &gt;&gt;&gt; s = requests.Session() 
+      &gt;&gt;&gt; s.get('https://httpbin.org/get') 
+      &lt;Response [200]&gt; 
+ 
+    Or as a context manager:: 
+ 
+      &gt;&gt;&gt; with requests.Session() as s: 
+      ...     s.get('https://httpbin.org/get') 
+      &lt;Response [200]&gt; 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__attrs__ </span><span class="s3">= [</span>
+        <span class="s5">&quot;headers&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;cookies&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;auth&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;proxies&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;hooks&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;params&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;verify&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;cert&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;adapters&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;stream&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;trust_env&quot;</span><span class="s3">,</span>
+        <span class="s5">&quot;max_redirects&quot;</span><span class="s3">,</span>
+    <span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s4">#: A case-insensitive dictionary of headers to be sent on each</span>
+        <span class="s4">#: :class:`Request &lt;Request&gt;` sent from this</span>
+        <span class="s4">#: :class:`Session &lt;Session&gt;`.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">headers </span><span class="s3">= </span><span class="s1">default_headers</span><span class="s3">()</span>
+
+        <span class="s4">#: Default Authentication tuple or object to attach to</span>
+        <span class="s4">#: :class:`Request &lt;Request&gt;`.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">auth </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s4">#: Dictionary mapping protocol or protocol and host to the URL of the proxy</span>
+        <span class="s4">#: (e.g. {'http': 'foo.bar:3128', 'http://host.name': 'foo.bar:4012'}) to</span>
+        <span class="s4">#: be used on each :class:`Request &lt;Request&gt;`.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">proxies </span><span class="s3">= {}</span>
+
+        <span class="s4">#: Event-handling hooks.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">hooks </span><span class="s3">= </span><span class="s1">default_hooks</span><span class="s3">()</span>
+
+        <span class="s4">#: Dictionary of querystring data to attach to each</span>
+        <span class="s4">#: :class:`Request &lt;Request&gt;`. The dictionary values may be lists for</span>
+        <span class="s4">#: representing multivalued query parameters.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">params </span><span class="s3">= {}</span>
+
+        <span class="s4">#: Stream response content default.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">stream </span><span class="s3">= </span><span class="s2">False</span>
+
+        <span class="s4">#: SSL Verification default.</span>
+        <span class="s4">#: Defaults to `True`, requiring requests to verify the TLS certificate at the</span>
+        <span class="s4">#: remote end.</span>
+        <span class="s4">#: If verify is set to `False`, requests will accept any TLS certificate</span>
+        <span class="s4">#: presented by the server, and will ignore hostname mismatches and/or</span>
+        <span class="s4">#: expired certificates, which will make your application vulnerable to</span>
+        <span class="s4">#: man-in-the-middle (MitM) attacks.</span>
+        <span class="s4">#: Only set this to `False` for testing.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">verify </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s4">#: SSL client certificate default, if String, path to ssl client</span>
+        <span class="s4">#: cert file (.pem). If Tuple, ('cert', 'key') pair.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cert </span><span class="s3">= </span><span class="s2">None</span>
+
+        <span class="s4">#: Maximum number of redirects allowed. If the request exceeds this</span>
+        <span class="s4">#: limit, a :class:`TooManyRedirects` exception is raised.</span>
+        <span class="s4">#: This defaults to requests.models.DEFAULT_REDIRECT_LIMIT, which is</span>
+        <span class="s4">#: 30.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">max_redirects </span><span class="s3">= </span><span class="s1">DEFAULT_REDIRECT_LIMIT</span>
+
+        <span class="s4">#: Trust environment settings for proxy configuration, default</span>
+        <span class="s4">#: authentication and similar.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">trust_env </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s4">#: A CookieJar containing all currently outstanding cookies set on this</span>
+        <span class="s4">#: session. By default it is a</span>
+        <span class="s4">#: :class:`RequestsCookieJar &lt;requests.cookies.RequestsCookieJar&gt;`, but</span>
+        <span class="s4">#: may be any other ``cookielib.CookieJar`` compatible object.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">cookies </span><span class="s3">= </span><span class="s1">cookiejar_from_dict</span><span class="s3">({})</span>
+
+        <span class="s4"># Default connection adapters.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">adapters </span><span class="s3">= </span><span class="s1">OrderedDict</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">mount</span><span class="s3">(</span><span class="s5">&quot;https://&quot;</span><span class="s3">, </span><span class="s1">HTTPAdapter</span><span class="s3">())</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">mount</span><span class="s3">(</span><span class="s5">&quot;http://&quot;</span><span class="s3">, </span><span class="s1">HTTPAdapter</span><span class="s3">())</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">prepare_request</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">request</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Constructs a :class:`PreparedRequest &lt;PreparedRequest&gt;` for 
+        transmission and returns it. The :class:`PreparedRequest` has settings 
+        merged from the :class:`Request &lt;Request&gt;` instance and those of the 
+        :class:`Session`. 
+ 
+        :param request: :class:`Request` instance to prepare with this 
+            session's settings. 
+        :rtype: requests.PreparedRequest 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cookies </span><span class="s3">= </span><span class="s1">request</span><span class="s3">.</span><span class="s1">cookies </span><span class="s2">or </span><span class="s3">{}</span>
+
+        <span class="s4"># Bootstrap CookieJar.</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">cookies</span><span class="s3">, </span><span class="s1">cookielib</span><span class="s3">.</span><span class="s1">CookieJar</span><span class="s3">):</span>
+            <span class="s1">cookies </span><span class="s3">= </span><span class="s1">cookiejar_from_dict</span><span class="s3">(</span><span class="s1">cookies</span><span class="s3">)</span>
+
+        <span class="s4"># Merge with session cookies</span>
+        <span class="s1">merged_cookies </span><span class="s3">= </span><span class="s1">merge_cookies</span><span class="s3">(</span>
+            <span class="s1">merge_cookies</span><span class="s3">(</span><span class="s1">RequestsCookieJar</span><span class="s3">(), </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cookies</span><span class="s3">), </span><span class="s1">cookies</span>
+        <span class="s3">)</span>
+
+        <span class="s4"># Set environment's basic authentication if not explicitly set.</span>
+        <span class="s1">auth </span><span class="s3">= </span><span class="s1">request</span><span class="s3">.</span><span class="s1">auth</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">trust_env </span><span class="s2">and not </span><span class="s1">auth </span><span class="s2">and not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">auth</span><span class="s3">:</span>
+            <span class="s1">auth </span><span class="s3">= </span><span class="s1">get_netrc_auth</span><span class="s3">(</span><span class="s1">request</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+
+        <span class="s1">p </span><span class="s3">= </span><span class="s1">PreparedRequest</span><span class="s3">()</span>
+        <span class="s1">p</span><span class="s3">.</span><span class="s1">prepare</span><span class="s3">(</span>
+            <span class="s1">method</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">method</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">(),</span>
+            <span class="s1">url</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">url</span><span class="s3">,</span>
+            <span class="s1">files</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">files</span><span class="s3">,</span>
+            <span class="s1">data</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">data</span><span class="s3">,</span>
+            <span class="s1">json</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">json</span><span class="s3">,</span>
+            <span class="s1">headers</span><span class="s3">=</span><span class="s1">merge_setting</span><span class="s3">(</span>
+                <span class="s1">request</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">dict_class</span><span class="s3">=</span><span class="s1">CaseInsensitiveDict</span>
+            <span class="s3">),</span>
+            <span class="s1">params</span><span class="s3">=</span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">request</span><span class="s3">.</span><span class="s1">params</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">params</span><span class="s3">),</span>
+            <span class="s1">auth</span><span class="s3">=</span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">auth</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">auth</span><span class="s3">),</span>
+            <span class="s1">cookies</span><span class="s3">=</span><span class="s1">merged_cookies</span><span class="s3">,</span>
+            <span class="s1">hooks</span><span class="s3">=</span><span class="s1">merge_hooks</span><span class="s3">(</span><span class="s1">request</span><span class="s3">.</span><span class="s1">hooks</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">hooks</span><span class="s3">),</span>
+        <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">p</span>
+
+    <span class="s2">def </span><span class="s1">request</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">method</span><span class="s3">,</span>
+        <span class="s1">url</span><span class="s3">,</span>
+        <span class="s1">params</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">data</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">headers</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">cookies</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">files</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">auth</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">timeout</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">allow_redirects</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s1">proxies</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">hooks</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">stream</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">verify</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">cert</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+        <span class="s1">json</span><span class="s3">=</span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Constructs a :class:`Request &lt;Request&gt;`, prepares it and sends it. 
+        Returns :class:`Response &lt;Response&gt;` object. 
+ 
+        :param method: method for the new :class:`Request` object. 
+        :param url: URL for the new :class:`Request` object. 
+        :param params: (optional) Dictionary or bytes to be sent in the query 
+            string for the :class:`Request`. 
+        :param data: (optional) Dictionary, list of tuples, bytes, or file-like 
+            object to send in the body of the :class:`Request`. 
+        :param json: (optional) json to send in the body of the 
+            :class:`Request`. 
+        :param headers: (optional) Dictionary of HTTP Headers to send with the 
+            :class:`Request`. 
+        :param cookies: (optional) Dict or CookieJar object to send with the 
+            :class:`Request`. 
+        :param files: (optional) Dictionary of ``'filename': file-like-objects`` 
+            for multipart encoding upload. 
+        :param auth: (optional) Auth tuple or callable to enable 
+            Basic/Digest/Custom HTTP Auth. 
+        :param timeout: (optional) How many seconds to wait for the server to send 
+            data before giving up, as a float, or a :ref:`(connect timeout, 
+            read timeout) &lt;timeouts&gt;` tuple. 
+        :type timeout: float or tuple 
+        :param allow_redirects: (optional) Set to True by default. 
+        :type allow_redirects: bool 
+        :param proxies: (optional) Dictionary mapping protocol or protocol and 
+            hostname to the URL of the proxy. 
+        :param hooks: (optional) Dictionary mapping hook name to one event or 
+            list of events, event must be callable. 
+        :param stream: (optional) whether to immediately download the response 
+            content. Defaults to ``False``. 
+        :param verify: (optional) Either a boolean, in which case it controls whether we verify 
+            the server's TLS certificate, or a string, in which case it must be a path 
+            to a CA bundle to use. Defaults to ``True``. When set to 
+            ``False``, requests will accept any TLS certificate presented by 
+            the server, and will ignore hostname mismatches and/or expired 
+            certificates, which will make your application vulnerable to 
+            man-in-the-middle (MitM) attacks. Setting verify to ``False`` 
+            may be useful during local development or testing. 
+        :param cert: (optional) if String, path to ssl client cert file (.pem). 
+            If Tuple, ('cert', 'key') pair. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># Create the Request.</span>
+        <span class="s1">req </span><span class="s3">= </span><span class="s1">Request</span><span class="s3">(</span>
+            <span class="s1">method</span><span class="s3">=</span><span class="s1">method</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">(),</span>
+            <span class="s1">url</span><span class="s3">=</span><span class="s1">url</span><span class="s3">,</span>
+            <span class="s1">headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">,</span>
+            <span class="s1">files</span><span class="s3">=</span><span class="s1">files</span><span class="s3">,</span>
+            <span class="s1">data</span><span class="s3">=</span><span class="s1">data </span><span class="s2">or </span><span class="s3">{},</span>
+            <span class="s1">json</span><span class="s3">=</span><span class="s1">json</span><span class="s3">,</span>
+            <span class="s1">params</span><span class="s3">=</span><span class="s1">params </span><span class="s2">or </span><span class="s3">{},</span>
+            <span class="s1">auth</span><span class="s3">=</span><span class="s1">auth</span><span class="s3">,</span>
+            <span class="s1">cookies</span><span class="s3">=</span><span class="s1">cookies</span><span class="s3">,</span>
+            <span class="s1">hooks</span><span class="s3">=</span><span class="s1">hooks</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s1">prep </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">prepare_request</span><span class="s3">(</span><span class="s1">req</span><span class="s3">)</span>
+
+        <span class="s1">proxies </span><span class="s3">= </span><span class="s1">proxies </span><span class="s2">or </span><span class="s3">{}</span>
+
+        <span class="s1">settings </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">merge_environment_settings</span><span class="s3">(</span>
+            <span class="s1">prep</span><span class="s3">.</span><span class="s1">url</span><span class="s3">, </span><span class="s1">proxies</span><span class="s3">, </span><span class="s1">stream</span><span class="s3">, </span><span class="s1">verify</span><span class="s3">, </span><span class="s1">cert</span>
+        <span class="s3">)</span>
+
+        <span class="s4"># Send the request.</span>
+        <span class="s1">send_kwargs </span><span class="s3">= {</span>
+            <span class="s5">&quot;timeout&quot;</span><span class="s3">: </span><span class="s1">timeout</span><span class="s3">,</span>
+            <span class="s5">&quot;allow_redirects&quot;</span><span class="s3">: </span><span class="s1">allow_redirects</span><span class="s3">,</span>
+        <span class="s3">}</span>
+        <span class="s1">send_kwargs</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">settings</span><span class="s3">)</span>
+        <span class="s1">resp </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">prep</span><span class="s3">, **</span><span class="s1">send_kwargs</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s1">resp</span>
+
+    <span class="s2">def </span><span class="s1">get</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a GET request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">&quot;allow_redirects&quot;</span><span class="s3">, </span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;GET&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">options</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a OPTIONS request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">&quot;allow_redirects&quot;</span><span class="s3">, </span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;OPTIONS&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">head</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a HEAD request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">&quot;allow_redirects&quot;</span><span class="s3">, </span><span class="s2">False</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;HEAD&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">post</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">data</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">json</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a POST request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param data: (optional) Dictionary, list of tuples, bytes, or file-like 
+            object to send in the body of the :class:`Request`. 
+        :param json: (optional) json to send in the body of the :class:`Request`. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;POST&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">data</span><span class="s3">=</span><span class="s1">data</span><span class="s3">, </span><span class="s1">json</span><span class="s3">=</span><span class="s1">json</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">put</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">data</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a PUT request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param data: (optional) Dictionary, list of tuples, bytes, or file-like 
+            object to send in the body of the :class:`Request`. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;PUT&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">data</span><span class="s3">=</span><span class="s1">data</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">patch</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">data</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a PATCH request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param data: (optional) Dictionary, list of tuples, bytes, or file-like 
+            object to send in the body of the :class:`Request`. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;PATCH&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">data</span><span class="s3">=</span><span class="s1">data</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">delete</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">r&quot;&quot;&quot;Sends a DELETE request. Returns :class:`Response` object. 
+ 
+        :param url: URL for the new :class:`Request` object. 
+        :param \*\*kwargs: Optional arguments that ``request`` takes. 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">request</span><span class="s3">(</span><span class="s5">&quot;DELETE&quot;</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">send</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">request</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Send a given PreparedRequest. 
+ 
+        :rtype: requests.Response 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># Set defaults that the hooks can utilize to ensure they always have</span>
+        <span class="s4"># the correct parameters to reproduce the previous request.</span>
+        <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">&quot;stream&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">stream</span><span class="s3">)</span>
+        <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">&quot;verify&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">verify</span><span class="s3">)</span>
+        <span class="s1">kwargs</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s5">&quot;cert&quot;</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cert</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s5">&quot;proxies&quot; </span><span class="s2">not in </span><span class="s1">kwargs</span><span class="s3">:</span>
+            <span class="s1">kwargs</span><span class="s3">[</span><span class="s5">&quot;proxies&quot;</span><span class="s3">] = </span><span class="s1">resolve_proxies</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">proxies</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">trust_env</span><span class="s3">)</span>
+
+        <span class="s4"># It's possible that users might accidentally send a Request object.</span>
+        <span class="s4"># Guard against that specific failure case.</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, </span><span class="s1">Request</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s5">&quot;You can only send PreparedRequests.&quot;</span><span class="s3">)</span>
+
+        <span class="s4"># Set up variables needed for resolve_redirects and dispatching of hooks</span>
+        <span class="s1">allow_redirects </span><span class="s3">= </span><span class="s1">kwargs</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s5">&quot;allow_redirects&quot;</span><span class="s3">, </span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s1">stream </span><span class="s3">= </span><span class="s1">kwargs</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;stream&quot;</span><span class="s3">)</span>
+        <span class="s1">hooks </span><span class="s3">= </span><span class="s1">request</span><span class="s3">.</span><span class="s1">hooks</span>
+
+        <span class="s4"># Get the appropriate adapter to use</span>
+        <span class="s1">adapter </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_adapter</span><span class="s3">(</span><span class="s1">url</span><span class="s3">=</span><span class="s1">request</span><span class="s3">.</span><span class="s1">url</span><span class="s3">)</span>
+
+        <span class="s4"># Start time (approximately) of the request</span>
+        <span class="s1">start </span><span class="s3">= </span><span class="s1">preferred_clock</span><span class="s3">()</span>
+
+        <span class="s4"># Send the request</span>
+        <span class="s1">r </span><span class="s3">= </span><span class="s1">adapter</span><span class="s3">.</span><span class="s1">send</span><span class="s3">(</span><span class="s1">request</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+        <span class="s4"># Total elapsed time of the request (approximately)</span>
+        <span class="s1">elapsed </span><span class="s3">= </span><span class="s1">preferred_clock</span><span class="s3">() - </span><span class="s1">start</span>
+        <span class="s1">r</span><span class="s3">.</span><span class="s1">elapsed </span><span class="s3">= </span><span class="s1">timedelta</span><span class="s3">(</span><span class="s1">seconds</span><span class="s3">=</span><span class="s1">elapsed</span><span class="s3">)</span>
+
+        <span class="s4"># Response manipulation hooks</span>
+        <span class="s1">r </span><span class="s3">= </span><span class="s1">dispatch_hook</span><span class="s3">(</span><span class="s5">&quot;response&quot;</span><span class="s3">, </span><span class="s1">hooks</span><span class="s3">, </span><span class="s1">r</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+        <span class="s4"># Persist cookies</span>
+        <span class="s2">if </span><span class="s1">r</span><span class="s3">.</span><span class="s1">history</span><span class="s3">:</span>
+            <span class="s4"># If the hooks create history then we want those cookies too</span>
+            <span class="s2">for </span><span class="s1">resp </span><span class="s2">in </span><span class="s1">r</span><span class="s3">.</span><span class="s1">history</span><span class="s3">:</span>
+                <span class="s1">extract_cookies_to_jar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cookies</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">request</span><span class="s3">, </span><span class="s1">resp</span><span class="s3">.</span><span class="s1">raw</span><span class="s3">)</span>
+
+        <span class="s1">extract_cookies_to_jar</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">cookies</span><span class="s3">, </span><span class="s1">request</span><span class="s3">, </span><span class="s1">r</span><span class="s3">.</span><span class="s1">raw</span><span class="s3">)</span>
+
+        <span class="s4"># Resolve redirects if allowed.</span>
+        <span class="s2">if </span><span class="s1">allow_redirects</span><span class="s3">:</span>
+            <span class="s4"># Redirect resolving generator.</span>
+            <span class="s1">gen </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">resolve_redirects</span><span class="s3">(</span><span class="s1">r</span><span class="s3">, </span><span class="s1">request</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+            <span class="s1">history </span><span class="s3">= [</span><span class="s1">resp </span><span class="s2">for </span><span class="s1">resp </span><span class="s2">in </span><span class="s1">gen</span><span class="s3">]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">history </span><span class="s3">= []</span>
+
+        <span class="s4"># Shuffle things around if there's history.</span>
+        <span class="s2">if </span><span class="s1">history</span><span class="s3">:</span>
+            <span class="s4"># Insert the first (original) request at the start</span>
+            <span class="s1">history</span><span class="s3">.</span><span class="s1">insert</span><span class="s3">(</span><span class="s6">0</span><span class="s3">, </span><span class="s1">r</span><span class="s3">)</span>
+            <span class="s4"># Get the last request made</span>
+            <span class="s1">r </span><span class="s3">= </span><span class="s1">history</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">()</span>
+            <span class="s1">r</span><span class="s3">.</span><span class="s1">history </span><span class="s3">= </span><span class="s1">history</span>
+
+        <span class="s4"># If redirects aren't being followed, store the response on the Request for Response.next().</span>
+        <span class="s2">if not </span><span class="s1">allow_redirects</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">r</span><span class="s3">.</span><span class="s1">_next </span><span class="s3">= </span><span class="s1">next</span><span class="s3">(</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">resolve_redirects</span><span class="s3">(</span><span class="s1">r</span><span class="s3">, </span><span class="s1">request</span><span class="s3">, </span><span class="s1">yield_requests</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+                <span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">StopIteration</span><span class="s3">:</span>
+                <span class="s2">pass</span>
+
+        <span class="s2">if not </span><span class="s1">stream</span><span class="s3">:</span>
+            <span class="s1">r</span><span class="s3">.</span><span class="s1">content</span>
+
+        <span class="s2">return </span><span class="s1">r</span>
+
+    <span class="s2">def </span><span class="s1">merge_environment_settings</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">proxies</span><span class="s3">, </span><span class="s1">stream</span><span class="s3">, </span><span class="s1">verify</span><span class="s3">, </span><span class="s1">cert</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Check the environment and merge it with some settings. 
+ 
+        :rtype: dict 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># Gather clues from the surrounding environment.</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">trust_env</span><span class="s3">:</span>
+            <span class="s4"># Set environment's proxies.</span>
+            <span class="s1">no_proxy </span><span class="s3">= </span><span class="s1">proxies</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;no_proxy&quot;</span><span class="s3">) </span><span class="s2">if </span><span class="s1">proxies </span><span class="s2">is not None else None</span>
+            <span class="s1">env_proxies </span><span class="s3">= </span><span class="s1">get_environ_proxies</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">no_proxy</span><span class="s3">=</span><span class="s1">no_proxy</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">env_proxies</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+                <span class="s1">proxies</span><span class="s3">.</span><span class="s1">setdefault</span><span class="s3">(</span><span class="s1">k</span><span class="s3">, </span><span class="s1">v</span><span class="s3">)</span>
+
+            <span class="s4"># Look for requests environment configuration</span>
+            <span class="s4"># and be compatible with cURL.</span>
+            <span class="s2">if </span><span class="s1">verify </span><span class="s2">is True or </span><span class="s1">verify </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s1">verify </span><span class="s3">= (</span>
+                    <span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;REQUESTS_CA_BUNDLE&quot;</span><span class="s3">)</span>
+                    <span class="s2">or </span><span class="s1">os</span><span class="s3">.</span><span class="s1">environ</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s5">&quot;CURL_CA_BUNDLE&quot;</span><span class="s3">)</span>
+                    <span class="s2">or </span><span class="s1">verify</span>
+                <span class="s3">)</span>
+
+        <span class="s4"># Merge all the kwargs.</span>
+        <span class="s1">proxies </span><span class="s3">= </span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">proxies</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">proxies</span><span class="s3">)</span>
+        <span class="s1">stream </span><span class="s3">= </span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">stream</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">stream</span><span class="s3">)</span>
+        <span class="s1">verify </span><span class="s3">= </span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">verify</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">verify</span><span class="s3">)</span>
+        <span class="s1">cert </span><span class="s3">= </span><span class="s1">merge_setting</span><span class="s3">(</span><span class="s1">cert</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">cert</span><span class="s3">)</span>
+
+        <span class="s2">return </span><span class="s3">{</span><span class="s5">&quot;proxies&quot;</span><span class="s3">: </span><span class="s1">proxies</span><span class="s3">, </span><span class="s5">&quot;stream&quot;</span><span class="s3">: </span><span class="s1">stream</span><span class="s3">, </span><span class="s5">&quot;verify&quot;</span><span class="s3">: </span><span class="s1">verify</span><span class="s3">, </span><span class="s5">&quot;cert&quot;</span><span class="s3">: </span><span class="s1">cert</span><span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">get_adapter</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Returns the appropriate connection adapter for the given URL. 
+ 
+        :rtype: requests.adapters.BaseAdapter 
+        &quot;&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">adapter </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">adapters</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+            <span class="s2">if </span><span class="s1">url</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">().</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">.</span><span class="s1">lower</span><span class="s3">()):</span>
+                <span class="s2">return </span><span class="s1">adapter</span>
+
+        <span class="s4"># Nothing matches :-/</span>
+        <span class="s2">raise </span><span class="s1">InvalidSchema</span><span class="s3">(</span><span class="s5">f&quot;No connection adapters were found for </span><span class="s2">{</span><span class="s1">url</span><span class="s2">!r}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Closes all adapters and as such the session&quot;&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">adapters</span><span class="s3">.</span><span class="s1">values</span><span class="s3">():</span>
+            <span class="s1">v</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">mount</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">adapter</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Registers a connection adapter to a prefix. 
+ 
+        Adapters are sorted in descending order by prefix length. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">adapters</span><span class="s3">[</span><span class="s1">prefix</span><span class="s3">] = </span><span class="s1">adapter</span>
+        <span class="s1">keys_to_move </span><span class="s3">= [</span><span class="s1">k </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">adapters </span><span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">k</span><span class="s3">) &lt; </span><span class="s1">len</span><span class="s3">(</span><span class="s1">prefix</span><span class="s3">)]</span>
+
+        <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">keys_to_move</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">adapters</span><span class="s3">[</span><span class="s1">key</span><span class="s3">] = </span><span class="s1">self</span><span class="s3">.</span><span class="s1">adapters</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">(</span><span class="s1">key</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__getstate__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">state </span><span class="s3">= {</span><span class="s1">attr</span><span class="s3">: </span><span class="s1">getattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, </span><span class="s2">None</span><span class="s3">) </span><span class="s2">for </span><span class="s1">attr </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">__attrs__</span><span class="s3">}</span>
+        <span class="s2">return </span><span class="s1">state</span>
+
+    <span class="s2">def </span><span class="s1">__setstate__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">state</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">attr</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">state</span><span class="s3">.</span><span class="s1">items</span><span class="s3">():</span>
+            <span class="s1">setattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, </span><span class="s1">value</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">session</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns a :class:`Session` for context-management. 
+ 
+    .. deprecated:: 1.0.0 
+ 
+        This method has been deprecated since version 1.0.0 and is only kept for 
+        backwards compatibility. New code should use :class:`~requests.sessions.Session` 
+        to create a session. This may be removed at a future date. 
+ 
+    :rtype: Session 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">Session</span><span class="s3">()</span>
+</pre>
+</body>
+</html>

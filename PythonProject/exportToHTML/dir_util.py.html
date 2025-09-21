@@ -1,0 +1,267 @@
+<html>
+<head>
+<title>dir_util.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+dir_util.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.dir_util 
+ 
+Utility functions for manipulating directories and directory trees.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+
+<span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">file_util</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_log </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s1">DistutilsFileError</span><span class="s3">, </span><span class="s1">DistutilsInternalError</span>
+
+
+<span class="s2">class </span><span class="s1">SkipRepeatAbsolutePaths</span><span class="s3">(</span><span class="s1">set</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Cache for mkpath. 
+ 
+    In addition to cheapening redundant calls, eliminates redundant 
+    &quot;creating /foo/bar/baz&quot; messages in dry-run mode. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s1">SkipRepeatAbsolutePaths</span><span class="s3">.</span><span class="s1">instance </span><span class="s3">= </span><span class="s1">self</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">clear</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">instance</span><span class="s3">).</span><span class="s1">clear</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">wrap</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">func</span><span class="s3">):</span>
+        <span class="s3">@</span><span class="s1">functools</span><span class="s3">.</span><span class="s1">wraps</span><span class="s3">(</span><span class="s1">func</span><span class="s3">)</span>
+        <span class="s2">def </span><span class="s1">wrapper</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">path</span><span class="s3">.</span><span class="s1">absolute</span><span class="s3">() </span><span class="s2">in </span><span class="s1">self</span><span class="s3">:</span>
+                <span class="s2">return</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s1">func</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">path</span><span class="s3">.</span><span class="s1">absolute</span><span class="s3">())</span>
+            <span class="s2">return </span><span class="s1">result</span>
+
+        <span class="s2">return </span><span class="s1">wrapper</span>
+
+
+<span class="s4"># Python 3.8 compatibility</span>
+<span class="s1">wrapper </span><span class="s3">= </span><span class="s1">SkipRepeatAbsolutePaths</span><span class="s3">().</span><span class="s1">wrap</span>
+
+
+<span class="s3">@</span><span class="s1">functools</span><span class="s3">.</span><span class="s1">singledispatch</span>
+<span class="s3">@</span><span class="s1">wrapper</span>
+<span class="s2">def </span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">=</span><span class="s5">0o777</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Create a directory and any missing ancestor directories. 
+ 
+    If the directory already exists (or if 'name' is the empty string, which 
+    means the current directory, which of course exists), then do nothing. 
+    Raise DistutilsFileError if unable to create some directory along the way 
+    (eg. some sub-path exists, but is a file rather than a directory). 
+    If 'verbose' is true, log the directory created. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">verbose </span><span class="s2">and not </span><span class="s1">name</span><span class="s3">.</span><span class="s1">is_dir</span><span class="s3">():</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s6">&quot;creating %s&quot;</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">dry_run </span><span class="s2">or </span><span class="s1">name</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">mode</span><span class="s3">=</span><span class="s1">mode</span><span class="s3">, </span><span class="s1">parents</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">exist_ok</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+        <span class="s2">raise </span><span class="s1">DistutilsFileError</span><span class="s3">(</span><span class="s6">f&quot;could not create '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s6">': </span><span class="s2">{</span><span class="s1">exc</span><span class="s3">.</span><span class="s1">args</span><span class="s3">[-</span><span class="s5">1</span><span class="s3">]</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">mkpath</span><span class="s3">.</span><span class="s1">register</span>
+<span class="s2">def </span><span class="s1">_</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+    <span class="s2">return </span><span class="s1">mkpath</span><span class="s3">(</span><span class="s1">pathlib</span><span class="s3">.</span><span class="s1">Path</span><span class="s3">(</span><span class="s1">name</span><span class="s3">), *</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">mkpath</span><span class="s3">.</span><span class="s1">register</span>
+<span class="s2">def </span><span class="s1">_</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s2">None</span><span class="s3">, *</span><span class="s1">args</span><span class="s3">, **</span><span class="s1">kwargs</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Detect a common bug -- name is None. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">raise </span><span class="s1">DistutilsInternalError</span><span class="s3">(</span><span class="s6">f&quot;mkpath: 'name' must be a string (got </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s6">)&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">create_tree</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">files</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">=</span><span class="s5">0o777</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Create all the empty directories under 'base_dir' needed to put 'files' 
+    there. 
+ 
+    'base_dir' is just the name of a directory which doesn't necessarily 
+    exist yet; 'files' is a list of filenames to be interpreted relative to 
+    'base_dir'.  'base_dir' + the directory portion of every file in 'files' 
+    will be created if it doesn't already exist.  'mode', 'verbose' and 
+    'dry_run' flags are as for 'mkpath()'. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># First get the list of directories to create</span>
+    <span class="s1">need_dir </span><span class="s3">= </span><span class="s1">set</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">base_dir</span><span class="s3">, </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">file</span><span class="s3">)) </span><span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">files</span><span class="s3">)</span>
+
+    <span class="s4"># Now create them</span>
+    <span class="s2">for </span><span class="s1">dir </span><span class="s2">in </span><span class="s1">sorted</span><span class="s3">(</span><span class="s1">need_dir</span><span class="s3">):</span>
+        <span class="s1">mkpath</span><span class="s3">(</span><span class="s1">dir</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s1">verbose</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">copy_tree</span><span class="s3">(</span>
+    <span class="s1">src</span><span class="s3">,</span>
+    <span class="s1">dst</span><span class="s3">,</span>
+    <span class="s1">preserve_mode</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s1">preserve_times</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s1">preserve_symlinks</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">update</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+<span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Copy an entire directory tree 'src' to a new location 'dst'. 
+ 
+    Both 'src' and 'dst' must be directory names.  If 'src' is not a 
+    directory, raise DistutilsFileError.  If 'dst' does not exist, it is 
+    created with 'mkpath()'.  The end result of the copy is that every 
+    file in 'src' is copied to 'dst', and directories under 'src' are 
+    recursively copied to 'dst'.  Return the list of files that were 
+    copied or might have been copied, using their output name.  The 
+    return value is unaffected by 'update' or 'dry_run': it is simply 
+    the list of all files under 'src', with the names changed to be 
+    under 'dst'. 
+ 
+    'preserve_mode' and 'preserve_times' are the same as for 
+    'copy_file'; note that they only apply to regular files, not to 
+    directories.  If 'preserve_symlinks' is true, symlinks will be 
+    copied as symlinks (on platforms that support them!); otherwise 
+    (the default), the destination of the symlink will be copied. 
+    'update' and 'verbose' are the same as for 'copy_file'. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">dry_run </span><span class="s2">and not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">src</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">DistutilsFileError</span><span class="s3">(</span><span class="s6">f&quot;cannot copy tree '</span><span class="s2">{</span><span class="s1">src</span><span class="s2">}</span><span class="s6">': not a directory&quot;</span><span class="s3">)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s1">names </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">listdir</span><span class="s3">(</span><span class="s1">src</span><span class="s3">)</span>
+    <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s1">names </span><span class="s3">= []</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsFileError</span><span class="s3">(</span><span class="s6">f&quot;error listing files in '</span><span class="s2">{</span><span class="s1">src</span><span class="s2">}</span><span class="s6">': </span><span class="s2">{</span><span class="s1">e</span><span class="s3">.</span><span class="s1">strerror</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+        <span class="s1">mkpath</span><span class="s3">(</span><span class="s1">dst</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s1">verbose</span><span class="s3">)</span>
+
+    <span class="s1">copy_one </span><span class="s3">= </span><span class="s1">functools</span><span class="s3">.</span><span class="s1">partial</span><span class="s3">(</span>
+        <span class="s1">_copy_one</span><span class="s3">,</span>
+        <span class="s1">src</span><span class="s3">=</span><span class="s1">src</span><span class="s3">,</span>
+        <span class="s1">dst</span><span class="s3">=</span><span class="s1">dst</span><span class="s3">,</span>
+        <span class="s1">preserve_symlinks</span><span class="s3">=</span><span class="s1">preserve_symlinks</span><span class="s3">,</span>
+        <span class="s1">verbose</span><span class="s3">=</span><span class="s1">verbose</span><span class="s3">,</span>
+        <span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">,</span>
+        <span class="s1">preserve_mode</span><span class="s3">=</span><span class="s1">preserve_mode</span><span class="s3">,</span>
+        <span class="s1">preserve_times</span><span class="s3">=</span><span class="s1">preserve_times</span><span class="s3">,</span>
+        <span class="s1">update</span><span class="s3">=</span><span class="s1">update</span><span class="s3">,</span>
+    <span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">list</span><span class="s3">(</span><span class="s1">itertools</span><span class="s3">.</span><span class="s1">chain</span><span class="s3">.</span><span class="s1">from_iterable</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">copy_one</span><span class="s3">, </span><span class="s1">names</span><span class="s3">)))</span>
+
+
+<span class="s2">def </span><span class="s1">_copy_one</span><span class="s3">(</span>
+    <span class="s1">name</span><span class="s3">,</span>
+    <span class="s3">*,</span>
+    <span class="s1">src</span><span class="s3">,</span>
+    <span class="s1">dst</span><span class="s3">,</span>
+    <span class="s1">preserve_symlinks</span><span class="s3">,</span>
+    <span class="s1">verbose</span><span class="s3">,</span>
+    <span class="s1">dry_run</span><span class="s3">,</span>
+    <span class="s1">preserve_mode</span><span class="s3">,</span>
+    <span class="s1">preserve_times</span><span class="s3">,</span>
+    <span class="s1">update</span><span class="s3">,</span>
+<span class="s3">):</span>
+    <span class="s1">src_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">src</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+    <span class="s1">dst_name </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dst</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)</span>
+
+    <span class="s2">if </span><span class="s1">name</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s6">'.nfs'</span><span class="s3">):</span>
+        <span class="s4"># skip NFS rename files</span>
+        <span class="s2">return</span>
+
+    <span class="s2">if </span><span class="s1">preserve_symlinks </span><span class="s2">and </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">islink</span><span class="s3">(</span><span class="s1">src_name</span><span class="s3">):</span>
+        <span class="s1">link_dest </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">readlink</span><span class="s3">(</span><span class="s1">src_name</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">verbose </span><span class="s3">&gt;= </span><span class="s5">1</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s6">&quot;linking %s -&gt; %s&quot;</span><span class="s3">, </span><span class="s1">dst_name</span><span class="s3">, </span><span class="s1">link_dest</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">symlink</span><span class="s3">(</span><span class="s1">link_dest</span><span class="s3">, </span><span class="s1">dst_name</span><span class="s3">)</span>
+        <span class="s2">yield </span><span class="s1">dst_name</span>
+
+    <span class="s2">elif </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">src_name</span><span class="s3">):</span>
+        <span class="s2">yield from </span><span class="s1">copy_tree</span><span class="s3">(</span>
+            <span class="s1">src_name</span><span class="s3">,</span>
+            <span class="s1">dst_name</span><span class="s3">,</span>
+            <span class="s1">preserve_mode</span><span class="s3">,</span>
+            <span class="s1">preserve_times</span><span class="s3">,</span>
+            <span class="s1">preserve_symlinks</span><span class="s3">,</span>
+            <span class="s1">update</span><span class="s3">,</span>
+            <span class="s1">verbose</span><span class="s3">=</span><span class="s1">verbose</span><span class="s3">,</span>
+            <span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">,</span>
+        <span class="s3">)</span>
+    <span class="s2">else</span><span class="s3">:</span>
+        <span class="s1">file_util</span><span class="s3">.</span><span class="s1">copy_file</span><span class="s3">(</span>
+            <span class="s1">src_name</span><span class="s3">,</span>
+            <span class="s1">dst_name</span><span class="s3">,</span>
+            <span class="s1">preserve_mode</span><span class="s3">,</span>
+            <span class="s1">preserve_times</span><span class="s3">,</span>
+            <span class="s1">update</span><span class="s3">,</span>
+            <span class="s1">verbose</span><span class="s3">=</span><span class="s1">verbose</span><span class="s3">,</span>
+            <span class="s1">dry_run</span><span class="s3">=</span><span class="s1">dry_run</span><span class="s3">,</span>
+        <span class="s3">)</span>
+        <span class="s2">yield </span><span class="s1">dst_name</span>
+
+
+<span class="s2">def </span><span class="s1">_build_cmdtuple</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">cmdtuples</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Helper for remove_tree().&quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">listdir</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+        <span class="s1">real_f </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">path</span><span class="s3">, </span><span class="s1">f</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">isdir</span><span class="s3">(</span><span class="s1">real_f</span><span class="s3">) </span><span class="s2">and not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">islink</span><span class="s3">(</span><span class="s1">real_f</span><span class="s3">):</span>
+            <span class="s1">_build_cmdtuple</span><span class="s3">(</span><span class="s1">real_f</span><span class="s3">, </span><span class="s1">cmdtuples</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">cmdtuples</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">os</span><span class="s3">.</span><span class="s1">remove</span><span class="s3">, </span><span class="s1">real_f</span><span class="s3">))</span>
+    <span class="s1">cmdtuples</span><span class="s3">.</span><span class="s1">append</span><span class="s3">((</span><span class="s1">os</span><span class="s3">.</span><span class="s1">rmdir</span><span class="s3">, </span><span class="s1">path</span><span class="s3">))</span>
+
+
+<span class="s2">def </span><span class="s1">remove_tree</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Recursively remove an entire directory tree. 
+ 
+    Any errors are ignored (apart from being reported to stdout if 'verbose' 
+    is true). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">verbose </span><span class="s3">&gt;= </span><span class="s5">1</span><span class="s3">:</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s6">&quot;removing '%s' (and everything under it)&quot;</span><span class="s3">, </span><span class="s1">directory</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">dry_run</span><span class="s3">:</span>
+        <span class="s2">return</span>
+    <span class="s1">cmdtuples </span><span class="s3">= []</span>
+    <span class="s1">_build_cmdtuple</span><span class="s3">(</span><span class="s1">directory</span><span class="s3">, </span><span class="s1">cmdtuples</span><span class="s3">)</span>
+    <span class="s2">for </span><span class="s1">cmd </span><span class="s2">in </span><span class="s1">cmdtuples</span><span class="s3">:</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">cmd</span><span class="s3">[</span><span class="s5">0</span><span class="s3">](</span><span class="s1">cmd</span><span class="s3">[</span><span class="s5">1</span><span class="s3">])</span>
+            <span class="s4"># Clear the cache</span>
+            <span class="s1">SkipRepeatAbsolutePaths</span><span class="s3">.</span><span class="s1">clear</span><span class="s3">()</span>
+        <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">exc</span><span class="s3">:</span>
+            <span class="s1">log</span><span class="s3">.</span><span class="s1">warning</span><span class="s3">(</span><span class="s6">&quot;error removing %s: %s&quot;</span><span class="s3">, </span><span class="s1">directory</span><span class="s3">, </span><span class="s1">exc</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">ensure_relative</span><span class="s3">(</span><span class="s1">path</span><span class="s3">):</span>
+    <span class="s0">&quot;&quot;&quot;Take the full path 'path', and make it a relative path. 
+ 
+    This is useful to make 'path' the second argument to os.path.join(). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">drive</span><span class="s3">, </span><span class="s1">path </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">splitdrive</span><span class="s3">(</span><span class="s1">path</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">path</span><span class="s3">[</span><span class="s5">0</span><span class="s3">:</span><span class="s5">1</span><span class="s3">] == </span><span class="s1">os</span><span class="s3">.</span><span class="s1">sep</span><span class="s3">:</span>
+        <span class="s1">path </span><span class="s3">= </span><span class="s1">drive </span><span class="s3">+ </span><span class="s1">path</span><span class="s3">[</span><span class="s5">1</span><span class="s3">:]</span>
+    <span class="s2">return </span><span class="s1">path</span>
+</pre>
+</body>
+</html>

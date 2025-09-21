@@ -1,0 +1,317 @@
+<html>
+<head>
+<title>temp_dir.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #5f826b; font-style: italic;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+temp_dir.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">import </span><span class="s1">traceback</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Generator</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">ExitStack</span><span class="s2">, </span><span class="s1">contextmanager</span>
+<span class="s0">from </span><span class="s1">pathlib </span><span class="s0">import </span><span class="s1">Path</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s1">TypeVar</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s0">from </span><span class="s1">pip</span><span class="s2">.</span><span class="s1">_internal</span><span class="s2">.</span><span class="s1">utils</span><span class="s2">.</span><span class="s1">misc </span><span class="s0">import </span><span class="s1">enum</span><span class="s2">, </span><span class="s1">rmtree</span>
+
+<span class="s1">logger </span><span class="s2">= </span><span class="s1">logging</span><span class="s2">.</span><span class="s1">getLogger</span><span class="s2">(</span><span class="s1">__name__</span><span class="s2">)</span>
+
+<span class="s1">_T </span><span class="s2">= </span><span class="s1">TypeVar</span><span class="s2">(</span><span class="s3">&quot;_T&quot;</span><span class="s2">, </span><span class="s1">bound</span><span class="s2">=</span><span class="s3">&quot;TempDirectory&quot;</span><span class="s2">)</span>
+
+
+<span class="s4"># Kinds of temporary directories. Only needed for ones that are</span>
+<span class="s4"># globally-managed.</span>
+<span class="s1">tempdir_kinds </span><span class="s2">= </span><span class="s1">enum</span><span class="s2">(</span>
+    <span class="s1">BUILD_ENV</span><span class="s2">=</span><span class="s3">&quot;build-env&quot;</span><span class="s2">,</span>
+    <span class="s1">EPHEM_WHEEL_CACHE</span><span class="s2">=</span><span class="s3">&quot;ephem-wheel-cache&quot;</span><span class="s2">,</span>
+    <span class="s1">REQ_BUILD</span><span class="s2">=</span><span class="s3">&quot;req-build&quot;</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+
+<span class="s1">_tempdir_manager</span><span class="s2">: </span><span class="s1">ExitStack </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">global_tempdir_manager</span><span class="s2">() </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s0">global </span><span class="s1">_tempdir_manager</span>
+    <span class="s0">with </span><span class="s1">ExitStack</span><span class="s2">() </span><span class="s0">as </span><span class="s1">stack</span><span class="s2">:</span>
+        <span class="s1">old_tempdir_manager</span><span class="s2">, </span><span class="s1">_tempdir_manager </span><span class="s2">= </span><span class="s1">_tempdir_manager</span><span class="s2">, </span><span class="s1">stack</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">yield</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">_tempdir_manager </span><span class="s2">= </span><span class="s1">old_tempdir_manager</span>
+
+
+<span class="s0">class </span><span class="s1">TempDirectoryTypeRegistry</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Manages temp directory behavior&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_should_delete</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">bool</span><span class="s2">] = {}</span>
+
+    <span class="s0">def </span><span class="s1">set_delete</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">kind</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">bool</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Indicate whether a TempDirectory of the given kind should be 
+        auto-deleted. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_should_delete</span><span class="s2">[</span><span class="s1">kind</span><span class="s2">] = </span><span class="s1">value</span>
+
+    <span class="s0">def </span><span class="s1">get_delete</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">kind</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Get configured auto-delete flag for a given TempDirectory type, 
+        default True. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_should_delete</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s1">kind</span><span class="s2">, </span><span class="s0">True</span><span class="s2">)</span>
+
+
+<span class="s1">_tempdir_registry</span><span class="s2">: </span><span class="s1">TempDirectoryTypeRegistry </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+
+<span class="s2">@</span><span class="s1">contextmanager</span>
+<span class="s0">def </span><span class="s1">tempdir_registry</span><span class="s2">() </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">TempDirectoryTypeRegistry</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+    <span class="s5">&quot;&quot;&quot;Provides a scoped global tempdir registry that can be used to dictate 
+    whether directories should be deleted. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">global </span><span class="s1">_tempdir_registry</span>
+    <span class="s1">old_tempdir_registry </span><span class="s2">= </span><span class="s1">_tempdir_registry</span>
+    <span class="s1">_tempdir_registry </span><span class="s2">= </span><span class="s1">TempDirectoryTypeRegistry</span><span class="s2">()</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">yield </span><span class="s1">_tempdir_registry</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">_tempdir_registry </span><span class="s2">= </span><span class="s1">old_tempdir_registry</span>
+
+
+<span class="s0">class </span><span class="s1">_Default</span><span class="s2">:</span>
+    <span class="s0">pass</span>
+
+
+<span class="s1">_default </span><span class="s2">= </span><span class="s1">_Default</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">TempDirectory</span><span class="s2">:</span>
+    <span class="s5">&quot;&quot;&quot;Helper class that owns and cleans up a temporary directory. 
+ 
+    This class can be used as a context manager or as an OO representation of a 
+    temporary directory. 
+ 
+    Attributes: 
+        path 
+            Location to the created temporary directory 
+        delete 
+            Whether the directory should be deleted when exiting 
+            (when used as a contextmanager) 
+ 
+    Methods: 
+        cleanup() 
+            Deletes the temporary directory 
+ 
+    When used as a context manager, if the delete attribute is True, on 
+    exiting the context the temporary directory is deleted. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">path</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">delete</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">| </span><span class="s0">None </span><span class="s2">| </span><span class="s1">_Default </span><span class="s2">= </span><span class="s1">_default</span><span class="s2">,</span>
+        <span class="s1">kind</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s3">&quot;temp&quot;</span><span class="s2">,</span>
+        <span class="s1">globally_managed</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span><span class="s2">,</span>
+        <span class="s1">ignore_cleanup_errors</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">()</span>
+
+        <span class="s0">if </span><span class="s1">delete </span><span class="s0">is </span><span class="s1">_default</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">path </span><span class="s0">is not None</span><span class="s2">:</span>
+                <span class="s4"># If we were given an explicit directory, resolve delete option</span>
+                <span class="s4"># now.</span>
+                <span class="s1">delete </span><span class="s2">= </span><span class="s0">False</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s4"># Otherwise, we wait until cleanup and see what</span>
+                <span class="s4"># tempdir_registry says.</span>
+                <span class="s1">delete </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s4"># The only time we specify path is in for editables where it</span>
+        <span class="s4"># is the value of the --src option.</span>
+        <span class="s0">if </span><span class="s1">path </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_create</span><span class="s2">(</span><span class="s1">kind</span><span class="s2">)</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_path </span><span class="s2">= </span><span class="s1">path</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_deleted </span><span class="s2">= </span><span class="s0">False</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">delete </span><span class="s2">= </span><span class="s1">delete</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">kind </span><span class="s2">= </span><span class="s1">kind</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">ignore_cleanup_errors </span><span class="s2">= </span><span class="s1">ignore_cleanup_errors</span>
+
+        <span class="s0">if </span><span class="s1">globally_managed</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">_tempdir_manager </span><span class="s0">is not None</span>
+            <span class="s1">_tempdir_manager</span><span class="s2">.</span><span class="s1">enter_context</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">path</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">assert not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_deleted</span><span class="s2">, </span><span class="s3">f&quot;Attempted to access deleted path: </span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span><span class="s0">}</span><span class="s3">&quot;</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span>
+
+    <span class="s0">def </span><span class="s1">__repr__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s3">f&quot;&lt;</span><span class="s0">{</span><span class="s1">self</span><span class="s2">.</span><span class="s1">__class__</span><span class="s2">.</span><span class="s1">__name__</span><span class="s0">} {</span><span class="s1">self</span><span class="s2">.</span><span class="s1">path</span><span class="s0">!r}</span><span class="s3">&gt;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__enter__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">_T</span><span class="s2">) </span><span class="s1">-&gt; _T</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__exit__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">exc</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">value</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">tb</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">delete </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">delete </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">delete</span>
+        <span class="s0">elif </span><span class="s1">_tempdir_registry</span><span class="s2">:</span>
+            <span class="s1">delete </span><span class="s2">= </span><span class="s1">_tempdir_registry</span><span class="s2">.</span><span class="s1">get_delete</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">kind</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">delete </span><span class="s2">= </span><span class="s0">True</span>
+
+        <span class="s0">if </span><span class="s1">delete</span><span class="s2">:</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">cleanup</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">_create</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">kind</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Create a temporary directory and store its path in self.path&quot;&quot;&quot;</span>
+        <span class="s4"># We realpath here because some systems have their default tmpdir</span>
+        <span class="s4"># symlinked to another directory.  This tends to confuse build</span>
+        <span class="s4"># scripts, so we canonicalize the path by traversing potential</span>
+        <span class="s4"># symlinks here.</span>
+        <span class="s1">path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">realpath</span><span class="s2">(</span><span class="s1">tempfile</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">(</span><span class="s1">prefix</span><span class="s2">=</span><span class="s3">f&quot;pip-</span><span class="s0">{</span><span class="s1">kind</span><span class="s0">}</span><span class="s3">-&quot;</span><span class="s2">))</span>
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span><span class="s3">&quot;Created temporary directory: %s&quot;</span><span class="s2">, </span><span class="s1">path</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">path</span>
+
+    <span class="s0">def </span><span class="s1">cleanup</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s5">&quot;&quot;&quot;Remove the temporary directory created and reset state&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_deleted </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">if not </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">exists</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span><span class="s2">):</span>
+            <span class="s0">return</span>
+
+        <span class="s1">errors</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">BaseException</span><span class="s2">] = []</span>
+
+        <span class="s0">def </span><span class="s1">onerror</span><span class="s2">(</span>
+            <span class="s1">func</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[..., </span><span class="s1">Any</span><span class="s2">],</span>
+            <span class="s1">path</span><span class="s2">: </span><span class="s1">Path</span><span class="s2">,</span>
+            <span class="s1">exc_val</span><span class="s2">: </span><span class="s1">BaseException</span><span class="s2">,</span>
+        <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s5">&quot;&quot;&quot;Log a warning for a `rmtree` error and continue&quot;&quot;&quot;</span>
+            <span class="s1">formatted_exc </span><span class="s2">= </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span>
+                <span class="s1">traceback</span><span class="s2">.</span><span class="s1">format_exception_only</span><span class="s2">(</span><span class="s1">type</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">), </span><span class="s1">exc_val</span><span class="s2">)</span>
+            <span class="s2">)</span>
+            <span class="s1">formatted_exc </span><span class="s2">= </span><span class="s1">formatted_exc</span><span class="s2">.</span><span class="s1">rstrip</span><span class="s2">()  </span><span class="s4"># remove trailing new line</span>
+            <span class="s0">if </span><span class="s1">func </span><span class="s0">in </span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">unlink</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">rmdir</span><span class="s2">):</span>
+                <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span>
+                    <span class="s3">&quot;Failed to remove a temporary file '%s' due to %s.</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s2">,</span>
+                    <span class="s1">path</span><span class="s2">,</span>
+                    <span class="s1">formatted_exc</span><span class="s2">,</span>
+                <span class="s2">)</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span><span class="s3">&quot;%s failed with %s.&quot;</span><span class="s2">, </span><span class="s1">func</span><span class="s2">.</span><span class="s1">__qualname__</span><span class="s2">, </span><span class="s1">formatted_exc</span><span class="s2">)</span>
+            <span class="s1">errors</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">exc_val</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">ignore_cleanup_errors</span><span class="s2">:</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s4"># first try with @retry; retrying to handle ephemeral errors</span>
+                <span class="s1">rmtree</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span><span class="s2">, </span><span class="s1">ignore_errors</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError</span><span class="s2">:</span>
+                <span class="s4"># last pass ignore/log all errors</span>
+                <span class="s1">rmtree</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span><span class="s2">, </span><span class="s1">onexc</span><span class="s2">=</span><span class="s1">onerror</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">errors</span><span class="s2">:</span>
+                <span class="s1">logger</span><span class="s2">.</span><span class="s1">warning</span><span class="s2">(</span>
+                    <span class="s3">&quot;Failed to remove contents in a temporary directory '%s'.</span><span class="s0">\n</span><span class="s3">&quot;</span>
+                    <span class="s3">&quot;You can safely remove it manually.&quot;</span><span class="s2">,</span>
+                    <span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span><span class="s2">,</span>
+                <span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">rmtree</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_path</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">AdjacentTempDirectory</span><span class="s2">(</span><span class="s1">TempDirectory</span><span class="s2">):</span>
+    <span class="s5">&quot;&quot;&quot;Helper class that creates a temporary directory adjacent to a real one. 
+ 
+    Attributes: 
+        original 
+            The original directory to create a temp directory for. 
+        path 
+            After calling create() or entering, contains the full 
+            path to the temporary directory. 
+        delete 
+            Whether the directory should be deleted when exiting 
+            (when used as a contextmanager) 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4"># The characters that may be used to name the temp directory</span>
+    <span class="s4"># We always prepend a ~ and then rotate through these until</span>
+    <span class="s4"># a usable name is found.</span>
+    <span class="s4"># pkg_resources raises a different error for .dist-info folder</span>
+    <span class="s4"># with leading '-' and invalid metadata</span>
+    <span class="s1">LEADING_CHARS </span><span class="s2">= </span><span class="s3">&quot;-~.=%0123456789&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">original</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">delete</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">original </span><span class="s2">= </span><span class="s1">original</span><span class="s2">.</span><span class="s1">rstrip</span><span class="s2">(</span><span class="s3">&quot;/</span><span class="s0">\\</span><span class="s3">&quot;</span><span class="s2">)</span>
+        <span class="s1">super</span><span class="s2">().</span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">delete</span><span class="s2">=</span><span class="s1">delete</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">_generate_names</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Generator</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">]:</span>
+        <span class="s5">&quot;&quot;&quot;Generates a series of temporary names. 
+ 
+        The algorithm replaces the leading characters in the name 
+        with ones that are valid filesystem characters, but are not 
+        valid package names (for both Python and pip definitions of 
+        package). 
+        &quot;&quot;&quot;</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s6">1</span><span class="s2">, </span><span class="s1">len</span><span class="s2">(</span><span class="s1">name</span><span class="s2">)):</span>
+            <span class="s0">for </span><span class="s1">candidate </span><span class="s0">in </span><span class="s1">itertools</span><span class="s2">.</span><span class="s1">combinations_with_replacement</span><span class="s2">(</span>
+                <span class="s1">cls</span><span class="s2">.</span><span class="s1">LEADING_CHARS</span><span class="s2">, </span><span class="s1">i </span><span class="s2">- </span><span class="s6">1</span>
+            <span class="s2">):</span>
+                <span class="s1">new_name </span><span class="s2">= </span><span class="s3">&quot;~&quot; </span><span class="s2">+ </span><span class="s3">&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">candidate</span><span class="s2">) + </span><span class="s1">name</span><span class="s2">[</span><span class="s1">i</span><span class="s2">:]</span>
+                <span class="s0">if </span><span class="s1">new_name </span><span class="s2">!= </span><span class="s1">name</span><span class="s2">:</span>
+                    <span class="s0">yield </span><span class="s1">new_name</span>
+
+        <span class="s4"># If we make it this far, we will have to make a longer name</span>
+        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">.</span><span class="s1">LEADING_CHARS</span><span class="s2">)):</span>
+            <span class="s0">for </span><span class="s1">candidate </span><span class="s0">in </span><span class="s1">itertools</span><span class="s2">.</span><span class="s1">combinations_with_replacement</span><span class="s2">(</span>
+                <span class="s1">cls</span><span class="s2">.</span><span class="s1">LEADING_CHARS</span><span class="s2">, </span><span class="s1">i</span>
+            <span class="s2">):</span>
+                <span class="s1">new_name </span><span class="s2">= </span><span class="s3">&quot;~&quot; </span><span class="s2">+ </span><span class="s3">&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">candidate</span><span class="s2">) + </span><span class="s1">name</span>
+                <span class="s0">if </span><span class="s1">new_name </span><span class="s2">!= </span><span class="s1">name</span><span class="s2">:</span>
+                    <span class="s0">yield </span><span class="s1">new_name</span>
+
+    <span class="s0">def </span><span class="s1">_create</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">kind</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s1">root</span><span class="s2">, </span><span class="s1">name </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">original</span><span class="s2">)</span>
+        <span class="s0">for </span><span class="s1">candidate </span><span class="s0">in </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_generate_names</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">root</span><span class="s2">, </span><span class="s1">candidate</span><span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s1">os</span><span class="s2">.</span><span class="s1">mkdir</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">ex</span><span class="s2">:</span>
+                <span class="s4"># Continue if the name exists already</span>
+                <span class="s0">if </span><span class="s1">ex</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">!= </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EEXIST</span><span class="s2">:</span>
+                    <span class="s0">raise</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s1">path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">realpath</span><span class="s2">(</span><span class="s1">path</span><span class="s2">)</span>
+                <span class="s0">break</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s4"># Final fallback on the default behavior.</span>
+            <span class="s1">path </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">realpath</span><span class="s2">(</span><span class="s1">tempfile</span><span class="s2">.</span><span class="s1">mkdtemp</span><span class="s2">(</span><span class="s1">prefix</span><span class="s2">=</span><span class="s3">f&quot;pip-</span><span class="s0">{</span><span class="s1">kind</span><span class="s0">}</span><span class="s3">-&quot;</span><span class="s2">))</span>
+
+        <span class="s1">logger</span><span class="s2">.</span><span class="s1">debug</span><span class="s2">(</span><span class="s3">&quot;Created temporary directory: %s&quot;</span><span class="s2">, </span><span class="s1">path</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">path</span>
+</pre>
+</body>
+</html>

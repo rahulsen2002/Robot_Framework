@@ -1,0 +1,225 @@
+<html>
+<head>
+<title>_unix_pipes.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #5f826b; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_unix_pipes.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">Stream</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">ConflictDetector</span><span class="s2">, </span><span class="s1">final</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Final </span><span class="s0">as </span><span class="s1">FinalType</span>
+
+<span class="s0">assert not </span><span class="s1">TYPE_CHECKING </span><span class="s0">or </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;win32&quot;</span>
+
+<span class="s0">if </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">!= </span><span class="s3">&quot;posix&quot;</span><span class="s2">:</span>
+    <span class="s4"># We raise an error here rather than gating the import in lowlevel.py</span>
+    <span class="s4"># in order to keep jedi static analysis happy.</span>
+    <span class="s0">raise </span><span class="s1">ImportError</span>
+
+<span class="s4"># XX TODO: is this a good number? who knows... it does match the default Linux</span>
+<span class="s4"># pipe capacity though.</span>
+<span class="s1">DEFAULT_RECEIVE_SIZE</span><span class="s2">: </span><span class="s1">FinalType </span><span class="s2">= </span><span class="s5">65536</span>
+
+
+<span class="s0">class </span><span class="s1">_FdHolder</span><span class="s2">:</span>
+    <span class="s4"># This class holds onto a raw file descriptor, in non-blocking mode, and</span>
+    <span class="s4"># is responsible for managing its lifecycle. In particular, it's</span>
+    <span class="s4"># responsible for making sure it gets closed, and also for tracking</span>
+    <span class="s4"># whether it's been closed.</span>
+    <span class="s4">#</span>
+    <span class="s4"># The way we track closure is to set the .fd field to -1, discarding the</span>
+    <span class="s4"># original value. You might think that this is a strange idea, since it</span>
+    <span class="s4"># overloads the same field to do two different things. Wouldn't it be more</span>
+    <span class="s4"># natural to have a dedicated .closed field? But that would be more</span>
+    <span class="s4"># error-prone. Fds are represented by small integers, and once an fd is</span>
+    <span class="s4"># closed, its integer value may be reused immediately. If we accidentally</span>
+    <span class="s4"># used the old fd after being closed, we might end up doing something to</span>
+    <span class="s4"># another unrelated fd that happened to get assigned the same integer</span>
+    <span class="s4"># value. By throwing away the integer value immediately, it becomes</span>
+    <span class="s4"># impossible to make this mistake – we'll just get an EBADF.</span>
+    <span class="s4">#</span>
+    <span class="s4"># (This trick was copied from the stdlib socket module.)</span>
+    <span class="s1">fd</span><span class="s2">: </span><span class="s1">int</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># make sure self.fd is always initialized to *something*, because even</span>
+        <span class="s4"># if we error out here then __del__ will run and access it.</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">fd </span><span class="s2">= -</span><span class="s5">1</span>
+        <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+            <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s3">&quot;file descriptor must be an int&quot;</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">fd </span><span class="s2">= </span><span class="s1">fd</span>
+        <span class="s4"># Store original state, and ensure non-blocking mode is enabled</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_original_is_blocking </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">get_blocking</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">)</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">set_blocking</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">property</span>
+    <span class="s0">def </span><span class="s1">closed</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; bool</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">fd </span><span class="s2">== -</span><span class="s5">1</span>
+
+    <span class="s0">def </span><span class="s1">_raw_close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s4"># This doesn't assume it's in a Trio context, so it can be called from</span>
+        <span class="s4"># __del__. You should never call it from Trio context, because it</span>
+        <span class="s4"># skips calling notify_fd_close. But from __del__, skipping that is</span>
+        <span class="s4"># OK, because notify_fd_close just wakes up other tasks that are</span>
+        <span class="s4"># waiting on this fd, and those tasks hold a reference to this object.</span>
+        <span class="s4"># So if __del__ is being called, we know there aren't any tasks that</span>
+        <span class="s4"># need to be woken.</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+            <span class="s0">return</span>
+        <span class="s1">fd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">fd</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">fd </span><span class="s2">= -</span><span class="s5">1</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">set_blocking</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_original_is_blocking</span><span class="s2">)</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">__del__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_raw_close</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">if not </span><span class="s1">self</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">notify_closing</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">fd</span><span class="s2">)</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">_raw_close</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">final</span>
+<span class="s0">class </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">Stream</span><span class="s2">):</span>
+    <span class="s6">&quot;&quot;&quot; 
+    Represents a stream given the file descriptor to a pipe, TTY, etc. 
+ 
+    *fd* must refer to a file that is open for reading and/or writing and 
+    supports non-blocking I/O (pipes and TTYs will work, on-disk files probably 
+    not).  The returned stream takes ownership of the fd, so closing the stream 
+    will close the fd too.  As with `os.fdopen`, you should not directly use 
+    an fd after you have wrapped it in a stream using this function. 
+ 
+    To be used as a Trio stream, an open file must be placed in non-blocking 
+    mode.  Unfortunately, this impacts all I/O that goes through the 
+    underlying open file, including I/O that uses a different 
+    file descriptor than the one that was passed to Trio. If other threads 
+    or processes are using file descriptors that are related through `os.dup` 
+    or inheritance across `os.fork` to the one that Trio is using, they are 
+    unlikely to be prepared to have non-blocking I/O semantics suddenly 
+    thrust upon them.  For example, you can use 
+    ``FdStream(os.dup(sys.stdin.fileno()))`` to obtain a stream for reading 
+    from standard input, but it is only safe to do so with heavy caveats: your 
+    stdin must not be shared by any other processes, and you must not make any 
+    calls to synchronous methods of `sys.stdin` until the stream returned by 
+    `FdStream` is closed. See `issue #174 
+    &lt;https://github.com/python-trio/trio/issues/174&gt;`__ for a discussion of the 
+    challenges involved in relaxing this restriction. 
+ 
+    Args: 
+      fd (int): The fd to be wrapped. 
+ 
+    Returns: 
+      A new `FdStream` object. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder </span><span class="s2">= </span><span class="s1">_FdHolder</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_send_conflict_detector </span><span class="s2">= </span><span class="s1">ConflictDetector</span><span class="s2">(</span>
+            <span class="s3">&quot;another task is using this stream for send&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_receive_conflict_detector </span><span class="s2">= </span><span class="s1">ConflictDetector</span><span class="s2">(</span>
+            <span class="s3">&quot;another task is using this stream for receive&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">data</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_send_conflict_detector</span><span class="s2">:</span>
+            <span class="s4"># have to check up front, because send_all(b&quot;&quot;) on a closed pipe</span>
+            <span class="s4"># should raise</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span><span class="s3">&quot;file was already closed&quot;</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+            <span class="s1">length </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">data</span><span class="s2">)</span>
+            <span class="s4"># adapted from the SocketStream code</span>
+            <span class="s0">with </span><span class="s1">memoryview</span><span class="s2">(</span><span class="s1">data</span><span class="s2">) </span><span class="s0">as </span><span class="s1">view</span><span class="s2">:</span>
+                <span class="s1">sent </span><span class="s2">= </span><span class="s5">0</span>
+                <span class="s0">while </span><span class="s1">sent </span><span class="s2">&lt; </span><span class="s1">length</span><span class="s2">:</span>
+                    <span class="s0">with </span><span class="s1">view</span><span class="s2">[</span><span class="s1">sent</span><span class="s2">:] </span><span class="s0">as </span><span class="s1">remaining</span><span class="s2">:</span>
+                        <span class="s0">try</span><span class="s2">:</span>
+                            <span class="s1">sent </span><span class="s2">+= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">fd</span><span class="s2">, </span><span class="s1">remaining</span><span class="s2">)</span>
+                        <span class="s0">except </span><span class="s1">BlockingIOError</span><span class="s2">:</span>
+                            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">fd</span><span class="s2">)</span>
+                        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                            <span class="s0">if </span><span class="s1">e</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EBADF</span><span class="s2">:</span>
+                                <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span>
+                                    <span class="s3">&quot;file was already closed&quot;</span><span class="s2">,</span>
+                                <span class="s2">) </span><span class="s0">from None</span>
+                            <span class="s0">else</span><span class="s2">:</span>
+                                <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError </span><span class="s0">from </span><span class="s1">e</span>
+
+    <span class="s0">async def </span><span class="s1">wait_send_all_might_not_block</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_send_conflict_detector</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">closed</span><span class="s2">:</span>
+                <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span><span class="s3">&quot;file was already closed&quot;</span><span class="s2">)</span>
+            <span class="s0">try</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_writable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">fd</span><span class="s2">)</span>
+            <span class="s0">except </span><span class="s1">BrokenPipeError </span><span class="s0">as </span><span class="s1">e</span><span class="s2">:</span>
+                <span class="s4"># kqueue: raises EPIPE on wait_writable instead</span>
+                <span class="s4"># of sending, which is annoying</span>
+                <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError </span><span class="s0">from </span><span class="s1">e</span>
+
+    <span class="s0">async def </span><span class="s1">receive_some</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">max_bytes</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; bytes</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_receive_conflict_detector</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">max_bytes </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s1">max_bytes </span><span class="s2">= </span><span class="s1">DEFAULT_RECEIVE_SIZE</span>
+            <span class="s0">else</span><span class="s2">:</span>
+                <span class="s0">if not </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">max_bytes</span><span class="s2">, </span><span class="s1">int</span><span class="s2">):</span>
+                    <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s3">&quot;max_bytes must be integer &gt;= 1&quot;</span><span class="s2">)</span>
+                <span class="s0">if </span><span class="s1">max_bytes </span><span class="s2">&lt; </span><span class="s5">1</span><span class="s2">:</span>
+                    <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s3">&quot;max_bytes must be integer &gt;= 1&quot;</span><span class="s2">)</span>
+
+            <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+            <span class="s0">while True</span><span class="s2">:</span>
+                <span class="s0">try</span><span class="s2">:</span>
+                    <span class="s1">data </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">fd</span><span class="s2">, </span><span class="s1">max_bytes</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">BlockingIOError</span><span class="s2">:</span>
+                    <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">fd</span><span class="s2">)</span>
+                <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">exc</span><span class="s2">:</span>
+                    <span class="s0">if </span><span class="s1">exc</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EBADF</span><span class="s2">:</span>
+                        <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">(</span>
+                            <span class="s3">&quot;file was already closed&quot;</span><span class="s2">,</span>
+                        <span class="s2">) </span><span class="s0">from None</span>
+                    <span class="s0">else</span><span class="s2">:</span>
+                        <span class="s0">raise </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError </span><span class="s0">from </span><span class="s1">exc</span>
+                <span class="s0">else</span><span class="s2">:</span>
+                    <span class="s0">break</span>
+
+            <span class="s0">return </span><span class="s1">data</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+
+    <span class="s0">async def </span><span class="s1">aclose</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">lowlevel</span><span class="s2">.</span><span class="s1">checkpoint</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">fileno</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; int</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_fd_holder</span><span class="s2">.</span><span class="s1">fd</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,236 @@
+<html>
+<head>
+<title>lazy_wheel.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+lazy_wheel.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Lazy ZIP over HTTP&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s1">__all__ </span><span class="s3">= [</span><span class="s4">&quot;HTTPRangeRequestUnsupported&quot;</span><span class="s3">, </span><span class="s4">&quot;dist_from_wheel_url&quot;</span><span class="s3">]</span>
+
+<span class="s2">from </span><span class="s1">bisect </span><span class="s2">import </span><span class="s1">bisect_left</span><span class="s3">, </span><span class="s1">bisect_right</span>
+<span class="s2">from </span><span class="s1">collections</span><span class="s3">.</span><span class="s1">abc </span><span class="s2">import </span><span class="s1">Generator</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">tempfile </span><span class="s2">import </span><span class="s1">NamedTemporaryFile</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span>
+<span class="s2">from </span><span class="s1">zipfile </span><span class="s2">import </span><span class="s1">BadZipFile</span><span class="s3">, </span><span class="s1">ZipFile</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s1">canonicalize_name</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_vendor</span><span class="s3">.</span><span class="s1">requests</span><span class="s3">.</span><span class="s1">models </span><span class="s2">import </span><span class="s1">CONTENT_CHUNK_SIZE</span><span class="s3">, </span><span class="s1">Response</span>
+
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">metadata </span><span class="s2">import </span><span class="s1">BaseDistribution</span><span class="s3">, </span><span class="s1">MemoryWheel</span><span class="s3">, </span><span class="s1">get_wheel_distribution</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">network</span><span class="s3">.</span><span class="s1">session </span><span class="s2">import </span><span class="s1">PipSession</span>
+<span class="s2">from </span><span class="s1">pip</span><span class="s3">.</span><span class="s1">_internal</span><span class="s3">.</span><span class="s1">network</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s1">HEADERS</span><span class="s3">, </span><span class="s1">raise_for_status</span><span class="s3">, </span><span class="s1">response_chunks</span>
+
+
+<span class="s2">class </span><span class="s1">HTTPRangeRequestUnsupported</span><span class="s3">(</span><span class="s1">Exception</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">def </span><span class="s1">dist_from_wheel_url</span><span class="s3">(</span><span class="s1">name</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">) </span><span class="s1">-&gt; BaseDistribution</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Return a distribution object from the given wheel URL. 
+ 
+    This uses HTTP range requests to only fetch the portion of the wheel 
+    containing metadata, just enough for the object to be constructed. 
+    If such requests are not supported, HTTPRangeRequestUnsupported 
+    is raised. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">with </span><span class="s1">LazyZipOverHTTP</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">session</span><span class="s3">) </span><span class="s2">as </span><span class="s1">zf</span><span class="s3">:</span>
+        <span class="s5"># For read-only ZIP files, ZipFile only needs methods read,</span>
+        <span class="s5"># seek, seekable and tell, not the whole IO protocol.</span>
+        <span class="s1">wheel </span><span class="s3">= </span><span class="s1">MemoryWheel</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">.</span><span class="s1">name</span><span class="s3">, </span><span class="s1">zf</span><span class="s3">)  </span><span class="s5"># type: ignore</span>
+        <span class="s5"># After context manager exit, wheel.name</span>
+        <span class="s5"># is an invalid file by intention.</span>
+        <span class="s2">return </span><span class="s1">get_wheel_distribution</span><span class="s3">(</span><span class="s1">wheel</span><span class="s3">, </span><span class="s1">canonicalize_name</span><span class="s3">(</span><span class="s1">name</span><span class="s3">))</span>
+
+
+<span class="s2">class </span><span class="s1">LazyZipOverHTTP</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;File-like object mapped to a ZIP file over HTTP. 
+ 
+    This uses HTTP range requests to lazily fetch the file's content, 
+    which is supposed to be fed to ZipFile.  If such requests are not 
+    supported by the server, raise HTTPRangeRequestUnsupported 
+    during initialization. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">url</span><span class="s3">: </span><span class="s1">str</span><span class="s3">, </span><span class="s1">session</span><span class="s3">: </span><span class="s1">PipSession</span><span class="s3">, </span><span class="s1">chunk_size</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s1">CONTENT_CHUNK_SIZE</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">head </span><span class="s3">= </span><span class="s1">session</span><span class="s3">.</span><span class="s1">head</span><span class="s3">(</span><span class="s1">url</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">=</span><span class="s1">HEADERS</span><span class="s3">)</span>
+        <span class="s1">raise_for_status</span><span class="s3">(</span><span class="s1">head</span><span class="s3">)</span>
+        <span class="s2">assert </span><span class="s1">head</span><span class="s3">.</span><span class="s1">status_code </span><span class="s3">== </span><span class="s6">200</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_session</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_url</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_chunk_size </span><span class="s3">= </span><span class="s1">session</span><span class="s3">, </span><span class="s1">url</span><span class="s3">, </span><span class="s1">chunk_size</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_length </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">head</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">[</span><span class="s4">&quot;Content-Length&quot;</span><span class="s3">])</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_file </span><span class="s3">= </span><span class="s1">NamedTemporaryFile</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">truncate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_length</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_left</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">int</span><span class="s3">] = []</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_right</span><span class="s3">: </span><span class="s1">list</span><span class="s3">[</span><span class="s1">int</span><span class="s3">] = []</span>
+        <span class="s2">if </span><span class="s4">&quot;bytes&quot; </span><span class="s2">not in </span><span class="s1">head</span><span class="s3">.</span><span class="s1">headers</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">&quot;Accept-Ranges&quot;</span><span class="s3">, </span><span class="s4">&quot;none&quot;</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">HTTPRangeRequestUnsupported</span><span class="s3">(</span><span class="s4">&quot;range request is not supported&quot;</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_check_zip</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">mode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Opening mode, which is always rb.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s4">&quot;rb&quot;</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; str</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Path to the underlying file.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">def </span><span class="s1">seekable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return whether random access is supported, which is True.&quot;&quot;&quot;</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">close</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Close the file.&quot;&quot;&quot;</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">close</span><span class="s3">()</span>
+
+    <span class="s3">@</span><span class="s1">property</span>
+    <span class="s2">def </span><span class="s1">closed</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Whether the file is closed.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">closed</span>
+
+    <span class="s2">def </span><span class="s1">read</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">size</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= -</span><span class="s6">1</span><span class="s3">) </span><span class="s1">-&gt; bytes</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Read up to size bytes from the object and return them. 
+ 
+        As a convenience, if size is unspecified or -1, 
+        all bytes until EOF are returned.  Fewer than 
+        size bytes may be returned if EOF is reached. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">download_size </span><span class="s3">= </span><span class="s1">max</span><span class="s3">(</span><span class="s1">size</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_chunk_size</span><span class="s3">)</span>
+        <span class="s1">start</span><span class="s3">, </span><span class="s1">length </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">tell</span><span class="s3">(), </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_length</span>
+        <span class="s1">stop </span><span class="s3">= </span><span class="s1">length </span><span class="s2">if </span><span class="s1">size </span><span class="s3">&lt; </span><span class="s6">0 </span><span class="s2">else </span><span class="s1">min</span><span class="s3">(</span><span class="s1">start </span><span class="s3">+ </span><span class="s1">download_size</span><span class="s3">, </span><span class="s1">length</span><span class="s3">)</span>
+        <span class="s1">start </span><span class="s3">= </span><span class="s1">max</span><span class="s3">(</span><span class="s6">0</span><span class="s3">, </span><span class="s1">stop </span><span class="s3">- </span><span class="s1">download_size</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_download</span><span class="s3">(</span><span class="s1">start</span><span class="s3">, </span><span class="s1">stop </span><span class="s3">- </span><span class="s6">1</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">read</span><span class="s3">(</span><span class="s1">size</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">readable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return whether the file is readable, which is True.&quot;&quot;&quot;</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">seek</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">offset</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">whence</span><span class="s3">: </span><span class="s1">int </span><span class="s3">= </span><span class="s6">0</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Change stream position and return the new absolute position. 
+ 
+        Seek to offset relative position indicated by whence: 
+        * 0: Start of stream (the default).  pos should be &gt;= 0; 
+        * 1: Current position - pos may be negative; 
+        * 2: End of stream - pos usually negative. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">offset</span><span class="s3">, </span><span class="s1">whence</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">tell</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return the current position.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">tell</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">truncate</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">size</span><span class="s3">: </span><span class="s1">int </span><span class="s3">| </span><span class="s2">None </span><span class="s3">= </span><span class="s2">None</span><span class="s3">) </span><span class="s1">-&gt; int</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Resize the stream to the given size in bytes. 
+ 
+        If size is unspecified resize to the current position. 
+        The current stream position isn't changed. 
+ 
+        Return the new file size. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">truncate</span><span class="s3">(</span><span class="s1">size</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">writable</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; bool</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return False.&quot;&quot;&quot;</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; LazyZipOverHTTP</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">__enter__</span><span class="s3">()</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, *</span><span class="s1">exc</span><span class="s3">: </span><span class="s1">Any</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">__exit__</span><span class="s3">(*</span><span class="s1">exc</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">contextmanager</span>
+    <span class="s2">def </span><span class="s1">_stay</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Return a context manager keeping the position. 
+ 
+        At the end of the block, seek back to original position. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pos </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">tell</span><span class="s3">()</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">yield</span>
+        <span class="s2">finally</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">pos</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_check_zip</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Check and download until the file is a valid ZIP.&quot;&quot;&quot;</span>
+        <span class="s1">end </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_length </span><span class="s3">- </span><span class="s6">1</span>
+        <span class="s2">for </span><span class="s1">start </span><span class="s2">in </span><span class="s1">reversed</span><span class="s3">(</span><span class="s1">range</span><span class="s3">(</span><span class="s6">0</span><span class="s3">, </span><span class="s1">end</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_chunk_size</span><span class="s3">)):</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_download</span><span class="s3">(</span><span class="s1">start</span><span class="s3">, </span><span class="s1">end</span><span class="s3">)</span>
+            <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_stay</span><span class="s3">():</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s5"># For read-only ZIP files, ZipFile only needs</span>
+                    <span class="s5"># methods read, seek, seekable and tell.</span>
+                    <span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s1">BadZipFile</span><span class="s3">:</span>
+                    <span class="s2">pass</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s2">break</span>
+
+    <span class="s2">def </span><span class="s1">_stream_response</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">start</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">end</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">base_headers</span><span class="s3">: </span><span class="s1">dict</span><span class="s3">[</span><span class="s1">str</span><span class="s3">, </span><span class="s1">str</span><span class="s3">] = </span><span class="s1">HEADERS</span>
+    <span class="s3">) </span><span class="s1">-&gt; Response</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Return HTTP response to a range request from start to end.&quot;&quot;&quot;</span>
+        <span class="s1">headers </span><span class="s3">= </span><span class="s1">base_headers</span><span class="s3">.</span><span class="s1">copy</span><span class="s3">()</span>
+        <span class="s1">headers</span><span class="s3">[</span><span class="s4">&quot;Range&quot;</span><span class="s3">] = </span><span class="s4">f&quot;bytes=</span><span class="s2">{</span><span class="s1">start</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">end</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s5"># TODO: Get range requests to be correctly cached</span>
+        <span class="s1">headers</span><span class="s3">[</span><span class="s4">&quot;Cache-Control&quot;</span><span class="s3">] = </span><span class="s4">&quot;no-cache&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_session</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_url</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">=</span><span class="s1">headers</span><span class="s3">, </span><span class="s1">stream</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_merge</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">, </span><span class="s1">start</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">end</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">left</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">right</span><span class="s3">: </span><span class="s1">int</span>
+    <span class="s3">) </span><span class="s1">-&gt; Generator</span><span class="s3">[</span><span class="s1">tuple</span><span class="s3">[</span><span class="s1">int</span><span class="s3">, </span><span class="s1">int</span><span class="s3">], </span><span class="s2">None</span><span class="s3">, </span><span class="s2">None</span><span class="s3">]:</span>
+        <span class="s0">&quot;&quot;&quot;Return a generator of intervals to be fetched. 
+ 
+        Args: 
+            start (int): Start of needed interval 
+            end (int): End of needed interval 
+            left (int): Index of first overlapping downloaded data 
+            right (int): Index after last overlapping downloaded data 
+        &quot;&quot;&quot;</span>
+        <span class="s1">lslice</span><span class="s3">, </span><span class="s1">rslice </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_left</span><span class="s3">[</span><span class="s1">left</span><span class="s3">:</span><span class="s1">right</span><span class="s3">], </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_right</span><span class="s3">[</span><span class="s1">left</span><span class="s3">:</span><span class="s1">right</span><span class="s3">]</span>
+        <span class="s1">i </span><span class="s3">= </span><span class="s1">start </span><span class="s3">= </span><span class="s1">min</span><span class="s3">([</span><span class="s1">start</span><span class="s3">] + </span><span class="s1">lslice</span><span class="s3">[:</span><span class="s6">1</span><span class="s3">])</span>
+        <span class="s1">end </span><span class="s3">= </span><span class="s1">max</span><span class="s3">([</span><span class="s1">end</span><span class="s3">] + </span><span class="s1">rslice</span><span class="s3">[-</span><span class="s6">1</span><span class="s3">:])</span>
+        <span class="s2">for </span><span class="s1">j</span><span class="s3">, </span><span class="s1">k </span><span class="s2">in </span><span class="s1">zip</span><span class="s3">(</span><span class="s1">lslice</span><span class="s3">, </span><span class="s1">rslice</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">j </span><span class="s3">&gt; </span><span class="s1">i</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s1">i</span><span class="s3">, </span><span class="s1">j </span><span class="s3">- </span><span class="s6">1</span>
+            <span class="s1">i </span><span class="s3">= </span><span class="s1">k </span><span class="s3">+ </span><span class="s6">1</span>
+        <span class="s2">if </span><span class="s1">i </span><span class="s3">&lt;= </span><span class="s1">end</span><span class="s3">:</span>
+            <span class="s2">yield </span><span class="s1">i</span><span class="s3">, </span><span class="s1">end</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_left</span><span class="s3">[</span><span class="s1">left</span><span class="s3">:</span><span class="s1">right</span><span class="s3">], </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_right</span><span class="s3">[</span><span class="s1">left</span><span class="s3">:</span><span class="s1">right</span><span class="s3">] = [</span><span class="s1">start</span><span class="s3">], [</span><span class="s1">end</span><span class="s3">]</span>
+
+    <span class="s2">def </span><span class="s1">_download</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">start</span><span class="s3">: </span><span class="s1">int</span><span class="s3">, </span><span class="s1">end</span><span class="s3">: </span><span class="s1">int</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Download bytes from start to end inclusively.&quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_stay</span><span class="s3">():</span>
+            <span class="s1">left </span><span class="s3">= </span><span class="s1">bisect_left</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_right</span><span class="s3">, </span><span class="s1">start</span><span class="s3">)</span>
+            <span class="s1">right </span><span class="s3">= </span><span class="s1">bisect_right</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_left</span><span class="s3">, </span><span class="s1">end</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">start</span><span class="s3">, </span><span class="s1">end </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_merge</span><span class="s3">(</span><span class="s1">start</span><span class="s3">, </span><span class="s1">end</span><span class="s3">, </span><span class="s1">left</span><span class="s3">, </span><span class="s1">right</span><span class="s3">):</span>
+                <span class="s1">response </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_stream_response</span><span class="s3">(</span><span class="s1">start</span><span class="s3">, </span><span class="s1">end</span><span class="s3">)</span>
+                <span class="s1">response</span><span class="s3">.</span><span class="s1">raise_for_status</span><span class="s3">()</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">seek</span><span class="s3">(</span><span class="s1">start</span><span class="s3">)</span>
+                <span class="s2">for </span><span class="s1">chunk </span><span class="s2">in </span><span class="s1">response_chunks</span><span class="s3">(</span><span class="s1">response</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_chunk_size</span><span class="s3">):</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_file</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">chunk</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

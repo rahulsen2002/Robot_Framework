@@ -1,0 +1,386 @@
+<html>
+<head>
+<title>_state.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_state.py</font>
+</center></td></tr></table>
+<pre><span class="s0">################################################################</span>
+<span class="s0"># The core state machine</span>
+<span class="s0">################################################################</span>
+<span class="s0">#</span>
+<span class="s0"># Rule 1: everything that affects the state machine and state transitions must</span>
+<span class="s0"># live here in this file. As much as possible goes into the table-based</span>
+<span class="s0"># representation, but for the bits that don't quite fit, the actual code and</span>
+<span class="s0"># state must nonetheless live here.</span>
+<span class="s0">#</span>
+<span class="s0"># Rule 2: this file does not know about what role we're playing; it only knows</span>
+<span class="s0"># about HTTP request/response cycles in the abstract. This ensures that we</span>
+<span class="s0"># don't cheat and apply different rules to local and remote parties.</span>
+<span class="s0">#</span>
+<span class="s0">#</span>
+<span class="s0"># Theory of operation</span>
+<span class="s0"># ===================</span>
+<span class="s0">#</span>
+<span class="s0"># Possibly the simplest way to think about this is that we actually have 5</span>
+<span class="s0"># different state machines here. Yes, 5. These are:</span>
+<span class="s0">#</span>
+<span class="s0"># 1) The client state, with its complicated automaton (see the docs)</span>
+<span class="s0"># 2) The server state, with its complicated automaton (see the docs)</span>
+<span class="s0"># 3) The keep-alive state, with possible states {True, False}</span>
+<span class="s0"># 4) The SWITCH_CONNECT state, with possible states {False, True}</span>
+<span class="s0"># 5) The SWITCH_UPGRADE state, with possible states {False, True}</span>
+<span class="s0">#</span>
+<span class="s0"># For (3)-(5), the first state listed is the initial state.</span>
+<span class="s0">#</span>
+<span class="s0"># (1)-(3) are stored explicitly in member variables. The last</span>
+<span class="s0"># two are stored implicitly in the pending_switch_proposals set as:</span>
+<span class="s0">#   (state of 4) == (_SWITCH_CONNECT in pending_switch_proposals)</span>
+<span class="s0">#   (state of 5) == (_SWITCH_UPGRADE in pending_switch_proposals)</span>
+<span class="s0">#</span>
+<span class="s0"># And each of these machines has two different kinds of transitions:</span>
+<span class="s0">#</span>
+<span class="s0"># a) Event-triggered</span>
+<span class="s0"># b) State-triggered</span>
+<span class="s0">#</span>
+<span class="s0"># Event triggered is the obvious thing that you'd think it is: some event</span>
+<span class="s0"># happens, and if it's the right event at the right time then a transition</span>
+<span class="s0"># happens. But there are somewhat complicated rules for which machines can</span>
+<span class="s0"># &quot;see&quot; which events. (As a rule of thumb, if a machine &quot;sees&quot; an event, this</span>
+<span class="s0"># means two things: the event can affect the machine, and if the machine is</span>
+<span class="s0"># not in a state where it expects that event then it's an error.) These rules</span>
+<span class="s0"># are:</span>
+<span class="s0">#</span>
+<span class="s0"># 1) The client machine sees all h11.events objects emitted by the client.</span>
+<span class="s0">#</span>
+<span class="s0"># 2) The server machine sees all h11.events objects emitted by the server.</span>
+<span class="s0">#</span>
+<span class="s0">#    It also sees the client's Request event.</span>
+<span class="s0">#</span>
+<span class="s0">#    And sometimes, server events are annotated with a _SWITCH_* event. For</span>
+<span class="s0">#    example, we can have a (Response, _SWITCH_CONNECT) event, which is</span>
+<span class="s0">#    different from a regular Response event.</span>
+<span class="s0">#</span>
+<span class="s0"># 3) The keep-alive machine sees the process_keep_alive_disabled() event</span>
+<span class="s0">#    (which is derived from Request/Response events), and this event</span>
+<span class="s0">#    transitions it from True -&gt; False, or from False -&gt; False. There's no way</span>
+<span class="s0">#    to transition back.</span>
+<span class="s0">#</span>
+<span class="s0"># 4&amp;5) The _SWITCH_* machines transition from False-&gt;True when we get a</span>
+<span class="s0">#    Request that proposes the relevant type of switch (via</span>
+<span class="s0">#    process_client_switch_proposals), and they go from True-&gt;False when we</span>
+<span class="s0">#    get a Response that has no _SWITCH_* annotation.</span>
+<span class="s0">#</span>
+<span class="s0"># So that's event-triggered transitions.</span>
+<span class="s0">#</span>
+<span class="s0"># State-triggered transitions are less standard. What they do here is couple</span>
+<span class="s0"># the machines together. The way this works is, when certain *joint*</span>
+<span class="s0"># configurations of states are achieved, then we automatically transition to a</span>
+<span class="s0"># new *joint* state. So, for example, if we're ever in a joint state with</span>
+<span class="s0">#</span>
+<span class="s0">#   client: DONE</span>
+<span class="s0">#   keep-alive: False</span>
+<span class="s0">#</span>
+<span class="s0"># then the client state immediately transitions to:</span>
+<span class="s0">#</span>
+<span class="s0">#   client: MUST_CLOSE</span>
+<span class="s0">#</span>
+<span class="s0"># This is fundamentally different from an event-based transition, because it</span>
+<span class="s0"># doesn't matter how we arrived at the {client: DONE, keep-alive: False} state</span>
+<span class="s0"># -- maybe the client transitioned SEND_BODY -&gt; DONE, or keep-alive</span>
+<span class="s0"># transitioned True -&gt; False. Either way, once this precondition is satisfied,</span>
+<span class="s0"># this transition is immediately triggered.</span>
+<span class="s0">#</span>
+<span class="s0"># What if two conflicting state-based transitions get enabled at the same</span>
+<span class="s0"># time?  In practice there's only one case where this arises (client DONE -&gt;</span>
+<span class="s0"># MIGHT_SWITCH_PROTOCOL versus DONE -&gt; MUST_CLOSE), and we resolve it by</span>
+<span class="s0"># explicitly prioritizing the DONE -&gt; MIGHT_SWITCH_PROTOCOL transition.</span>
+<span class="s0">#</span>
+<span class="s0"># Implementation</span>
+<span class="s0"># --------------</span>
+<span class="s0">#</span>
+<span class="s0"># The event-triggered transitions for the server and client machines are all</span>
+<span class="s0"># stored explicitly in a table. Ditto for the state-triggered transitions that</span>
+<span class="s0"># involve just the server and client state.</span>
+<span class="s0">#</span>
+<span class="s0"># The transitions for the other machines, and the state-triggered transitions</span>
+<span class="s0"># that involve the other machines, are written out as explicit Python code.</span>
+<span class="s0">#</span>
+<span class="s0"># It'd be nice if there were some cleaner way to do all this. This isn't</span>
+<span class="s0"># *too* terrible, but I feel like it could probably be better.</span>
+<span class="s0">#</span>
+<span class="s0"># WARNING</span>
+<span class="s0"># -------</span>
+<span class="s0">#</span>
+<span class="s0"># The script that generates the state machine diagrams for the docs knows how</span>
+<span class="s0"># to read out the EVENT_TRIGGERED_TRANSITIONS and STATE_TRIGGERED_TRANSITIONS</span>
+<span class="s0"># tables. But it can't automatically read the transitions that are written</span>
+<span class="s0"># directly in Python code. So if you touch those, you need to also update the</span>
+<span class="s0"># script to keep it in sync!</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">cast</span><span class="s3">, </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Set</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Type</span><span class="s3">, </span><span class="s1">Union</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_events </span><span class="s2">import </span><span class="s3">*</span>
+<span class="s2">from </span><span class="s3">.</span><span class="s1">_util </span><span class="s2">import </span><span class="s1">LocalProtocolError</span><span class="s3">, </span><span class="s1">Sentinel</span>
+
+<span class="s0"># Everything in __all__ gets re-exported as part of the h11 public API.</span>
+<span class="s1">__all__ </span><span class="s3">= [</span>
+    <span class="s4">&quot;CLIENT&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;SERVER&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;IDLE&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;SEND_RESPONSE&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;SEND_BODY&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;DONE&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;MUST_CLOSE&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;CLOSED&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;MIGHT_SWITCH_PROTOCOL&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;SWITCHED_PROTOCOL&quot;</span><span class="s3">,</span>
+    <span class="s4">&quot;ERROR&quot;</span><span class="s3">,</span>
+<span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">CLIENT</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">SERVER</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s0"># States</span>
+<span class="s2">class </span><span class="s1">IDLE</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">SEND_RESPONSE</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">SEND_BODY</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">DONE</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">MUST_CLOSE</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">CLOSED</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">ERROR</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s0"># Switch types</span>
+<span class="s2">class </span><span class="s1">MIGHT_SWITCH_PROTOCOL</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">SWITCHED_PROTOCOL</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">_SWITCH_UPGRADE</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">_SWITCH_CONNECT</span><span class="s3">(</span><span class="s1">Sentinel</span><span class="s3">, </span><span class="s1">metaclass</span><span class="s3">=</span><span class="s1">Sentinel</span><span class="s3">):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s1">EventTransitionType </span><span class="s3">= </span><span class="s1">Dict</span><span class="s3">[</span>
+    <span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">],</span>
+    <span class="s1">Dict</span><span class="s3">[</span>
+        <span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">],</span>
+        <span class="s1">Dict</span><span class="s3">[</span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]],</span>
+    <span class="s3">],</span>
+<span class="s3">]</span>
+
+<span class="s1">EVENT_TRIGGERED_TRANSITIONS</span><span class="s3">: </span><span class="s1">EventTransitionType </span><span class="s3">= {</span>
+    <span class="s1">CLIENT</span><span class="s3">: {</span>
+        <span class="s1">IDLE</span><span class="s3">: {</span><span class="s1">Request</span><span class="s3">: </span><span class="s1">SEND_BODY</span><span class="s3">, </span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">SEND_BODY</span><span class="s3">: {</span><span class="s1">Data</span><span class="s3">: </span><span class="s1">SEND_BODY</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">: </span><span class="s1">DONE</span><span class="s3">},</span>
+        <span class="s1">DONE</span><span class="s3">: {</span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">MUST_CLOSE</span><span class="s3">: {</span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">CLOSED</span><span class="s3">: {</span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">MIGHT_SWITCH_PROTOCOL</span><span class="s3">: {},</span>
+        <span class="s1">SWITCHED_PROTOCOL</span><span class="s3">: {},</span>
+        <span class="s1">ERROR</span><span class="s3">: {},</span>
+    <span class="s3">},</span>
+    <span class="s1">SERVER</span><span class="s3">: {</span>
+        <span class="s1">IDLE</span><span class="s3">: {</span>
+            <span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">,</span>
+            <span class="s1">Response</span><span class="s3">: </span><span class="s1">SEND_BODY</span><span class="s3">,</span>
+            <span class="s0"># Special case: server sees client Request events, in this form</span>
+            <span class="s3">(</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">CLIENT</span><span class="s3">): </span><span class="s1">SEND_RESPONSE</span><span class="s3">,</span>
+        <span class="s3">},</span>
+        <span class="s1">SEND_RESPONSE</span><span class="s3">: {</span>
+            <span class="s1">InformationalResponse</span><span class="s3">: </span><span class="s1">SEND_RESPONSE</span><span class="s3">,</span>
+            <span class="s1">Response</span><span class="s3">: </span><span class="s1">SEND_BODY</span><span class="s3">,</span>
+            <span class="s3">(</span><span class="s1">InformationalResponse</span><span class="s3">, </span><span class="s1">_SWITCH_UPGRADE</span><span class="s3">): </span><span class="s1">SWITCHED_PROTOCOL</span><span class="s3">,</span>
+            <span class="s3">(</span><span class="s1">Response</span><span class="s3">, </span><span class="s1">_SWITCH_CONNECT</span><span class="s3">): </span><span class="s1">SWITCHED_PROTOCOL</span><span class="s3">,</span>
+        <span class="s3">},</span>
+        <span class="s1">SEND_BODY</span><span class="s3">: {</span><span class="s1">Data</span><span class="s3">: </span><span class="s1">SEND_BODY</span><span class="s3">, </span><span class="s1">EndOfMessage</span><span class="s3">: </span><span class="s1">DONE</span><span class="s3">},</span>
+        <span class="s1">DONE</span><span class="s3">: {</span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">MUST_CLOSE</span><span class="s3">: {</span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">CLOSED</span><span class="s3">: {</span><span class="s1">ConnectionClosed</span><span class="s3">: </span><span class="s1">CLOSED</span><span class="s3">},</span>
+        <span class="s1">SWITCHED_PROTOCOL</span><span class="s3">: {},</span>
+        <span class="s1">ERROR</span><span class="s3">: {},</span>
+    <span class="s3">},</span>
+<span class="s3">}</span>
+
+<span class="s1">StateTransitionType </span><span class="s3">= </span><span class="s1">Dict</span><span class="s3">[</span>
+    <span class="s1">Tuple</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]], </span><span class="s1">Dict</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]</span>
+<span class="s3">]</span>
+
+<span class="s0"># NB: there are also some special-case state-triggered transitions hard-coded</span>
+<span class="s0"># into _fire_state_triggered_transitions below.</span>
+<span class="s1">STATE_TRIGGERED_TRANSITIONS</span><span class="s3">: </span><span class="s1">StateTransitionType </span><span class="s3">= {</span>
+    <span class="s0"># (Client state, Server state) -&gt; new states</span>
+    <span class="s0"># Protocol negotiation</span>
+    <span class="s3">(</span><span class="s1">MIGHT_SWITCH_PROTOCOL</span><span class="s3">, </span><span class="s1">SWITCHED_PROTOCOL</span><span class="s3">): {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">SWITCHED_PROTOCOL</span><span class="s3">},</span>
+    <span class="s0"># Socket shutdown</span>
+    <span class="s3">(</span><span class="s1">CLOSED</span><span class="s3">, </span><span class="s1">DONE</span><span class="s3">): {</span><span class="s1">SERVER</span><span class="s3">: </span><span class="s1">MUST_CLOSE</span><span class="s3">},</span>
+    <span class="s3">(</span><span class="s1">CLOSED</span><span class="s3">, </span><span class="s1">IDLE</span><span class="s3">): {</span><span class="s1">SERVER</span><span class="s3">: </span><span class="s1">MUST_CLOSE</span><span class="s3">},</span>
+    <span class="s3">(</span><span class="s1">ERROR</span><span class="s3">, </span><span class="s1">DONE</span><span class="s3">): {</span><span class="s1">SERVER</span><span class="s3">: </span><span class="s1">MUST_CLOSE</span><span class="s3">},</span>
+    <span class="s3">(</span><span class="s1">DONE</span><span class="s3">, </span><span class="s1">CLOSED</span><span class="s3">): {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">MUST_CLOSE</span><span class="s3">},</span>
+    <span class="s3">(</span><span class="s1">IDLE</span><span class="s3">, </span><span class="s1">CLOSED</span><span class="s3">): {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">MUST_CLOSE</span><span class="s3">},</span>
+    <span class="s3">(</span><span class="s1">DONE</span><span class="s3">, </span><span class="s1">ERROR</span><span class="s3">): {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">MUST_CLOSE</span><span class="s3">},</span>
+<span class="s3">}</span>
+
+
+<span class="s2">class </span><span class="s1">ConnectionState</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0"># Extra bits of state that don't quite fit into the state model.</span>
+
+        <span class="s0"># If this is False then it enables the automatic DONE -&gt; MUST_CLOSE</span>
+        <span class="s0"># transition. Don't set this directly; call .keep_alive_disabled()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">keep_alive </span><span class="s3">= </span><span class="s2">True</span>
+
+        <span class="s0"># This is a subset of {UPGRADE, CONNECT}, containing the proposals</span>
+        <span class="s0"># made by the client for switching protocols.</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span><span class="s3">: </span><span class="s1">Set</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]] = </span><span class="s1">set</span><span class="s3">()</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">: </span><span class="s1">Dict</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]] = {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">IDLE</span><span class="s3">, </span><span class="s1">SERVER</span><span class="s3">: </span><span class="s1">IDLE</span><span class="s3">}</span>
+
+    <span class="s2">def </span><span class="s1">process_error</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">] = </span><span class="s1">ERROR</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fire_state_triggered_transitions</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">process_keep_alive_disabled</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">keep_alive </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fire_state_triggered_transitions</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">process_client_switch_proposal</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">switch_event</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span><span class="s3">.</span><span class="s1">add</span><span class="s3">(</span><span class="s1">switch_event</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fire_state_triggered_transitions</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">process_event</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">],</span>
+        <span class="s1">event_type</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">],</span>
+        <span class="s1">server_switch_event</span><span class="s3">: </span><span class="s1">Optional</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]] = </span><span class="s2">None</span><span class="s3">,</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">_event_type</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]] = </span><span class="s1">event_type</span>
+        <span class="s2">if </span><span class="s1">server_switch_event </span><span class="s2">is not None</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">role </span><span class="s2">is </span><span class="s1">SERVER</span>
+            <span class="s2">if </span><span class="s1">server_switch_event </span><span class="s2">not in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                    <span class="s4">&quot;Received server _SWITCH_UPGRADE event without a pending proposal&quot;</span>
+                <span class="s3">)</span>
+            <span class="s1">_event_type </span><span class="s3">= (</span><span class="s1">event_type</span><span class="s3">, </span><span class="s1">server_switch_event</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">server_switch_event </span><span class="s2">is None and </span><span class="s1">_event_type </span><span class="s2">is </span><span class="s1">Response</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals </span><span class="s3">= </span><span class="s1">set</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fire_event_triggered_transitions</span><span class="s3">(</span><span class="s1">role</span><span class="s3">, </span><span class="s1">_event_type</span><span class="s3">)</span>
+        <span class="s0"># Special case: the server state does get to see Request</span>
+        <span class="s0"># events.</span>
+        <span class="s2">if </span><span class="s1">_event_type </span><span class="s2">is </span><span class="s1">Request</span><span class="s3">:</span>
+            <span class="s2">assert </span><span class="s1">role </span><span class="s2">is </span><span class="s1">CLIENT</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_fire_event_triggered_transitions</span><span class="s3">(</span><span class="s1">SERVER</span><span class="s3">, (</span><span class="s1">Request</span><span class="s3">, </span><span class="s1">CLIENT</span><span class="s3">))</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fire_state_triggered_transitions</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_fire_event_triggered_transitions</span><span class="s3">(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">role</span><span class="s3">: </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">],</span>
+        <span class="s1">event_type</span><span class="s3">: </span><span class="s1">Union</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">Tuple</span><span class="s3">[</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Sentinel</span><span class="s3">]]],</span>
+    <span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">state </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">]</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">new_state </span><span class="s3">= </span><span class="s1">EVENT_TRIGGERED_TRANSITIONS</span><span class="s3">[</span><span class="s1">role</span><span class="s3">][</span><span class="s1">state</span><span class="s3">][</span><span class="s1">event_type</span><span class="s3">]</span>
+        <span class="s2">except </span><span class="s1">KeyError</span><span class="s3">:</span>
+            <span class="s1">event_type </span><span class="s3">= </span><span class="s1">cast</span><span class="s3">(</span><span class="s1">Type</span><span class="s3">[</span><span class="s1">Event</span><span class="s3">], </span><span class="s1">event_type</span><span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s4">&quot;can't handle event type {} when role={} and state={}&quot;</span><span class="s3">.</span><span class="s1">format</span><span class="s3">(</span>
+                    <span class="s1">event_type</span><span class="s3">.</span><span class="s1">__name__</span><span class="s3">, </span><span class="s1">role</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">]</span>
+                <span class="s3">)</span>
+            <span class="s3">) </span><span class="s2">from None</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">] = </span><span class="s1">new_state</span>
+
+    <span class="s2">def </span><span class="s1">_fire_state_triggered_transitions</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0"># We apply these rules repeatedly until converging on a fixed point</span>
+        <span class="s2">while True</span><span class="s3">:</span>
+            <span class="s1">start_states </span><span class="s3">= </span><span class="s1">dict</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">)</span>
+
+            <span class="s0"># It could happen that both these special-case transitions are</span>
+            <span class="s0"># enabled at the same time:</span>
+            <span class="s0">#</span>
+            <span class="s0">#    DONE -&gt; MIGHT_SWITCH_PROTOCOL</span>
+            <span class="s0">#    DONE -&gt; MUST_CLOSE</span>
+            <span class="s0">#</span>
+            <span class="s0"># For example, this will always be true of a HTTP/1.0 client</span>
+            <span class="s0"># requesting CONNECT.  If this happens, the protocol switch takes</span>
+            <span class="s0"># priority. From there the client will either go to</span>
+            <span class="s0"># SWITCHED_PROTOCOL, in which case it's none of our business when</span>
+            <span class="s0"># they close the connection, or else the server will deny the</span>
+            <span class="s0"># request, in which case the client will go back to DONE and then</span>
+            <span class="s0"># from there to MUST_CLOSE.</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">CLIENT</span><span class="s3">] </span><span class="s2">is </span><span class="s1">DONE</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">CLIENT</span><span class="s3">] = </span><span class="s1">MIGHT_SWITCH_PROTOCOL</span>
+
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">CLIENT</span><span class="s3">] </span><span class="s2">is </span><span class="s1">MIGHT_SWITCH_PROTOCOL</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">CLIENT</span><span class="s3">] = </span><span class="s1">DONE</span>
+
+            <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">keep_alive</span><span class="s3">:</span>
+                <span class="s2">for </span><span class="s1">role </span><span class="s2">in </span><span class="s3">(</span><span class="s1">CLIENT</span><span class="s3">, </span><span class="s1">SERVER</span><span class="s3">):</span>
+                    <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">] </span><span class="s2">is </span><span class="s1">DONE</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">role</span><span class="s3">] = </span><span class="s1">MUST_CLOSE</span>
+
+            <span class="s0"># Tabular state-triggered transitions</span>
+            <span class="s1">joint_state </span><span class="s3">= (</span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">CLIENT</span><span class="s3">], </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">[</span><span class="s1">SERVER</span><span class="s3">])</span>
+            <span class="s1">changes </span><span class="s3">= </span><span class="s1">STATE_TRIGGERED_TRANSITIONS</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">joint_state</span><span class="s3">, {})</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">changes</span><span class="s3">)</span>
+
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states </span><span class="s3">== </span><span class="s1">start_states</span><span class="s3">:</span>
+                <span class="s0"># Fixed point reached</span>
+                <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">start_next_cycle</span><span class="s3">(</span><span class="s1">self</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">states </span><span class="s3">!= {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">DONE</span><span class="s3">, </span><span class="s1">SERVER</span><span class="s3">: </span><span class="s1">DONE</span><span class="s3">}:</span>
+            <span class="s2">raise </span><span class="s1">LocalProtocolError</span><span class="s3">(</span>
+                <span class="s4">f&quot;not in a reusable state. self.states=</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">states</span><span class="s2">}</span><span class="s4">&quot;</span>
+            <span class="s3">)</span>
+        <span class="s0"># Can't reach DONE/DONE with any of these active, but still, let's be</span>
+        <span class="s0"># sure.</span>
+        <span class="s2">assert </span><span class="s1">self</span><span class="s3">.</span><span class="s1">keep_alive</span>
+        <span class="s2">assert not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">pending_switch_proposals</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">states </span><span class="s3">= {</span><span class="s1">CLIENT</span><span class="s3">: </span><span class="s1">IDLE</span><span class="s3">, </span><span class="s1">SERVER</span><span class="s3">: </span><span class="s1">IDLE</span><span class="s3">}</span>
+</pre>
+</body>
+</html>

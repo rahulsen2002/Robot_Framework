@@ -1,0 +1,376 @@
+<html>
+<head>
+<title>_scripts.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+.s6 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_scripts.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">shlex</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">import </span><span class="s1">struct</span>
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">textwrap</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Iterable</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">TypedDict</span>
+
+<span class="s0">import </span><span class="s1">pkg_resources</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">Self</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">warnings </span><span class="s0">import </span><span class="s1">SetuptoolsWarning</span>
+
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">command</span><span class="s2">.</span><span class="s1">build_scripts </span><span class="s0">import </span><span class="s1">first_line_re</span>
+<span class="s0">from </span><span class="s1">distutils</span><span class="s2">.</span><span class="s1">util </span><span class="s0">import </span><span class="s1">get_platform</span>
+
+
+<span class="s0">class </span><span class="s1">_SplitArgs</span><span class="s2">(</span><span class="s1">TypedDict</span><span class="s2">, </span><span class="s1">total</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+    <span class="s1">comments</span><span class="s2">: </span><span class="s1">bool</span>
+    <span class="s1">posix</span><span class="s2">: </span><span class="s1">bool</span>
+
+
+<span class="s0">class </span><span class="s1">CommandSpec</span><span class="s2">(</span><span class="s1">list</span><span class="s2">):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    A command spec for a #! header, specified as a list of arguments akin to 
+    those passed to Popen. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">options</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+    <span class="s1">split_args </span><span class="s2">= </span><span class="s1">_SplitArgs</span><span class="s2">()</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">best</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Choose the best CommandSpec class based on environmental conditions. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">cls</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">_sys_executable</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">):</span>
+        <span class="s1">_default </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">path</span><span class="s2">.</span><span class="s1">normpath</span><span class="s2">(</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">executable</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">'__PYVENV_LAUNCHER__'</span><span class="s2">, </span><span class="s1">_default</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">from_param</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">param</span><span class="s2">: </span><span class="s1">Self </span><span class="s2">| </span><span class="s1">str </span><span class="s2">| </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Construct a CommandSpec from a parameter to build_scripts, which may 
+        be None. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">param</span><span class="s2">, </span><span class="s1">cls</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">param</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">param</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">from_string</span><span class="s2">(</span><span class="s1">param</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">param</span><span class="s2">, </span><span class="s1">Iterable</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">param</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">param </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">from_environment</span><span class="s2">()</span>
+        <span class="s0">raise </span><span class="s1">TypeError</span><span class="s2">(</span><span class="s4">f&quot;Argument has an unsupported type </span><span class="s0">{</span><span class="s1">type</span><span class="s2">(</span><span class="s1">param</span><span class="s2">)</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">from_environment</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">):</span>
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">([</span><span class="s1">cls</span><span class="s2">.</span><span class="s1">_sys_executable</span><span class="s2">()])</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">from_string</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">string</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; Self</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Construct a command spec from a simple string representing a command 
+        line parseable by shlex.split. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">items </span><span class="s2">= </span><span class="s1">shlex</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">string</span><span class="s2">, **</span><span class="s1">cls</span><span class="s2">.</span><span class="s1">split_args</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">cls</span><span class="s2">(</span><span class="s1">items</span><span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">install_options</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">script_text</span><span class="s2">: </span><span class="s1">str</span><span class="s2">):</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">options </span><span class="s2">= </span><span class="s1">shlex</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">_extract_options</span><span class="s2">(</span><span class="s1">script_text</span><span class="s2">))</span>
+        <span class="s1">cmdline </span><span class="s2">= </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">list2cmdline</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">isascii</span><span class="s2">(</span><span class="s1">cmdline</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">options</span><span class="s2">[:</span><span class="s5">0</span><span class="s2">] = [</span><span class="s4">'-x'</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_extract_options</span><span class="s2">(</span><span class="s1">orig_script</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Extract any options from the first line of the script. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">first </span><span class="s2">= (</span><span class="s1">orig_script </span><span class="s2">+ </span><span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span><span class="s2">).</span><span class="s1">splitlines</span><span class="s2">()[</span><span class="s5">0</span><span class="s2">]</span>
+        <span class="s1">match </span><span class="s2">= </span><span class="s1">_first_line_re</span><span class="s2">().</span><span class="s1">match</span><span class="s2">(</span><span class="s1">first</span><span class="s2">)</span>
+        <span class="s1">options </span><span class="s2">= </span><span class="s1">match</span><span class="s2">.</span><span class="s1">group</span><span class="s2">(</span><span class="s5">1</span><span class="s2">) </span><span class="s0">or </span><span class="s4">'' </span><span class="s0">if </span><span class="s1">match </span><span class="s0">else </span><span class="s4">''</span>
+        <span class="s0">return </span><span class="s1">options</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">as_header</span><span class="s2">(</span><span class="s1">self</span><span class="s2">):</span>
+        <span class="s0">return </span><span class="s1">self</span><span class="s2">.</span><span class="s1">_render</span><span class="s2">(</span><span class="s1">self </span><span class="s2">+ </span><span class="s1">list</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">options</span><span class="s2">))</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_strip_quotes</span><span class="s2">(</span><span class="s1">item</span><span class="s2">):</span>
+        <span class="s1">_QUOTES </span><span class="s2">= </span><span class="s4">'&quot;</span><span class="s0">\'</span><span class="s4">'</span>
+        <span class="s0">for </span><span class="s1">q </span><span class="s0">in </span><span class="s1">_QUOTES</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">item</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s1">q</span><span class="s2">) </span><span class="s0">and </span><span class="s1">item</span><span class="s2">.</span><span class="s1">endswith</span><span class="s2">(</span><span class="s1">q</span><span class="s2">):</span>
+                <span class="s0">return </span><span class="s1">item</span><span class="s2">[</span><span class="s5">1</span><span class="s2">:-</span><span class="s5">1</span><span class="s2">]</span>
+        <span class="s0">return </span><span class="s1">item</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_render</span><span class="s2">(</span><span class="s1">items</span><span class="s2">):</span>
+        <span class="s1">cmdline </span><span class="s2">= </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">list2cmdline</span><span class="s2">(</span>
+            <span class="s1">CommandSpec</span><span class="s2">.</span><span class="s1">_strip_quotes</span><span class="s2">(</span><span class="s1">item</span><span class="s2">.</span><span class="s1">strip</span><span class="s2">()) </span><span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">items</span>
+        <span class="s2">)</span>
+        <span class="s0">return </span><span class="s4">'#!' </span><span class="s2">+ </span><span class="s1">cmdline </span><span class="s2">+ </span><span class="s4">'</span><span class="s0">\n</span><span class="s4">'</span>
+
+
+<span class="s0">class </span><span class="s1">WindowsCommandSpec</span><span class="s2">(</span><span class="s1">CommandSpec</span><span class="s2">):</span>
+    <span class="s1">split_args </span><span class="s2">= </span><span class="s1">_SplitArgs</span><span class="s2">(</span><span class="s1">posix</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">ScriptWriter</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Encapsulates behavior around writing entry point scripts for console and 
+    gui apps. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">template </span><span class="s2">= </span><span class="s1">textwrap</span><span class="s2">.</span><span class="s1">dedent</span><span class="s2">(</span>
+        <span class="s4">r&quot;&quot;&quot; 
+        # EASY-INSTALL-ENTRY-SCRIPT: %(spec)r,%(group)r,%(name)r 
+        import re 
+        import sys 
+ 
+        # for compatibility with easy_install; see #2198 
+        __requires__ = %(spec)r 
+ 
+        try: 
+            from importlib.metadata import distribution 
+        except ImportError: 
+            try: 
+                from importlib_metadata import distribution 
+            except ImportError: 
+                from pkg_resources import load_entry_point 
+ 
+ 
+        def importlib_load_entry_point(spec, group, name): 
+            dist_name, _, _ = spec.partition('==') 
+            matches = ( 
+                entry_point 
+                for entry_point in distribution(dist_name).entry_points 
+                if entry_point.group == group and entry_point.name == name 
+            ) 
+            return next(matches).load() 
+ 
+ 
+        globals().setdefault('load_entry_point', importlib_load_entry_point) 
+ 
+ 
+        if __name__ == '__main__': 
+            sys.argv[0] = re.sub(r'(-script\.pyw?|\.exe)?$', '', sys.argv[0]) 
+            sys.exit(load_entry_point(%(spec)r, %(group)r, %(name)r)()) 
+        &quot;&quot;&quot;</span>
+    <span class="s2">).</span><span class="s1">lstrip</span><span class="s2">()</span>
+
+    <span class="s1">command_spec_class </span><span class="s2">= </span><span class="s1">CommandSpec</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">get_args</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">dist</span><span class="s2">, </span><span class="s1">header</span><span class="s2">=</span><span class="s0">None</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Yield write_script() argument tuples for a distribution's 
+        console_scripts and gui_scripts entry points. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">header </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">header </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">get_header</span><span class="s2">()</span>
+        <span class="s1">spec </span><span class="s2">= </span><span class="s1">str</span><span class="s2">(</span><span class="s1">dist</span><span class="s2">.</span><span class="s1">as_requirement</span><span class="s2">())</span>
+        <span class="s0">for </span><span class="s1">type_ </span><span class="s0">in </span><span class="s4">'console'</span><span class="s2">, </span><span class="s4">'gui'</span><span class="s2">:</span>
+            <span class="s1">group </span><span class="s2">= </span><span class="s1">type_ </span><span class="s2">+ </span><span class="s4">'_scripts'</span>
+            <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">dist</span><span class="s2">.</span><span class="s1">get_entry_map</span><span class="s2">(</span><span class="s1">group</span><span class="s2">).</span><span class="s1">keys</span><span class="s2">():</span>
+                <span class="s1">cls</span><span class="s2">.</span><span class="s1">_ensure_safe_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">)</span>
+                <span class="s1">script_text </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">template </span><span class="s2">% </span><span class="s1">locals</span><span class="s2">()</span>
+                <span class="s1">args </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">_get_script_args</span><span class="s2">(</span><span class="s1">type_</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">header</span><span class="s2">, </span><span class="s1">script_text</span><span class="s2">)</span>
+                <span class="s0">yield from </span><span class="s1">args</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_ensure_safe_name</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Prevent paths in *_scripts entry point names. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">has_path_sep </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">search</span><span class="s2">(</span><span class="s4">r'[\\/]'</span><span class="s2">, </span><span class="s1">name</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">has_path_sep</span><span class="s2">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s4">&quot;Path separators not allowed in script names&quot;</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">best</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Select the best ScriptWriter for this environment. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s4">'win32' </span><span class="s0">or </span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s4">'java' </span><span class="s0">and </span><span class="s1">os</span><span class="s2">.</span><span class="s1">_name </span><span class="s2">== </span><span class="s4">'nt'</span><span class="s2">):</span>
+            <span class="s0">return </span><span class="s1">WindowsScriptWriter</span><span class="s2">.</span><span class="s1">best</span><span class="s2">()</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">return </span><span class="s1">cls</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">_get_script_args</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">header</span><span class="s2">, </span><span class="s1">script_text</span><span class="s2">):</span>
+        <span class="s6"># Simply write the stub with no extension.</span>
+        <span class="s0">yield </span><span class="s2">(</span><span class="s1">name</span><span class="s2">, </span><span class="s1">header </span><span class="s2">+ </span><span class="s1">script_text</span><span class="s2">)</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">get_header</span><span class="s2">(</span>
+        <span class="s1">cls</span><span class="s2">,</span>
+        <span class="s1">script_text</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s4">&quot;&quot;</span><span class="s2">,</span>
+        <span class="s1">executable</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s1">CommandSpec </span><span class="s2">| </span><span class="s1">Iterable</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] | </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s3">&quot;&quot;&quot;Create a #! line, getting options (if any) from script_text&quot;&quot;&quot;</span>
+        <span class="s1">cmd </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">command_spec_class</span><span class="s2">.</span><span class="s1">best</span><span class="s2">().</span><span class="s1">from_param</span><span class="s2">(</span><span class="s1">executable</span><span class="s2">)</span>
+        <span class="s1">cmd</span><span class="s2">.</span><span class="s1">install_options</span><span class="s2">(</span><span class="s1">script_text</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">cmd</span><span class="s2">.</span><span class="s1">as_header</span><span class="s2">()</span>
+
+
+<span class="s0">class </span><span class="s1">WindowsScriptWriter</span><span class="s2">(</span><span class="s1">ScriptWriter</span><span class="s2">):</span>
+    <span class="s1">command_spec_class </span><span class="s2">= </span><span class="s1">WindowsCommandSpec</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">best</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Select the best ScriptWriter suitable for Windows 
+        &quot;&quot;&quot;</span>
+        <span class="s1">writer_lookup </span><span class="s2">= </span><span class="s1">dict</span><span class="s2">(</span>
+            <span class="s1">executable</span><span class="s2">=</span><span class="s1">WindowsExecutableLauncherWriter</span><span class="s2">,</span>
+            <span class="s1">natural</span><span class="s2">=</span><span class="s1">cls</span><span class="s2">,</span>
+        <span class="s2">)</span>
+        <span class="s6"># for compatibility, use the executable launcher by default</span>
+        <span class="s1">launcher </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">.</span><span class="s1">get</span><span class="s2">(</span><span class="s4">'SETUPTOOLS_LAUNCHER'</span><span class="s2">, </span><span class="s4">'executable'</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">writer_lookup</span><span class="s2">[</span><span class="s1">launcher</span><span class="s2">]</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">_get_script_args</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">header</span><span class="s2">, </span><span class="s1">script_text</span><span class="s2">):</span>
+        <span class="s3">&quot;For Windows, add a .py extension&quot;</span>
+        <span class="s1">ext </span><span class="s2">= </span><span class="s1">dict</span><span class="s2">(</span><span class="s1">console</span><span class="s2">=</span><span class="s4">'.pya'</span><span class="s2">, </span><span class="s1">gui</span><span class="s2">=</span><span class="s4">'.pyw'</span><span class="s2">)[</span><span class="s1">type_</span><span class="s2">]</span>
+        <span class="s0">if </span><span class="s1">ext </span><span class="s0">not in </span><span class="s1">os</span><span class="s2">.</span><span class="s1">environ</span><span class="s2">[</span><span class="s4">'PATHEXT'</span><span class="s2">].</span><span class="s1">lower</span><span class="s2">().</span><span class="s1">split</span><span class="s2">(</span><span class="s4">';'</span><span class="s2">):</span>
+            <span class="s1">msg </span><span class="s2">= (</span>
+                <span class="s4">&quot;{ext} not listed in PATHEXT; scripts will not be &quot;</span>
+                <span class="s4">&quot;recognized as executables.&quot;</span>
+            <span class="s2">).</span><span class="s1">format</span><span class="s2">(**</span><span class="s1">locals</span><span class="s2">())</span>
+            <span class="s1">SetuptoolsWarning</span><span class="s2">.</span><span class="s1">emit</span><span class="s2">(</span><span class="s1">msg</span><span class="s2">)</span>
+        <span class="s1">old </span><span class="s2">= [</span><span class="s4">'.pya'</span><span class="s2">, </span><span class="s4">'.py'</span><span class="s2">, </span><span class="s4">'-script.py'</span><span class="s2">, </span><span class="s4">'.pyc'</span><span class="s2">, </span><span class="s4">'.pyo'</span><span class="s2">, </span><span class="s4">'.pyw'</span><span class="s2">, </span><span class="s4">'.exe'</span><span class="s2">]</span>
+        <span class="s1">old</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s1">ext</span><span class="s2">)</span>
+        <span class="s1">header </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">_adjust_header</span><span class="s2">(</span><span class="s1">type_</span><span class="s2">, </span><span class="s1">header</span><span class="s2">)</span>
+        <span class="s1">blockers </span><span class="s2">= [</span><span class="s1">name </span><span class="s2">+ </span><span class="s1">x </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">old</span><span class="s2">]</span>
+        <span class="s0">yield </span><span class="s1">name </span><span class="s2">+ </span><span class="s1">ext</span><span class="s2">, </span><span class="s1">header </span><span class="s2">+ </span><span class="s1">script_text</span><span class="s2">, </span><span class="s4">'t'</span><span class="s2">, </span><span class="s1">blockers</span>
+
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">_adjust_header</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">orig_header</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Make sure 'pythonw' is used for gui and 'python' is used for 
+        console (regardless of what sys.executable is). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pattern </span><span class="s2">= </span><span class="s4">'pythonw.exe'</span>
+        <span class="s1">repl </span><span class="s2">= </span><span class="s4">'python.exe'</span>
+        <span class="s0">if </span><span class="s1">type_ </span><span class="s2">== </span><span class="s4">'gui'</span><span class="s2">:</span>
+            <span class="s1">pattern</span><span class="s2">, </span><span class="s1">repl </span><span class="s2">= </span><span class="s1">repl</span><span class="s2">, </span><span class="s1">pattern</span>
+        <span class="s1">pattern_ob </span><span class="s2">= </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">re</span><span class="s2">.</span><span class="s1">escape</span><span class="s2">(</span><span class="s1">pattern</span><span class="s2">), </span><span class="s1">re</span><span class="s2">.</span><span class="s1">IGNORECASE</span><span class="s2">)</span>
+        <span class="s1">new_header </span><span class="s2">= </span><span class="s1">pattern_ob</span><span class="s2">.</span><span class="s1">sub</span><span class="s2">(</span><span class="s1">string</span><span class="s2">=</span><span class="s1">orig_header</span><span class="s2">, </span><span class="s1">repl</span><span class="s2">=</span><span class="s1">repl</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">new_header </span><span class="s0">if </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">_use_header</span><span class="s2">(</span><span class="s1">new_header</span><span class="s2">) </span><span class="s0">else </span><span class="s1">orig_header</span>
+
+    <span class="s2">@</span><span class="s1">staticmethod</span>
+    <span class="s0">def </span><span class="s1">_use_header</span><span class="s2">(</span><span class="s1">new_header</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Should _adjust_header use the replaced header? 
+ 
+        On non-windows systems, always use. On 
+        Windows systems, only use the replaced header if it resolves 
+        to an executable on the system. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">clean_header </span><span class="s2">= </span><span class="s1">new_header</span><span class="s2">[</span><span class="s5">2</span><span class="s2">:-</span><span class="s5">1</span><span class="s2">].</span><span class="s1">strip</span><span class="s2">(</span><span class="s4">'&quot;'</span><span class="s2">)</span>
+        <span class="s0">return </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s4">'win32' </span><span class="s0">or </span><span class="s1">shutil</span><span class="s2">.</span><span class="s1">which</span><span class="s2">(</span><span class="s1">clean_header</span><span class="s2">)</span>
+
+
+<span class="s0">class </span><span class="s1">WindowsExecutableLauncherWriter</span><span class="s2">(</span><span class="s1">WindowsScriptWriter</span><span class="s2">):</span>
+    <span class="s2">@</span><span class="s1">classmethod</span>
+    <span class="s0">def </span><span class="s1">_get_script_args</span><span class="s2">(</span><span class="s1">cls</span><span class="s2">, </span><span class="s1">type_</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">header</span><span class="s2">, </span><span class="s1">script_text</span><span class="s2">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        For Windows, add a .py extension and an .exe launcher 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">type_ </span><span class="s2">== </span><span class="s4">'gui'</span><span class="s2">:</span>
+            <span class="s1">launcher_type </span><span class="s2">= </span><span class="s4">'gui'</span>
+            <span class="s1">ext </span><span class="s2">= </span><span class="s4">'-script.pyw'</span>
+            <span class="s1">old </span><span class="s2">= [</span><span class="s4">'.pyw'</span><span class="s2">]</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">launcher_type </span><span class="s2">= </span><span class="s4">'cli'</span>
+            <span class="s1">ext </span><span class="s2">= </span><span class="s4">'-script.py'</span>
+            <span class="s1">old </span><span class="s2">= [</span><span class="s4">'.py'</span><span class="s2">, </span><span class="s4">'.pyc'</span><span class="s2">, </span><span class="s4">'.pyo'</span><span class="s2">]</span>
+        <span class="s1">hdr </span><span class="s2">= </span><span class="s1">cls</span><span class="s2">.</span><span class="s1">_adjust_header</span><span class="s2">(</span><span class="s1">type_</span><span class="s2">, </span><span class="s1">header</span><span class="s2">)</span>
+        <span class="s1">blockers </span><span class="s2">= [</span><span class="s1">name </span><span class="s2">+ </span><span class="s1">x </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">old</span><span class="s2">]</span>
+        <span class="s0">yield </span><span class="s2">(</span><span class="s1">name </span><span class="s2">+ </span><span class="s1">ext</span><span class="s2">, </span><span class="s1">hdr </span><span class="s2">+ </span><span class="s1">script_text</span><span class="s2">, </span><span class="s4">'t'</span><span class="s2">, </span><span class="s1">blockers</span><span class="s2">)</span>
+        <span class="s0">yield </span><span class="s2">(</span>
+            <span class="s1">name </span><span class="s2">+ </span><span class="s4">'.exe'</span><span class="s2">,</span>
+            <span class="s1">get_win_launcher</span><span class="s2">(</span><span class="s1">launcher_type</span><span class="s2">),</span>
+            <span class="s4">'b'</span><span class="s2">,  </span><span class="s6"># write in binary mode</span>
+        <span class="s2">)</span>
+        <span class="s0">if not </span><span class="s1">is_64bit</span><span class="s2">():</span>
+            <span class="s6"># install a manifest for the launcher to prevent Windows</span>
+            <span class="s6"># from detecting it as an installer (which it will for</span>
+            <span class="s6">#  launchers like easy_install.exe). Consider only</span>
+            <span class="s6">#  adding a manifest for launchers detected as installers.</span>
+            <span class="s6">#  See Distribute #143 for details.</span>
+            <span class="s1">m_name </span><span class="s2">= </span><span class="s1">name </span><span class="s2">+ </span><span class="s4">'.exe.manifest'</span>
+            <span class="s0">yield </span><span class="s2">(</span><span class="s1">m_name</span><span class="s2">, </span><span class="s1">load_launcher_manifest</span><span class="s2">(</span><span class="s1">name</span><span class="s2">), </span><span class="s4">'t'</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_win_launcher</span><span class="s2">(</span><span class="s1">type</span><span class="s2">):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Load the Windows launcher (executable) suitable for launching a script. 
+ 
+    `type` should be either 'cli' or 'gui' 
+ 
+    Returns the executable as a byte string. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">launcher_fn </span><span class="s2">= </span><span class="s4">f'</span><span class="s0">{</span><span class="s1">type</span><span class="s0">}</span><span class="s4">.exe'</span>
+    <span class="s0">if </span><span class="s1">is_64bit</span><span class="s2">():</span>
+        <span class="s0">if </span><span class="s1">get_platform</span><span class="s2">() == </span><span class="s4">&quot;win-arm64&quot;</span><span class="s2">:</span>
+            <span class="s1">launcher_fn </span><span class="s2">= </span><span class="s1">launcher_fn</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">(</span><span class="s4">&quot;.&quot;</span><span class="s2">, </span><span class="s4">&quot;-arm64.&quot;</span><span class="s2">)</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s1">launcher_fn </span><span class="s2">= </span><span class="s1">launcher_fn</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">(</span><span class="s4">&quot;.&quot;</span><span class="s2">, </span><span class="s4">&quot;-64.&quot;</span><span class="s2">)</span>
+    <span class="s0">else</span><span class="s2">:</span>
+        <span class="s1">launcher_fn </span><span class="s2">= </span><span class="s1">launcher_fn</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">(</span><span class="s4">&quot;.&quot;</span><span class="s2">, </span><span class="s4">&quot;-32.&quot;</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">pkg_resources</span><span class="s2">.</span><span class="s1">resource_string</span><span class="s2">(</span><span class="s4">'setuptools'</span><span class="s2">, </span><span class="s1">launcher_fn</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">load_launcher_manifest</span><span class="s2">(</span><span class="s1">name</span><span class="s2">):</span>
+    <span class="s1">manifest </span><span class="s2">= </span><span class="s1">pkg_resources</span><span class="s2">.</span><span class="s1">resource_string</span><span class="s2">(</span><span class="s1">__name__</span><span class="s2">, </span><span class="s4">'launcher manifest.xml'</span><span class="s2">)</span>
+    <span class="s0">return </span><span class="s1">manifest</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s4">'utf-8'</span><span class="s2">) % </span><span class="s1">vars</span><span class="s2">()</span>
+
+
+<span class="s0">def </span><span class="s1">_first_line_re</span><span class="s2">():</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Return a regular expression based on first_line_re suitable for matching 
+    strings. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">first_line_re</span><span class="s2">.</span><span class="s1">pattern</span><span class="s2">, </span><span class="s1">str</span><span class="s2">):</span>
+        <span class="s0">return </span><span class="s1">first_line_re</span>
+
+    <span class="s6"># first_line_re in Python &gt;=3.1.4 and &gt;=3.2.1 is a bytes pattern.</span>
+    <span class="s0">return </span><span class="s1">re</span><span class="s2">.</span><span class="s1">compile</span><span class="s2">(</span><span class="s1">first_line_re</span><span class="s2">.</span><span class="s1">pattern</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">())</span>
+
+
+<span class="s0">def </span><span class="s1">is_64bit</span><span class="s2">():</span>
+    <span class="s0">return </span><span class="s1">struct</span><span class="s2">.</span><span class="s1">calcsize</span><span class="s2">(</span><span class="s4">&quot;P&quot;</span><span class="s2">) == </span><span class="s5">8</span>
+
+
+<span class="s0">def </span><span class="s1">isascii</span><span class="s2">(</span><span class="s1">s</span><span class="s2">):</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">s</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">(</span><span class="s4">'ascii'</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">UnicodeError</span><span class="s2">:</span>
+        <span class="s0">return False</span>
+    <span class="s0">return True</span>
+</pre>
+</body>
+</html>

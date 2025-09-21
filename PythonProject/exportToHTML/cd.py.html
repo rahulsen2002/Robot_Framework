@@ -1,0 +1,417 @@
+<html>
+<head>
+<title>cd.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #5f826b; font-style: italic;}
+.s4 { color: #6aab73;}
+.s5 { color: #2aacb8;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cd.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">importlib</span>
+<span class="s0">from </span><span class="s1">codecs </span><span class="s0">import </span><span class="s1">IncrementalDecoder</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">Counter</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">lru_cache</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Counter </span><span class="s0">as </span><span class="s1">TypeCounter</span>
+
+<span class="s0">from </span><span class="s2">.</span><span class="s1">constant </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">FREQUENCIES</span><span class="s2">,</span>
+    <span class="s1">KO_NAMES</span><span class="s2">,</span>
+    <span class="s1">LANGUAGE_SUPPORTED_COUNT</span><span class="s2">,</span>
+    <span class="s1">TOO_SMALL_SEQUENCE</span><span class="s2">,</span>
+    <span class="s1">ZH_NAMES</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">md </span><span class="s0">import </span><span class="s1">is_suspiciously_successive_range</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">models </span><span class="s0">import </span><span class="s1">CoherenceMatches</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">utils </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">is_accentuated</span><span class="s2">,</span>
+    <span class="s1">is_latin</span><span class="s2">,</span>
+    <span class="s1">is_multi_byte_encoding</span><span class="s2">,</span>
+    <span class="s1">is_unicode_range_secondary</span><span class="s2">,</span>
+    <span class="s1">unicode_range</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">encoding_unicode_range</span><span class="s2">(</span><span class="s1">iana_name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Return associated unicode ranges in a single byte code page. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">is_multi_byte_encoding</span><span class="s2">(</span><span class="s1">iana_name</span><span class="s2">):</span>
+        <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s4">&quot;Function not supported on multi-byte code page&quot;</span><span class="s2">)</span>
+
+    <span class="s1">decoder </span><span class="s2">= </span><span class="s1">importlib</span><span class="s2">.</span><span class="s1">import_module</span><span class="s2">(</span><span class="s4">f&quot;encodings.</span><span class="s0">{</span><span class="s1">iana_name</span><span class="s0">}</span><span class="s4">&quot;</span><span class="s2">).</span><span class="s1">IncrementalDecoder</span>
+
+    <span class="s1">p</span><span class="s2">: </span><span class="s1">IncrementalDecoder </span><span class="s2">= </span><span class="s1">decoder</span><span class="s2">(</span><span class="s1">errors</span><span class="s2">=</span><span class="s4">&quot;ignore&quot;</span><span class="s2">)</span>
+    <span class="s1">seen_ranges</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] = {}</span>
+    <span class="s1">character_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span>
+
+    <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">0x40</span><span class="s2">, </span><span class="s5">0xFF</span><span class="s2">):</span>
+        <span class="s1">chunk</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">p</span><span class="s2">.</span><span class="s1">decode</span><span class="s2">(</span><span class="s1">bytes</span><span class="s2">([</span><span class="s1">i</span><span class="s2">]))</span>
+
+        <span class="s0">if </span><span class="s1">chunk</span><span class="s2">:</span>
+            <span class="s1">character_range</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">unicode_range</span><span class="s2">(</span><span class="s1">chunk</span><span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">character_range </span><span class="s0">is None</span><span class="s2">:</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">if </span><span class="s1">is_unicode_range_secondary</span><span class="s2">(</span><span class="s1">character_range</span><span class="s2">) </span><span class="s0">is False</span><span class="s2">:</span>
+                <span class="s0">if </span><span class="s1">character_range </span><span class="s0">not in </span><span class="s1">seen_ranges</span><span class="s2">:</span>
+                    <span class="s1">seen_ranges</span><span class="s2">[</span><span class="s1">character_range</span><span class="s2">] = </span><span class="s5">0</span>
+                <span class="s1">seen_ranges</span><span class="s2">[</span><span class="s1">character_range</span><span class="s2">] += </span><span class="s5">1</span>
+                <span class="s1">character_count </span><span class="s2">+= </span><span class="s5">1</span>
+
+    <span class="s0">return </span><span class="s1">sorted</span><span class="s2">(</span>
+        <span class="s2">[</span>
+            <span class="s1">character_range</span>
+            <span class="s0">for </span><span class="s1">character_range </span><span class="s0">in </span><span class="s1">seen_ranges</span>
+            <span class="s0">if </span><span class="s1">seen_ranges</span><span class="s2">[</span><span class="s1">character_range</span><span class="s2">] / </span><span class="s1">character_count </span><span class="s2">&gt;= </span><span class="s5">0.15</span>
+        <span class="s2">]</span>
+    <span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">unicode_range_languages</span><span class="s2">(</span><span class="s1">primary_range</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Return inferred languages used with a unicode range. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">languages</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = []</span>
+
+    <span class="s0">for </span><span class="s1">language</span><span class="s2">, </span><span class="s1">characters </span><span class="s0">in </span><span class="s1">FREQUENCIES</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+        <span class="s0">for </span><span class="s1">character </span><span class="s0">in </span><span class="s1">characters</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s1">unicode_range</span><span class="s2">(</span><span class="s1">character</span><span class="s2">) == </span><span class="s1">primary_range</span><span class="s2">:</span>
+                <span class="s1">languages</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">language</span><span class="s2">)</span>
+                <span class="s0">break</span>
+
+    <span class="s0">return </span><span class="s1">languages</span>
+
+
+<span class="s2">@</span><span class="s1">lru_cache</span><span class="s2">()</span>
+<span class="s0">def </span><span class="s1">encoding_languages</span><span class="s2">(</span><span class="s1">iana_name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Single-byte encoding language association. Some code page are heavily linked to particular language(s). 
+    This function does the correspondence. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">unicode_ranges</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">encoding_unicode_range</span><span class="s2">(</span><span class="s1">iana_name</span><span class="s2">)</span>
+    <span class="s1">primary_range</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">for </span><span class="s1">specified_range </span><span class="s0">in </span><span class="s1">unicode_ranges</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s4">&quot;Latin&quot; </span><span class="s0">not in </span><span class="s1">specified_range</span><span class="s2">:</span>
+            <span class="s1">primary_range </span><span class="s2">= </span><span class="s1">specified_range</span>
+            <span class="s0">break</span>
+
+    <span class="s0">if </span><span class="s1">primary_range </span><span class="s0">is None</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s4">&quot;Latin Based&quot;</span><span class="s2">]</span>
+
+    <span class="s0">return </span><span class="s1">unicode_range_languages</span><span class="s2">(</span><span class="s1">primary_range</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">lru_cache</span><span class="s2">()</span>
+<span class="s0">def </span><span class="s1">mb_encoding_languages</span><span class="s2">(</span><span class="s1">iana_name</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Multi-byte encoding language association. Some code page are heavily linked to particular language(s). 
+    This function does the correspondence. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s2">(</span>
+        <span class="s1">iana_name</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;shift_&quot;</span><span class="s2">)</span>
+        <span class="s0">or </span><span class="s1">iana_name</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;iso2022_jp&quot;</span><span class="s2">)</span>
+        <span class="s0">or </span><span class="s1">iana_name</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;euc_j&quot;</span><span class="s2">)</span>
+        <span class="s0">or </span><span class="s1">iana_name </span><span class="s2">== </span><span class="s4">&quot;cp932&quot;</span>
+    <span class="s2">):</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s4">&quot;Japanese&quot;</span><span class="s2">]</span>
+    <span class="s0">if </span><span class="s1">iana_name</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;gb&quot;</span><span class="s2">) </span><span class="s0">or </span><span class="s1">iana_name </span><span class="s0">in </span><span class="s1">ZH_NAMES</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s4">&quot;Chinese&quot;</span><span class="s2">]</span>
+    <span class="s0">if </span><span class="s1">iana_name</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s4">&quot;iso2022_kr&quot;</span><span class="s2">) </span><span class="s0">or </span><span class="s1">iana_name </span><span class="s0">in </span><span class="s1">KO_NAMES</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s4">&quot;Korean&quot;</span><span class="s2">]</span>
+
+    <span class="s0">return </span><span class="s2">[]</span>
+
+
+<span class="s2">@</span><span class="s1">lru_cache</span><span class="s2">(</span><span class="s1">maxsize</span><span class="s2">=</span><span class="s1">LANGUAGE_SUPPORTED_COUNT</span><span class="s2">)</span>
+<span class="s0">def </span><span class="s1">get_target_features</span><span class="s2">(</span><span class="s1">language</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">bool</span><span class="s2">, </span><span class="s1">bool</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Determine main aspects from a supported language if it contains accents and if is pure Latin. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">target_have_accents</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">target_pure_latin</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">True</span>
+
+    <span class="s0">for </span><span class="s1">character </span><span class="s0">in </span><span class="s1">FREQUENCIES</span><span class="s2">[</span><span class="s1">language</span><span class="s2">]:</span>
+        <span class="s0">if not </span><span class="s1">target_have_accents </span><span class="s0">and </span><span class="s1">is_accentuated</span><span class="s2">(</span><span class="s1">character</span><span class="s2">):</span>
+            <span class="s1">target_have_accents </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s0">if </span><span class="s1">target_pure_latin </span><span class="s0">and </span><span class="s1">is_latin</span><span class="s2">(</span><span class="s1">character</span><span class="s2">) </span><span class="s0">is False</span><span class="s2">:</span>
+            <span class="s1">target_pure_latin </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s0">return </span><span class="s1">target_have_accents</span><span class="s2">, </span><span class="s1">target_pure_latin</span>
+
+
+<span class="s0">def </span><span class="s1">alphabet_languages</span><span class="s2">(</span>
+    <span class="s1">characters</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">], </span><span class="s1">ignore_non_latin</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+<span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Return associated languages associated to given characters. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">languages</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">float</span><span class="s2">]] = []</span>
+
+    <span class="s1">source_have_accents </span><span class="s2">= </span><span class="s1">any</span><span class="s2">(</span><span class="s1">is_accentuated</span><span class="s2">(</span><span class="s1">character</span><span class="s2">) </span><span class="s0">for </span><span class="s1">character </span><span class="s0">in </span><span class="s1">characters</span><span class="s2">)</span>
+
+    <span class="s0">for </span><span class="s1">language</span><span class="s2">, </span><span class="s1">language_characters </span><span class="s0">in </span><span class="s1">FREQUENCIES</span><span class="s2">.</span><span class="s1">items</span><span class="s2">():</span>
+        <span class="s1">target_have_accents</span><span class="s2">, </span><span class="s1">target_pure_latin </span><span class="s2">= </span><span class="s1">get_target_features</span><span class="s2">(</span><span class="s1">language</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">ignore_non_latin </span><span class="s0">and </span><span class="s1">target_pure_latin </span><span class="s0">is False</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if </span><span class="s1">target_have_accents </span><span class="s0">is False and </span><span class="s1">source_have_accents</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">character_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">language_characters</span><span class="s2">)</span>
+
+        <span class="s1">character_match_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span>
+            <span class="s2">[</span><span class="s1">c </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">language_characters </span><span class="s0">if </span><span class="s1">c </span><span class="s0">in </span><span class="s1">characters</span><span class="s2">]</span>
+        <span class="s2">)</span>
+
+        <span class="s1">ratio</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">character_match_count </span><span class="s2">/ </span><span class="s1">character_count</span>
+
+        <span class="s0">if </span><span class="s1">ratio </span><span class="s2">&gt;= </span><span class="s5">0.2</span><span class="s2">:</span>
+            <span class="s1">languages</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">language</span><span class="s2">, </span><span class="s1">ratio</span><span class="s2">))</span>
+
+    <span class="s1">languages </span><span class="s2">= </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">languages</span><span class="s2">, </span><span class="s1">key</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">x</span><span class="s2">: </span><span class="s1">x</span><span class="s2">[</span><span class="s5">1</span><span class="s2">], </span><span class="s1">reverse</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+    <span class="s0">return </span><span class="s2">[</span><span class="s1">compatible_language</span><span class="s2">[</span><span class="s5">0</span><span class="s2">] </span><span class="s0">for </span><span class="s1">compatible_language </span><span class="s0">in </span><span class="s1">languages</span><span class="s2">]</span>
+
+
+<span class="s0">def </span><span class="s1">characters_popularity_compare</span><span class="s2">(</span>
+    <span class="s1">language</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">ordered_characters</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]</span>
+<span class="s2">) </span><span class="s1">-&gt; float</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Determine if a ordered characters list (by occurrence from most appearance to rarest) match a particular language. 
+    The result is a ratio between 0. (absolutely no correspondence) and 1. (near perfect fit). 
+    Beware that is function is not strict on the match in order to ease the detection. (Meaning close match is 1.) 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">language </span><span class="s0">not in </span><span class="s1">FREQUENCIES</span><span class="s2">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">language</span><span class="s0">} </span><span class="s4">not available&quot;</span><span class="s2">)</span>
+
+    <span class="s1">character_approved_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span>
+    <span class="s1">FREQUENCIES_language_set </span><span class="s2">= </span><span class="s1">set</span><span class="s2">(</span><span class="s1">FREQUENCIES</span><span class="s2">[</span><span class="s1">language</span><span class="s2">])</span>
+
+    <span class="s1">ordered_characters_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">ordered_characters</span><span class="s2">)</span>
+    <span class="s1">target_language_characters_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">FREQUENCIES</span><span class="s2">[</span><span class="s1">language</span><span class="s2">])</span>
+
+    <span class="s1">large_alphabet</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s1">target_language_characters_count </span><span class="s2">&gt; </span><span class="s5">26</span>
+
+    <span class="s0">for </span><span class="s1">character</span><span class="s2">, </span><span class="s1">character_rank </span><span class="s0">in </span><span class="s1">zip</span><span class="s2">(</span>
+        <span class="s1">ordered_characters</span><span class="s2">, </span><span class="s1">range</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">ordered_characters_count</span><span class="s2">)</span>
+    <span class="s2">):</span>
+        <span class="s0">if </span><span class="s1">character </span><span class="s0">not in </span><span class="s1">FREQUENCIES_language_set</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">character_rank_in_language</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">FREQUENCIES</span><span class="s2">[</span><span class="s1">language</span><span class="s2">].</span><span class="s1">index</span><span class="s2">(</span><span class="s1">character</span><span class="s2">)</span>
+        <span class="s1">expected_projection_ratio</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= (</span>
+            <span class="s1">target_language_characters_count </span><span class="s2">/ </span><span class="s1">ordered_characters_count</span>
+        <span class="s2">)</span>
+        <span class="s1">character_rank_projection</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">int</span><span class="s2">(</span><span class="s1">character_rank </span><span class="s2">* </span><span class="s1">expected_projection_ratio</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s2">(</span>
+            <span class="s1">large_alphabet </span><span class="s0">is False</span>
+            <span class="s0">and </span><span class="s1">abs</span><span class="s2">(</span><span class="s1">character_rank_projection </span><span class="s2">- </span><span class="s1">character_rank_in_language</span><span class="s2">) &gt; </span><span class="s5">4</span>
+        <span class="s2">):</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if </span><span class="s2">(</span>
+            <span class="s1">large_alphabet </span><span class="s0">is True</span>
+            <span class="s0">and </span><span class="s1">abs</span><span class="s2">(</span><span class="s1">character_rank_projection </span><span class="s2">- </span><span class="s1">character_rank_in_language</span><span class="s2">)</span>
+            <span class="s2">&lt; </span><span class="s1">target_language_characters_count </span><span class="s2">/ </span><span class="s5">3</span>
+        <span class="s2">):</span>
+            <span class="s1">character_approved_count </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">characters_before_source</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">FREQUENCIES</span><span class="s2">[</span><span class="s1">language</span><span class="s2">][</span>
+            <span class="s5">0</span><span class="s2">:</span><span class="s1">character_rank_in_language</span>
+        <span class="s2">]</span>
+        <span class="s1">characters_after_source</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">FREQUENCIES</span><span class="s2">[</span><span class="s1">language</span><span class="s2">][</span>
+            <span class="s1">character_rank_in_language</span><span class="s2">:</span>
+        <span class="s2">]</span>
+        <span class="s1">characters_before</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">ordered_characters</span><span class="s2">[</span><span class="s5">0</span><span class="s2">:</span><span class="s1">character_rank</span><span class="s2">]</span>
+        <span class="s1">characters_after</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">ordered_characters</span><span class="s2">[</span><span class="s1">character_rank</span><span class="s2">:]</span>
+
+        <span class="s1">before_match_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span>
+            <span class="s1">set</span><span class="s2">(</span><span class="s1">characters_before</span><span class="s2">) &amp; </span><span class="s1">set</span><span class="s2">(</span><span class="s1">characters_before_source</span><span class="s2">)</span>
+        <span class="s2">)</span>
+
+        <span class="s1">after_match_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">len</span><span class="s2">(</span>
+            <span class="s1">set</span><span class="s2">(</span><span class="s1">characters_after</span><span class="s2">) &amp; </span><span class="s1">set</span><span class="s2">(</span><span class="s1">characters_after_source</span><span class="s2">)</span>
+        <span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">characters_before_source</span><span class="s2">) == </span><span class="s5">0 </span><span class="s0">and </span><span class="s1">before_match_count </span><span class="s2">&lt;= </span><span class="s5">4</span><span class="s2">:</span>
+            <span class="s1">character_approved_count </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if </span><span class="s1">len</span><span class="s2">(</span><span class="s1">characters_after_source</span><span class="s2">) == </span><span class="s5">0 </span><span class="s0">and </span><span class="s1">after_match_count </span><span class="s2">&lt;= </span><span class="s5">4</span><span class="s2">:</span>
+            <span class="s1">character_approved_count </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if </span><span class="s2">(</span>
+            <span class="s1">before_match_count </span><span class="s2">/ </span><span class="s1">len</span><span class="s2">(</span><span class="s1">characters_before_source</span><span class="s2">) &gt;= </span><span class="s5">0.4</span>
+            <span class="s0">or </span><span class="s1">after_match_count </span><span class="s2">/ </span><span class="s1">len</span><span class="s2">(</span><span class="s1">characters_after_source</span><span class="s2">) &gt;= </span><span class="s5">0.4</span>
+        <span class="s2">):</span>
+            <span class="s1">character_approved_count </span><span class="s2">+= </span><span class="s5">1</span>
+            <span class="s0">continue</span>
+
+    <span class="s0">return </span><span class="s1">character_approved_count </span><span class="s2">/ </span><span class="s1">len</span><span class="s2">(</span><span class="s1">ordered_characters</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">alpha_unicode_split</span><span class="s2">(</span><span class="s1">decoded_sequence</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Given a decoded text sequence, return a list of str. Unicode range / alphabet separation. 
+    Ex. a text containing English/Latin with a bit a Hebrew will return two items in the resulting list; 
+    One containing the latin letters and the other hebrew. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">layers</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">] = {}</span>
+
+    <span class="s0">for </span><span class="s1">character </span><span class="s0">in </span><span class="s1">decoded_sequence</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">character</span><span class="s2">.</span><span class="s1">isalpha</span><span class="s2">() </span><span class="s0">is False</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">character_range</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s1">unicode_range</span><span class="s2">(</span><span class="s1">character</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">character_range </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">layer_target_range</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+        <span class="s0">for </span><span class="s1">discovered_range </span><span class="s0">in </span><span class="s1">layers</span><span class="s2">:</span>
+            <span class="s0">if </span><span class="s2">(</span>
+                <span class="s1">is_suspiciously_successive_range</span><span class="s2">(</span><span class="s1">discovered_range</span><span class="s2">, </span><span class="s1">character_range</span><span class="s2">)</span>
+                <span class="s0">is False</span>
+            <span class="s2">):</span>
+                <span class="s1">layer_target_range </span><span class="s2">= </span><span class="s1">discovered_range</span>
+                <span class="s0">break</span>
+
+        <span class="s0">if </span><span class="s1">layer_target_range </span><span class="s0">is None</span><span class="s2">:</span>
+            <span class="s1">layer_target_range </span><span class="s2">= </span><span class="s1">character_range</span>
+
+        <span class="s0">if </span><span class="s1">layer_target_range </span><span class="s0">not in </span><span class="s1">layers</span><span class="s2">:</span>
+            <span class="s1">layers</span><span class="s2">[</span><span class="s1">layer_target_range</span><span class="s2">] = </span><span class="s1">character</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">layers</span><span class="s2">[</span><span class="s1">layer_target_range</span><span class="s2">] += </span><span class="s1">character</span><span class="s2">.</span><span class="s1">lower</span><span class="s2">()</span>
+
+    <span class="s0">return </span><span class="s1">list</span><span class="s2">(</span><span class="s1">layers</span><span class="s2">.</span><span class="s1">values</span><span class="s2">())</span>
+
+
+<span class="s0">def </span><span class="s1">merge_coherence_ratios</span><span class="s2">(</span><span class="s1">results</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">CoherenceMatches</span><span class="s2">]) </span><span class="s1">-&gt; CoherenceMatches</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    This function merge results previously given by the function coherence_ratio. 
+    The return type is the same as coherence_ratio. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">per_language_ratios</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">list</span><span class="s2">[</span><span class="s1">float</span><span class="s2">]] = {}</span>
+    <span class="s0">for </span><span class="s1">result </span><span class="s0">in </span><span class="s1">results</span><span class="s2">:</span>
+        <span class="s0">for </span><span class="s1">sub_result </span><span class="s0">in </span><span class="s1">result</span><span class="s2">:</span>
+            <span class="s1">language</span><span class="s2">, </span><span class="s1">ratio </span><span class="s2">= </span><span class="s1">sub_result</span>
+            <span class="s0">if </span><span class="s1">language </span><span class="s0">not in </span><span class="s1">per_language_ratios</span><span class="s2">:</span>
+                <span class="s1">per_language_ratios</span><span class="s2">[</span><span class="s1">language</span><span class="s2">] = [</span><span class="s1">ratio</span><span class="s2">]</span>
+                <span class="s0">continue</span>
+            <span class="s1">per_language_ratios</span><span class="s2">[</span><span class="s1">language</span><span class="s2">].</span><span class="s1">append</span><span class="s2">(</span><span class="s1">ratio</span><span class="s2">)</span>
+
+    <span class="s1">merge </span><span class="s2">= [</span>
+        <span class="s2">(</span>
+            <span class="s1">language</span><span class="s2">,</span>
+            <span class="s1">round</span><span class="s2">(</span>
+                <span class="s1">sum</span><span class="s2">(</span><span class="s1">per_language_ratios</span><span class="s2">[</span><span class="s1">language</span><span class="s2">]) / </span><span class="s1">len</span><span class="s2">(</span><span class="s1">per_language_ratios</span><span class="s2">[</span><span class="s1">language</span><span class="s2">]),</span>
+                <span class="s5">4</span><span class="s2">,</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s0">for </span><span class="s1">language </span><span class="s0">in </span><span class="s1">per_language_ratios</span>
+    <span class="s2">]</span>
+
+    <span class="s0">return </span><span class="s1">sorted</span><span class="s2">(</span><span class="s1">merge</span><span class="s2">, </span><span class="s1">key</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">x</span><span class="s2">: </span><span class="s1">x</span><span class="s2">[</span><span class="s5">1</span><span class="s2">], </span><span class="s1">reverse</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+
+<span class="s0">def </span><span class="s1">filter_alt_coherence_matches</span><span class="s2">(</span><span class="s1">results</span><span class="s2">: </span><span class="s1">CoherenceMatches</span><span class="s2">) </span><span class="s1">-&gt; CoherenceMatches</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    We shall NOT return &quot;English—&quot; in CoherenceMatches because it is an alternative 
+    of &quot;English&quot;. This function only keeps the best match and remove the em-dash in it. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">index_results</span><span class="s2">: </span><span class="s1">dict</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">list</span><span class="s2">[</span><span class="s1">float</span><span class="s2">]] = </span><span class="s1">dict</span><span class="s2">()</span>
+
+    <span class="s0">for </span><span class="s1">result </span><span class="s0">in </span><span class="s1">results</span><span class="s2">:</span>
+        <span class="s1">language</span><span class="s2">, </span><span class="s1">ratio </span><span class="s2">= </span><span class="s1">result</span>
+        <span class="s1">no_em_name</span><span class="s2">: </span><span class="s1">str </span><span class="s2">= </span><span class="s1">language</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">(</span><span class="s4">&quot;—&quot;</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">no_em_name </span><span class="s0">not in </span><span class="s1">index_results</span><span class="s2">:</span>
+            <span class="s1">index_results</span><span class="s2">[</span><span class="s1">no_em_name</span><span class="s2">] = []</span>
+
+        <span class="s1">index_results</span><span class="s2">[</span><span class="s1">no_em_name</span><span class="s2">].</span><span class="s1">append</span><span class="s2">(</span><span class="s1">ratio</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">any</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">index_results</span><span class="s2">[</span><span class="s1">e</span><span class="s2">]) &gt; </span><span class="s5">1 </span><span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">index_results</span><span class="s2">):</span>
+        <span class="s1">filtered_results</span><span class="s2">: </span><span class="s1">CoherenceMatches </span><span class="s2">= []</span>
+
+        <span class="s0">for </span><span class="s1">language </span><span class="s0">in </span><span class="s1">index_results</span><span class="s2">:</span>
+            <span class="s1">filtered_results</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">language</span><span class="s2">, </span><span class="s1">max</span><span class="s2">(</span><span class="s1">index_results</span><span class="s2">[</span><span class="s1">language</span><span class="s2">])))</span>
+
+        <span class="s0">return </span><span class="s1">filtered_results</span>
+
+    <span class="s0">return </span><span class="s1">results</span>
+
+
+<span class="s2">@</span><span class="s1">lru_cache</span><span class="s2">(</span><span class="s1">maxsize</span><span class="s2">=</span><span class="s5">2048</span><span class="s2">)</span>
+<span class="s0">def </span><span class="s1">coherence_ratio</span><span class="s2">(</span>
+    <span class="s1">decoded_sequence</span><span class="s2">: </span><span class="s1">str</span><span class="s2">, </span><span class="s1">threshold</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s5">0.1</span><span class="s2">, </span><span class="s1">lg_inclusion</span><span class="s2">: </span><span class="s1">str </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+<span class="s2">) </span><span class="s1">-&gt; CoherenceMatches</span><span class="s2">:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Detect ANY language that can be identified in given sequence. The sequence will be analysed by layers. 
+    A layer = Character extraction by alphabets/ranges. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">results</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">float</span><span class="s2">]] = []</span>
+    <span class="s1">ignore_non_latin</span><span class="s2">: </span><span class="s1">bool </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s1">sufficient_match_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s5">0</span>
+
+    <span class="s1">lg_inclusion_list </span><span class="s2">= </span><span class="s1">lg_inclusion</span><span class="s2">.</span><span class="s1">split</span><span class="s2">(</span><span class="s4">&quot;,&quot;</span><span class="s2">) </span><span class="s0">if </span><span class="s1">lg_inclusion </span><span class="s0">is not None else </span><span class="s2">[]</span>
+    <span class="s0">if </span><span class="s4">&quot;Latin Based&quot; </span><span class="s0">in </span><span class="s1">lg_inclusion_list</span><span class="s2">:</span>
+        <span class="s1">ignore_non_latin </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">lg_inclusion_list</span><span class="s2">.</span><span class="s1">remove</span><span class="s2">(</span><span class="s4">&quot;Latin Based&quot;</span><span class="s2">)</span>
+
+    <span class="s0">for </span><span class="s1">layer </span><span class="s0">in </span><span class="s1">alpha_unicode_split</span><span class="s2">(</span><span class="s1">decoded_sequence</span><span class="s2">):</span>
+        <span class="s1">sequence_frequencies</span><span class="s2">: </span><span class="s1">TypeCounter</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = </span><span class="s1">Counter</span><span class="s2">(</span><span class="s1">layer</span><span class="s2">)</span>
+        <span class="s1">most_common </span><span class="s2">= </span><span class="s1">sequence_frequencies</span><span class="s2">.</span><span class="s1">most_common</span><span class="s2">()</span>
+
+        <span class="s1">character_count</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s1">sum</span><span class="s2">(</span><span class="s1">o </span><span class="s0">for </span><span class="s1">c</span><span class="s2">, </span><span class="s1">o </span><span class="s0">in </span><span class="s1">most_common</span><span class="s2">)</span>
+
+        <span class="s0">if </span><span class="s1">character_count </span><span class="s2">&lt;= </span><span class="s1">TOO_SMALL_SEQUENCE</span><span class="s2">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">popular_character_ordered</span><span class="s2">: </span><span class="s1">list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">] = [</span><span class="s1">c </span><span class="s0">for </span><span class="s1">c</span><span class="s2">, </span><span class="s1">o </span><span class="s0">in </span><span class="s1">most_common</span><span class="s2">]</span>
+
+        <span class="s0">for </span><span class="s1">language </span><span class="s0">in </span><span class="s1">lg_inclusion_list </span><span class="s0">or </span><span class="s1">alphabet_languages</span><span class="s2">(</span>
+            <span class="s1">popular_character_ordered</span><span class="s2">, </span><span class="s1">ignore_non_latin</span>
+        <span class="s2">):</span>
+            <span class="s1">ratio</span><span class="s2">: </span><span class="s1">float </span><span class="s2">= </span><span class="s1">characters_popularity_compare</span><span class="s2">(</span>
+                <span class="s1">language</span><span class="s2">, </span><span class="s1">popular_character_ordered</span>
+            <span class="s2">)</span>
+
+            <span class="s0">if </span><span class="s1">ratio </span><span class="s2">&lt; </span><span class="s1">threshold</span><span class="s2">:</span>
+                <span class="s0">continue</span>
+            <span class="s0">elif </span><span class="s1">ratio </span><span class="s2">&gt;= </span><span class="s5">0.8</span><span class="s2">:</span>
+                <span class="s1">sufficient_match_count </span><span class="s2">+= </span><span class="s5">1</span>
+
+            <span class="s1">results</span><span class="s2">.</span><span class="s1">append</span><span class="s2">((</span><span class="s1">language</span><span class="s2">, </span><span class="s1">round</span><span class="s2">(</span><span class="s1">ratio</span><span class="s2">, </span><span class="s5">4</span><span class="s2">)))</span>
+
+            <span class="s0">if </span><span class="s1">sufficient_match_count </span><span class="s2">&gt;= </span><span class="s5">3</span><span class="s2">:</span>
+                <span class="s0">break</span>
+
+    <span class="s0">return </span><span class="s1">sorted</span><span class="s2">(</span>
+        <span class="s1">filter_alt_coherence_matches</span><span class="s2">(</span><span class="s1">results</span><span class="s2">), </span><span class="s1">key</span><span class="s2">=</span><span class="s0">lambda </span><span class="s1">x</span><span class="s2">: </span><span class="s1">x</span><span class="s2">[</span><span class="s5">1</span><span class="s2">], </span><span class="s1">reverse</span><span class="s2">=</span><span class="s0">True</span>
+    <span class="s2">)</span>
+</pre>
+</body>
+</html>

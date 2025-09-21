@@ -1,0 +1,193 @@
+<html>
+<head>
+<title>test_highlevel_ssl_helpers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_highlevel_ssl_helpers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s2">, </span><span class="s1">NoReturn</span><span class="s2">, </span><span class="s1">cast</span>
+
+<span class="s0">import </span><span class="s1">attrs</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+<span class="s0">import </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">testing</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">socket </span><span class="s0">import </span><span class="s1">AF_INET</span><span class="s2">, </span><span class="s1">IPPROTO_TCP</span><span class="s2">, </span><span class="s1">SOCK_STREAM</span>
+
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_highlevel_ssl_helpers </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">open_ssl_over_tcp_listeners</span><span class="s2">,</span>
+    <span class="s1">open_ssl_over_tcp_stream</span><span class="s2">,</span>
+    <span class="s1">serve_ssl_over_tcp</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+<span class="s3"># using noqa because linters don't understand how pytest fixtures work.</span>
+<span class="s0">from </span><span class="s2">.</span><span class="s1">test_ssl </span><span class="s0">import </span><span class="s1">SERVER_CTX</span><span class="s2">, </span><span class="s1">client_ctx  </span><span class="s3"># noqa: F401</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">socket </span><span class="s0">import </span><span class="s1">AddressFamily</span><span class="s2">, </span><span class="s1">SocketKind</span>
+    <span class="s0">from </span><span class="s1">ssl </span><span class="s0">import </span><span class="s1">SSLContext</span>
+
+    <span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">Stream</span>
+
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_highlevel_socket </span><span class="s0">import </span><span class="s1">SocketListener</span>
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_ssl </span><span class="s0">import </span><span class="s1">SSLListener</span>
+
+
+<span class="s0">async def </span><span class="s1">echo_handler</span><span class="s2">(</span><span class="s1">stream</span><span class="s2">: </span><span class="s1">Stream</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">while True</span><span class="s2">:</span>
+                <span class="s1">data </span><span class="s2">= </span><span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s4">10000</span><span class="s2">)</span>
+                <span class="s0">if not </span><span class="s1">data</span><span class="s2">:</span>
+                    <span class="s0">break</span>
+                <span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">data</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+
+
+<span class="s3"># Resolver that always returns the given sockaddr, no matter what host/port</span>
+<span class="s3"># you ask for.</span>
+<span class="s2">@</span><span class="s1">attrs</span><span class="s2">.</span><span class="s1">define</span><span class="s2">(</span><span class="s1">slots</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+<span class="s0">class </span><span class="s1">FakeHostnameResolver</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">abc</span><span class="s2">.</span><span class="s1">HostnameResolver</span><span class="s2">):</span>
+    <span class="s1">sockaddr</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">]</span>
+
+    <span class="s0">async def </span><span class="s1">getaddrinfo</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">host</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">port</span><span class="s2">: </span><span class="s1">bytes </span><span class="s2">| </span><span class="s1">str </span><span class="s2">| </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+        <span class="s1">family</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s4">0</span><span class="s2">,</span>
+        <span class="s1">type</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s4">0</span><span class="s2">,</span>
+        <span class="s1">proto</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s4">0</span><span class="s2">,</span>
+        <span class="s1">flags</span><span class="s2">: </span><span class="s1">int </span><span class="s2">= </span><span class="s4">0</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span>
+        <span class="s1">tuple</span><span class="s2">[</span>
+            <span class="s1">AddressFamily</span><span class="s2">,</span>
+            <span class="s1">SocketKind</span><span class="s2">,</span>
+            <span class="s1">int</span><span class="s2">,</span>
+            <span class="s1">str</span><span class="s2">,</span>
+            <span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">int</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">],</span>
+        <span class="s2">]</span>
+    <span class="s2">]:</span>
+        <span class="s0">return </span><span class="s2">[(</span><span class="s1">AF_INET</span><span class="s2">, </span><span class="s1">SOCK_STREAM</span><span class="s2">, </span><span class="s1">IPPROTO_TCP</span><span class="s2">, </span><span class="s5">&quot;&quot;</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">sockaddr</span><span class="s2">)]</span>
+
+    <span class="s0">async def </span><span class="s1">getnameinfo</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sockaddr</span><span class="s2">: </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">] | </span><span class="s1">tuple</span><span class="s2">[</span><span class="s1">str</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">int</span><span class="s2">],</span>
+        <span class="s1">flags</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:  </span><span class="s3"># pragma: no cover</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span>
+
+
+<span class="s3"># This uses serve_ssl_over_tcp, which uses open_ssl_over_tcp_listeners...</span>
+<span class="s3"># using noqa because linters don't understand how pytest fixtures work.</span>
+<span class="s0">async def </span><span class="s1">test_open_ssl_over_tcp_stream_and_everything_else</span><span class="s2">(</span>
+    <span class="s1">client_ctx</span><span class="s2">: </span><span class="s1">SSLContext</span><span class="s2">,  </span><span class="s3"># noqa: F811 # linters doesn't understand fixture</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s3"># TODO: this function wraps an SSLListener around a SocketListener, this is illegal</span>
+        <span class="s3"># according to current type hints, and probably for good reason. But there should</span>
+        <span class="s3"># maybe be a different wrapper class/function that could be used instead?</span>
+        <span class="s1">value </span><span class="s2">= </span><span class="s0">await </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">start</span><span class="s2">(</span>
+            <span class="s1">partial</span><span class="s2">(</span>
+                <span class="s1">serve_ssl_over_tcp</span><span class="s2">,</span>
+                <span class="s1">echo_handler</span><span class="s2">,</span>
+                <span class="s4">0</span><span class="s2">,</span>
+                <span class="s1">SERVER_CTX</span><span class="s2">,</span>
+                <span class="s1">host</span><span class="s2">=</span><span class="s5">&quot;127.0.0.1&quot;</span><span class="s2">,</span>
+            <span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">value</span><span class="s2">, </span><span class="s1">list</span><span class="s2">)</span>
+        <span class="s1">res </span><span class="s2">= </span><span class="s1">cast</span><span class="s2">(</span><span class="s5">&quot;list[SSLListener[SocketListener]]&quot;</span><span class="s2">, </span><span class="s1">value</span><span class="s2">)  </span><span class="s3"># type: ignore[type-var]</span>
+        <span class="s2">(</span><span class="s1">listener</span><span class="s2">,) = </span><span class="s1">res</span>
+        <span class="s0">async with </span><span class="s1">listener</span><span class="s2">:</span>
+            <span class="s3"># listener.transport_listener is of type Listener[Stream]</span>
+            <span class="s1">tp_listener</span><span class="s2">: </span><span class="s1">SocketListener </span><span class="s2">= </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">transport_listener  </span><span class="s3"># type: ignore[assignment]</span>
+
+            <span class="s1">sockaddr </span><span class="s2">= </span><span class="s1">tp_listener</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">()</span>
+            <span class="s1">hostname_resolver </span><span class="s2">= </span><span class="s1">FakeHostnameResolver</span><span class="s2">(</span><span class="s1">sockaddr</span><span class="s2">)</span>
+            <span class="s1">trio</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">set_custom_hostname_resolver</span><span class="s2">(</span><span class="s1">hostname_resolver</span><span class="s2">)</span>
+
+            <span class="s3"># We don't have the right trust set up</span>
+            <span class="s3"># (checks that ssl_context=None is doing some validation)</span>
+            <span class="s1">stream </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_ssl_over_tcp_stream</span><span class="s2">(</span><span class="s5">&quot;trio-test-1.example.org&quot;</span><span class="s2">, </span><span class="s4">80</span><span class="s2">)</span>
+            <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+                <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError</span><span class="s2">):</span>
+                    <span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">do_handshake</span><span class="s2">()</span>
+
+            <span class="s3"># We have the trust but not the hostname</span>
+            <span class="s3"># (checks custom ssl_context + hostname checking)</span>
+            <span class="s1">stream </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_ssl_over_tcp_stream</span><span class="s2">(</span>
+                <span class="s5">&quot;xyzzy.example.org&quot;</span><span class="s2">,</span>
+                <span class="s4">80</span><span class="s2">,</span>
+                <span class="s1">ssl_context</span><span class="s2">=</span><span class="s1">client_ctx</span><span class="s2">,</span>
+            <span class="s2">)</span>
+            <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+                <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">BrokenResourceError</span><span class="s2">):</span>
+                    <span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">do_handshake</span><span class="s2">()</span>
+
+            <span class="s3"># This one should work!</span>
+            <span class="s1">stream </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_ssl_over_tcp_stream</span><span class="s2">(</span>
+                <span class="s5">&quot;trio-test-1.example.org&quot;</span><span class="s2">,</span>
+                <span class="s4">80</span><span class="s2">,</span>
+                <span class="s1">ssl_context</span><span class="s2">=</span><span class="s1">client_ctx</span><span class="s2">,</span>
+            <span class="s2">)</span>
+            <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">stream</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SSLStream</span><span class="s2">)</span>
+                <span class="s0">assert </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">server_hostname </span><span class="s2">== </span><span class="s5">&quot;trio-test-1.example.org&quot;</span>
+                <span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;x&quot;</span><span class="s2">)</span>
+                <span class="s0">assert await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s4">1</span><span class="s2">) == </span><span class="s6">b&quot;x&quot;</span>
+
+            <span class="s3"># Check https_compatible settings are being passed through</span>
+            <span class="s0">assert not </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">_https_compatible</span>
+            <span class="s1">stream </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_ssl_over_tcp_stream</span><span class="s2">(</span>
+                <span class="s5">&quot;trio-test-1.example.org&quot;</span><span class="s2">,</span>
+                <span class="s4">80</span><span class="s2">,</span>
+                <span class="s1">ssl_context</span><span class="s2">=</span><span class="s1">client_ctx</span><span class="s2">,</span>
+                <span class="s1">https_compatible</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+                <span class="s3"># also, smoke test happy_eyeballs_delay</span>
+                <span class="s1">happy_eyeballs_delay</span><span class="s2">=</span><span class="s4">1</span><span class="s2">,</span>
+            <span class="s2">)</span>
+            <span class="s0">async with </span><span class="s1">stream</span><span class="s2">:</span>
+                <span class="s0">assert </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">_https_compatible</span>
+
+            <span class="s3"># Stop the echo server</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">test_open_ssl_over_tcp_listeners</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s2">(</span><span class="s1">listener</span><span class="s2">,) = </span><span class="s0">await </span><span class="s1">open_ssl_over_tcp_listeners</span><span class="s2">(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">SERVER_CTX</span><span class="s2">, </span><span class="s1">host</span><span class="s2">=</span><span class="s5">&quot;127.0.0.1&quot;</span><span class="s2">)</span>
+    <span class="s0">async with </span><span class="s1">listener</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">listener</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SSLListener</span><span class="s2">)</span>
+        <span class="s1">tl </span><span class="s2">= </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">transport_listener</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">tl</span><span class="s2">, </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">SocketListener</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">tl</span><span class="s2">.</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">getsockname</span><span class="s2">()[</span><span class="s4">0</span><span class="s2">] == </span><span class="s5">&quot;127.0.0.1&quot;</span>
+
+        <span class="s0">assert not </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">_https_compatible</span>
+
+    <span class="s2">(</span><span class="s1">listener</span><span class="s2">,) = </span><span class="s0">await </span><span class="s1">open_ssl_over_tcp_listeners</span><span class="s2">(</span>
+        <span class="s4">0</span><span class="s2">,</span>
+        <span class="s1">SERVER_CTX</span><span class="s2">,</span>
+        <span class="s1">host</span><span class="s2">=</span><span class="s5">&quot;127.0.0.1&quot;</span><span class="s2">,</span>
+        <span class="s1">https_compatible</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">async with </span><span class="s1">listener</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">listener</span><span class="s2">.</span><span class="s1">_https_compatible</span>
+</pre>
+</body>
+</html>

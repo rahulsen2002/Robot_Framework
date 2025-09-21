@@ -1,0 +1,959 @@
+<html>
+<head>
+<title>bodyrunner.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #2aacb8;}
+.s5 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bodyrunner.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#  Copyright 2008-2015 Nokia Networks</span>
+<span class="s0">#  Copyright 2016-     Robot Framework Foundation</span>
+<span class="s0">#</span>
+<span class="s0">#  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);</span>
+<span class="s0">#  you may not use this file except in compliance with the License.</span>
+<span class="s0">#  You may obtain a copy of the License at</span>
+<span class="s0">#</span>
+<span class="s0">#      http://www.apache.org/licenses/LICENSE-2.0</span>
+<span class="s0">#</span>
+<span class="s0">#  Unless required by applicable law or agreed to in writing, software</span>
+<span class="s0">#  distributed under the License is distributed on an &quot;AS IS&quot; BASIS,</span>
+<span class="s0">#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.</span>
+<span class="s0">#  See the License for the specific language governing permissions and</span>
+<span class="s0">#  limitations under the License.</span>
+
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">OrderedDict</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">datetime</span>
+<span class="s2">from </span><span class="s1">itertools </span><span class="s2">import </span><span class="s1">zip_longest</span>
+
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">errors </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">BreakLoop</span><span class="s3">, </span><span class="s1">ContinueLoop</span><span class="s3">, </span><span class="s1">DataError</span><span class="s3">, </span><span class="s1">ExecutionFailed</span><span class="s3">, </span><span class="s1">ExecutionFailures</span><span class="s3">,</span>
+    <span class="s1">ExecutionPassed</span><span class="s3">, </span><span class="s1">ExecutionStatus</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">output </span><span class="s2">import </span><span class="s1">librarylogger </span><span class="s2">as </span><span class="s1">logger</span>
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s3">(</span>
+    <span class="s1">cut_assign_value</span><span class="s3">, </span><span class="s1">frange</span><span class="s3">, </span><span class="s1">get_error_message</span><span class="s3">, </span><span class="s1">is_list_like</span><span class="s3">, </span><span class="s1">Matcher</span><span class="s3">, </span><span class="s1">normalize</span><span class="s3">,</span>
+    <span class="s1">plural_or_not </span><span class="s2">as </span><span class="s1">s</span><span class="s3">, </span><span class="s1">secs_to_timestr</span><span class="s3">, </span><span class="s1">seq2str</span><span class="s3">, </span><span class="s1">split_from_equals</span><span class="s3">, </span><span class="s1">timestr_to_secs</span><span class="s3">,</span>
+    <span class="s1">type_name</span>
+<span class="s3">)</span>
+<span class="s2">from </span><span class="s1">robot</span><span class="s3">.</span><span class="s1">variables </span><span class="s2">import </span><span class="s1">evaluate_expression</span><span class="s3">, </span><span class="s1">is_dict_variable</span><span class="s3">, </span><span class="s1">search_variable</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">statusreporter </span><span class="s2">import </span><span class="s1">StatusReporter</span>
+
+<span class="s1">DEFAULT_WHILE_LIMIT </span><span class="s3">= </span><span class="s4">10_000</span>
+
+
+<span class="s2">class </span><span class="s1">BodyRunner</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s3">= </span><span class="s1">templated</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">errors </span><span class="s3">= []</span>
+        <span class="s1">passed </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">data</span><span class="s3">.</span><span class="s1">body</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">item</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">ExecutionPassed </span><span class="s2">as </span><span class="s1">exception</span><span class="s3">:</span>
+                <span class="s1">exception</span><span class="s3">.</span><span class="s1">set_earlier_failures</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+                <span class="s1">passed </span><span class="s3">= </span><span class="s1">exception</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s2">False</span>
+            <span class="s2">except </span><span class="s1">ExecutionFailed </span><span class="s2">as </span><span class="s1">exception</span><span class="s3">:</span>
+                <span class="s1">errors</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">exception</span><span class="s3">.</span><span class="s1">get_errors</span><span class="s3">())</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">exception</span><span class="s3">.</span><span class="s1">can_continue</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">passed</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">passed</span>
+        <span class="s2">if </span><span class="s1">errors </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">:</span>
+            <span class="s1">errors </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_handle_skip_with_templates</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">errors</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ExecutionFailures</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_handle_skip_with_templates</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">errors</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">iterations </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">filter</span><span class="s3">(</span><span class="s1">messages</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">iterations</span><span class="s3">) &lt; </span><span class="s4">2 </span><span class="s2">or not </span><span class="s1">any</span><span class="s3">(</span><span class="s1">e</span><span class="s3">.</span><span class="s1">skip </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">errors</span><span class="s3">):</span>
+            <span class="s2">return </span><span class="s1">errors</span>
+        <span class="s2">if </span><span class="s1">all</span><span class="s3">(</span><span class="s1">i</span><span class="s3">.</span><span class="s1">skipped </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">iterations</span><span class="s3">):</span>
+            <span class="s2">raise </span><span class="s1">ExecutionFailed</span><span class="s3">(</span><span class="s5">&quot;All iterations skipped.&quot;</span><span class="s3">, </span><span class="s1">skip</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s3">[</span><span class="s1">e </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">errors </span><span class="s2">if not </span><span class="s1">e</span><span class="s3">.</span><span class="s1">skip</span><span class="s3">]</span>
+
+
+<span class="s2">class </span><span class="s1">KeywordRunner</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">setup_or_teardown</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span>
+        <span class="s2">if </span><span class="s1">setup_or_teardown</span><span class="s3">:</span>
+            <span class="s1">runner </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_setup_teardown_runner</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">context</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">runner </span><span class="s3">= </span><span class="s1">context</span><span class="s3">.</span><span class="s1">get_runner</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">name</span><span class="s3">, </span><span class="s1">recommend_on_failure</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">runner</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">if </span><span class="s1">context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">runner</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">context</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_setup_teardown_runner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">context</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">name </span><span class="s3">= </span><span class="s1">context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+            <span class="s2">raise </span><span class="s1">ExecutionFailed</span><span class="s3">(</span><span class="s1">err</span><span class="s3">.</span><span class="s1">message</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">name</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">() </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;NONE&quot;</span><span class="s3">, </span><span class="s5">&quot;&quot;</span><span class="s3">):</span>
+            <span class="s2">return None</span>
+        <span class="s0"># If the matched runner accepts embedded arguments, use the original name</span>
+        <span class="s0"># instead of the one where variables are already replaced and converted to</span>
+        <span class="s0"># strings. This allows using non-string values as embedded arguments also</span>
+        <span class="s0"># in this context. An exact match after variables have been replaced has</span>
+        <span class="s0"># a precedence over a possible embedded match with the original name, though.</span>
+        <span class="s0"># BuiltIn.run_keyword has the same logic.</span>
+        <span class="s1">runner </span><span class="s3">= </span><span class="s1">context</span><span class="s3">.</span><span class="s1">get_runner</span><span class="s3">(</span><span class="s1">name</span><span class="s3">, </span><span class="s1">recommend_on_failure</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">runner</span><span class="s3">, </span><span class="s5">&quot;embedded_args&quot;</span><span class="s3">) </span><span class="s2">and </span><span class="s1">name </span><span class="s3">!= </span><span class="s1">data</span><span class="s3">.</span><span class="s1">name</span><span class="s3">:</span>
+            <span class="s1">candidate </span><span class="s3">= </span><span class="s1">context</span><span class="s3">.</span><span class="s1">get_runner</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">hasattr</span><span class="s3">(</span><span class="s1">candidate</span><span class="s3">, </span><span class="s5">&quot;embedded_args&quot;</span><span class="s3">):</span>
+                <span class="s1">runner </span><span class="s3">= </span><span class="s1">candidate</span>
+        <span class="s2">return </span><span class="s1">runner</span>
+
+
+<span class="s2">def </span><span class="s1">ForRunner</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">flavor</span><span class="s3">=</span><span class="s5">&quot;IN&quot;</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+    <span class="s1">runners </span><span class="s3">= {</span>
+        <span class="s5">&quot;IN&quot;</span><span class="s3">: </span><span class="s1">ForInRunner</span><span class="s3">,</span>
+        <span class="s5">&quot;IN RANGE&quot;</span><span class="s3">: </span><span class="s1">ForInRangeRunner</span><span class="s3">,</span>
+        <span class="s5">&quot;IN ZIP&quot;</span><span class="s3">: </span><span class="s1">ForInZipRunner</span><span class="s3">,</span>
+        <span class="s5">&quot;IN ENUMERATE&quot;</span><span class="s3">: </span><span class="s1">ForInEnumerateRunner</span><span class="s3">,</span>
+    <span class="s3">}</span>
+    <span class="s1">runner </span><span class="s3">= </span><span class="s1">runners</span><span class="s3">[</span><span class="s1">flavor </span><span class="s2">or </span><span class="s5">&quot;IN&quot;</span><span class="s3">]</span>
+    <span class="s2">return </span><span class="s1">runner</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ForInRunner</span><span class="s3">:</span>
+    <span class="s1">flavor </span><span class="s3">= </span><span class="s5">&quot;IN&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s3">= </span><span class="s1">templated</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">error </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">run </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s1">error </span><span class="s3">= </span><span class="s1">DataError</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">, </span><span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">run </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">) </span><span class="s2">as </span><span class="s1">status</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">run</span><span class="s3">:</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">assign</span><span class="s3">, </span><span class="s1">types </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_split_types</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+                    <span class="s1">values_for_rounds </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_get_values_for_rounds</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                    <span class="s1">error </span><span class="s3">= </span><span class="s1">err</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_loop</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">assign</span><span class="s3">, </span><span class="s1">types</span><span class="s3">, </span><span class="s1">values_for_rounds</span><span class="s3">):</span>
+                        <span class="s2">return</span>
+            <span class="s1">status</span><span class="s3">.</span><span class="s1">pass_status </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">NOT_RUN</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_no_run_one_round</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">error</span>
+
+    <span class="s2">def </span><span class="s1">_run_loop</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">assign</span><span class="s3">, </span><span class="s1">types</span><span class="s3">, </span><span class="s1">values_for_rounds</span><span class="s3">):</span>
+        <span class="s1">errors </span><span class="s3">= []</span>
+        <span class="s1">executed </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">for </span><span class="s1">values </span><span class="s2">in </span><span class="s1">values_for_rounds</span><span class="s3">:</span>
+            <span class="s1">executed </span><span class="s3">= </span><span class="s2">True</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_one_round</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">assign</span><span class="s3">, </span><span class="s1">types</span><span class="s3">, </span><span class="s1">values</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s3">(</span><span class="s1">BreakLoop</span><span class="s3">, </span><span class="s1">ContinueLoop</span><span class="s3">) </span><span class="s2">as </span><span class="s1">ctrl</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">ctrl</span><span class="s3">.</span><span class="s1">earlier_failures</span><span class="s3">:</span>
+                    <span class="s1">errors</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">ctrl</span><span class="s3">.</span><span class="s1">earlier_failures</span><span class="s3">.</span><span class="s1">get_errors</span><span class="s3">())</span>
+                <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">ctrl</span><span class="s3">, </span><span class="s1">BreakLoop</span><span class="s3">):</span>
+                    <span class="s2">break</span>
+            <span class="s2">except </span><span class="s1">ExecutionPassed </span><span class="s2">as </span><span class="s1">passed</span><span class="s3">:</span>
+                <span class="s1">passed</span><span class="s3">.</span><span class="s1">set_earlier_failures</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+                <span class="s2">raise </span><span class="s1">passed</span>
+            <span class="s2">except </span><span class="s1">ExecutionFailed </span><span class="s2">as </span><span class="s1">failed</span><span class="s3">:</span>
+                <span class="s1">errors</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">failed</span><span class="s3">.</span><span class="s1">get_errors</span><span class="s3">())</span>
+                <span class="s2">if not </span><span class="s1">failed</span><span class="s3">.</span><span class="s1">can_continue</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">):</span>
+                    <span class="s2">break</span>
+        <span class="s2">if </span><span class="s1">errors</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s2">and </span><span class="s1">len</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">) &gt; </span><span class="s4">1 </span><span class="s2">and </span><span class="s1">all</span><span class="s3">(</span><span class="s1">e</span><span class="s3">.</span><span class="s1">skip </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">errors</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">ExecutionFailed</span><span class="s3">(</span><span class="s5">&quot;All iterations skipped.&quot;</span><span class="s3">, </span><span class="s1">skip</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s2">raise </span><span class="s1">ExecutionFailures</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">executed</span>
+
+    <span class="s2">def </span><span class="s1">_split_types</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s2">from </span><span class="s3">.</span><span class="s1">arguments </span><span class="s2">import </span><span class="s1">TypeInfo</span>
+
+        <span class="s1">assign </span><span class="s3">= []</span>
+        <span class="s1">types </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">variable </span><span class="s2">in </span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">:</span>
+            <span class="s1">match </span><span class="s3">= </span><span class="s1">search_variable</span><span class="s3">(</span><span class="s1">variable</span><span class="s3">, </span><span class="s1">parse_type</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s1">assign</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">match</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">types</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">TypeInfo</span><span class="s3">.</span><span class="s1">from_variable</span><span class="s3">(</span><span class="s1">match</span><span class="s3">) </span><span class="s2">if </span><span class="s1">match</span><span class="s3">.</span><span class="s1">type </span><span class="s2">else None</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid FOR loop variable '</span><span class="s2">{</span><span class="s1">variable</span><span class="s2">}</span><span class="s5">': </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">assign</span><span class="s3">, </span><span class="s1">types</span>
+
+    <span class="s2">def </span><span class="s1">_get_values_for_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s3">[[</span><span class="s5">&quot;&quot;</span><span class="s3">] * </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">)]</span>
+        <span class="s1">values_per_round </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_is_dict_iteration</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">values</span><span class="s3">):</span>
+            <span class="s1">values </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_resolve_dict_values</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">values</span><span class="s3">)</span>
+            <span class="s1">values </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_map_dict_values_to_rounds</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">values_per_round</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">values </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_resolve_values</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">values</span><span class="s3">)</span>
+            <span class="s1">values </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">values_per_round</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">values</span>
+
+    <span class="s2">def </span><span class="s1">_is_dict_iteration</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s1">all_name_value </span><span class="s3">= </span><span class="s2">True</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">values</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">is_dict_variable</span><span class="s3">(</span><span class="s1">item</span><span class="s3">):</span>
+                <span class="s2">return True</span>
+            <span class="s2">if </span><span class="s1">split_from_equals</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)[</span><span class="s4">1</span><span class="s3">] </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s1">all_name_value </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">all_name_value </span><span class="s2">and </span><span class="s1">values</span><span class="s3">:</span>
+            <span class="s1">name</span><span class="s3">, </span><span class="s1">value </span><span class="s3">= </span><span class="s1">split_from_equals</span><span class="s3">(</span><span class="s1">values</span><span class="s3">[</span><span class="s4">0</span><span class="s3">])</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s5">f&quot;FOR loop iteration over values that are all in 'name=value' format &quot;</span>
+                <span class="s5">f&quot;like '</span><span class="s2">{</span><span class="s1">values</span><span class="s3">[</span><span class="s4">0</span><span class="s3">]</span><span class="s2">}</span><span class="s5">' is deprecated. In the future this syntax will &quot;</span>
+                <span class="s5">f&quot;mean iterating over names and values separately like when iterating &quot;</span>
+                <span class="s5">f&quot;over '&amp;</span><span class="s2">{{</span><span class="s5">dict</span><span class="s2">}} </span><span class="s5">variables. Escape at least one of the values like &quot;</span>
+                <span class="s5">f&quot;'</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}\\</span><span class="s5">=</span><span class="s2">{</span><span class="s1">value</span><span class="s2">}</span><span class="s5">' to use normal FOR loop iteration and to disable &quot;</span>
+                <span class="s5">f&quot;this warning.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_dict_values</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">OrderedDict</span><span class="s3">()</span>
+        <span class="s1">replace_scalar </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_scalar</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">values</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">is_dict_variable</span><span class="s3">(</span><span class="s1">item</span><span class="s3">):</span>
+                <span class="s1">result</span><span class="s3">.</span><span class="s1">update</span><span class="s3">(</span><span class="s1">replace_scalar</span><span class="s3">(</span><span class="s1">item</span><span class="s3">))</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">key</span><span class="s3">, </span><span class="s1">value </span><span class="s3">= </span><span class="s1">split_from_equals</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">value </span><span class="s2">is None</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                        <span class="s5">f&quot;Invalid FOR loop value '</span><span class="s2">{</span><span class="s1">item</span><span class="s2">}</span><span class="s5">'. When iterating &quot;</span>
+                        <span class="s5">f&quot;over dictionaries, values must be '&amp;</span><span class="s2">{{</span><span class="s5">dict</span><span class="s2">}}</span><span class="s5">' &quot;</span>
+                        <span class="s5">f&quot;variables or use 'key=value' syntax.&quot;</span><span class="s3">,</span>
+                        <span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+                    <span class="s3">)</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">result</span><span class="s3">[</span><span class="s1">replace_scalar</span><span class="s3">(</span><span class="s1">key</span><span class="s3">)] = </span><span class="s1">replace_scalar</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s1">TypeError</span><span class="s3">:</span>
+                    <span class="s1">err </span><span class="s3">= </span><span class="s1">get_error_message</span><span class="s3">()</span>
+                    <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid dictionary item '</span><span class="s2">{</span><span class="s1">item</span><span class="s2">}</span><span class="s5">': </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s3">.</span><span class="s1">items</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_map_dict_values_to_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">per_round </span><span class="s3">&gt; </span><span class="s4">2</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Number of FOR loop variables must be 1 or 2 when iterating &quot;</span>
+                <span class="s5">f&quot;over dictionaries, got </span><span class="s2">{</span><span class="s1">per_round</span><span class="s2">}</span><span class="s5">.&quot;</span><span class="s3">,</span>
+                <span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">values</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_values</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_list</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">):</span>
+        <span class="s1">count </span><span class="s3">= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">count </span><span class="s3">% </span><span class="s1">per_round </span><span class="s3">!= </span><span class="s4">0</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_raise_wrong_variable_count</span><span class="s3">(</span><span class="s1">per_round</span><span class="s3">, </span><span class="s1">count</span><span class="s3">)</span>
+        <span class="s0"># Map list of values to list of lists containing values per round.</span>
+        <span class="s2">return </span><span class="s3">(</span><span class="s1">values</span><span class="s3">[</span><span class="s1">i </span><span class="s3">: </span><span class="s1">i </span><span class="s3">+ </span><span class="s1">per_round</span><span class="s3">] </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range</span><span class="s3">(</span><span class="s4">0</span><span class="s3">, </span><span class="s1">count</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_raise_wrong_variable_count</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+            <span class="s5">f&quot;Number of FOR loop values should be multiple of its variables. &quot;</span>
+            <span class="s5">f&quot;Got </span><span class="s2">{</span><span class="s1">variables</span><span class="s2">} </span><span class="s5">variables but </span><span class="s2">{</span><span class="s1">values</span><span class="s2">} </span><span class="s5">value</span><span class="s2">{</span><span class="s1">s</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_run_one_round</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">assign</span><span class="s3">, </span><span class="s1">types</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+        <span class="s1">ctx </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span>
+        <span class="s1">iter_data </span><span class="s3">= </span><span class="s1">data</span><span class="s3">.</span><span class="s1">get_iteration</span><span class="s3">()</span>
+        <span class="s1">iter_result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_iteration</span><span class="s3">()</span>
+        <span class="s1">variables </span><span class="s3">= </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">variables </span><span class="s2">if </span><span class="s1">run </span><span class="s2">and not </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">dry_run </span><span class="s2">else </span><span class="s3">{}</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">assign</span><span class="s3">) == </span><span class="s4">1 </span><span class="s2">and </span><span class="s1">len</span><span class="s3">(</span><span class="s1">values</span><span class="s3">) != </span><span class="s4">1</span><span class="s3">:</span>
+            <span class="s1">values </span><span class="s3">= [</span><span class="s1">tuple</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)]</span>
+        <span class="s2">for </span><span class="s1">orig</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">type_info</span><span class="s3">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">zip</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">, </span><span class="s1">assign</span><span class="s3">, </span><span class="s1">types</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">type_info </span><span class="s2">and not </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s1">value </span><span class="s3">= </span><span class="s1">type_info</span><span class="s3">.</span><span class="s1">convert</span><span class="s3">(</span><span class="s1">value</span><span class="s3">, </span><span class="s1">orig</span><span class="s3">, </span><span class="s1">kind</span><span class="s3">=</span><span class="s5">&quot;FOR loop variable&quot;</span><span class="s3">)</span>
+            <span class="s1">variables</span><span class="s3">[</span><span class="s1">name</span><span class="s3">] = </span><span class="s1">value</span>
+            <span class="s1">iter_data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">[</span><span class="s1">orig</span><span class="s3">] = </span><span class="s1">value</span>
+            <span class="s1">iter_result</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">[</span><span class="s1">orig</span><span class="s3">] = </span><span class="s1">cut_assign_value</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+        <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">iter_data</span><span class="s3">, </span><span class="s1">iter_result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+            <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">iter_data</span><span class="s3">, </span><span class="s1">iter_result</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_no_run_one_round</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_one_round</span><span class="s3">(</span>
+            <span class="s1">data</span><span class="s3">,</span>
+            <span class="s1">result</span><span class="s3">,</span>
+            <span class="s1">assign</span><span class="s3">=</span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">,</span>
+            <span class="s1">types</span><span class="s3">=[</span><span class="s2">None</span><span class="s3">] * </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">),</span>
+            <span class="s1">values</span><span class="s3">=[</span><span class="s5">&quot;&quot;</span><span class="s3">] * </span><span class="s1">len</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">),</span>
+            <span class="s1">run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ForInRangeRunner</span><span class="s3">(</span><span class="s1">ForInRunner</span><span class="s3">):</span>
+    <span class="s1">flavor </span><span class="s3">= </span><span class="s5">&quot;IN RANGE&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_dict_values</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+            <span class="s5">&quot;FOR IN RANGE loops do not support iterating over dictionaries.&quot;</span><span class="s3">,</span>
+            <span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s4">1 </span><span class="s3">&lt;= </span><span class="s1">len</span><span class="s3">(</span><span class="s1">values</span><span class="s3">) &lt;= </span><span class="s4">3</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;FOR IN RANGE expected 1-3 values, got </span><span class="s2">{</span><span class="s1">len</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span><span class="s3">,</span>
+                <span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">values </span><span class="s3">= [</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_to_number_with_arithmetic</span><span class="s3">(</span><span class="s1">v</span><span class="s3">) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">values</span><span class="s3">]</span>
+        <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s1">get_error_message</span><span class="s3">()</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Converting FOR IN RANGE values failed: </span><span class="s2">{</span><span class="s1">msg</span><span class="s2">}</span><span class="s5">.&quot;</span><span class="s3">)</span>
+        <span class="s1">values </span><span class="s3">= </span><span class="s1">frange</span><span class="s3">(*</span><span class="s1">values</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">super</span><span class="s3">().</span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_to_number_with_arithmetic</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">item</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">item</span><span class="s3">, (</span><span class="s1">int</span><span class="s3">, </span><span class="s1">float</span><span class="s3">)):</span>
+            <span class="s2">return </span><span class="s1">item</span>
+        <span class="s1">number </span><span class="s3">= </span><span class="s1">eval</span><span class="s3">(</span><span class="s1">str</span><span class="s3">(</span><span class="s1">item</span><span class="s3">), {})</span>
+        <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">number</span><span class="s3">, (</span><span class="s1">int</span><span class="s3">, </span><span class="s1">float</span><span class="s3">)):</span>
+            <span class="s2">raise </span><span class="s1">TypeError</span><span class="s3">(</span><span class="s5">f&quot;Expected number, got </span><span class="s2">{</span><span class="s1">type_name</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">number</span>
+
+
+<span class="s2">class </span><span class="s1">ForInZipRunner</span><span class="s3">(</span><span class="s1">ForInRunner</span><span class="s3">):</span>
+    <span class="s1">flavor </span><span class="s3">= </span><span class="s5">&quot;IN ZIP&quot;</span>
+    <span class="s1">_mode </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s1">_fill </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_get_values_for_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_mode </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_resolve_mode</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">mode</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fill </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_resolve_fill</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">fill</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">super</span><span class="s3">().</span><span class="s1">_get_values_for_rounds</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_mode</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">mode</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">mode </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">mode </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">mode</span><span class="s3">)</span>
+            <span class="s1">valid </span><span class="s3">= (</span><span class="s5">&quot;STRICT&quot;</span><span class="s3">, </span><span class="s5">&quot;SHORTEST&quot;</span><span class="s3">, </span><span class="s5">&quot;LONGEST&quot;</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">mode</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">() </span><span class="s2">in </span><span class="s1">valid</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">mode</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">()</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Value '</span><span class="s2">{</span><span class="s1">mode</span><span class="s2">}</span><span class="s5">' is not accepted. Valid values are </span><span class="s2">{</span><span class="s1">seq2str</span><span class="s3">(</span><span class="s1">valid</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid FOR IN ZIP mode: </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_fill</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">fill</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">fill </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_scalar</span><span class="s3">(</span><span class="s1">fill</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid FOR IN ZIP fill value: </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_dict_values</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+            <span class="s5">&quot;FOR IN ZIP loops do not support iterating over dictionaries.&quot;</span><span class="s3">,</span>
+            <span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_types</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">values</span><span class="s3">) % </span><span class="s1">per_round </span><span class="s3">!= </span><span class="s4">0</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_raise_wrong_variable_count</span><span class="s3">(</span><span class="s1">per_round</span><span class="s3">, </span><span class="s1">len</span><span class="s3">(</span><span class="s1">values</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_mode </span><span class="s3">== </span><span class="s5">&quot;LONGEST&quot;</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">zip_longest</span><span class="s3">(*</span><span class="s1">values</span><span class="s3">, </span><span class="s1">fillvalue</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_fill</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_mode </span><span class="s3">== </span><span class="s5">&quot;STRICT&quot;</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_strict_lengths</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_mode </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_deprecate_different_lengths</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">zip</span><span class="s3">(*</span><span class="s1">values</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_types</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">index</span><span class="s3">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">start</span><span class="s3">=</span><span class="s4">1</span><span class="s3">):</span>
+            <span class="s2">if not </span><span class="s1">is_list_like</span><span class="s3">(</span><span class="s1">item</span><span class="s3">):</span>
+                <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                    <span class="s5">f&quot;FOR IN ZIP items must be list-like, &quot;</span>
+                    <span class="s5">f&quot;but item </span><span class="s2">{</span><span class="s1">index</span><span class="s2">} </span><span class="s5">is </span><span class="s2">{</span><span class="s1">type_name</span><span class="s3">(</span><span class="s1">item</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+                <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_strict_lengths</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s1">lengths </span><span class="s3">= []</span>
+        <span class="s2">for </span><span class="s1">index</span><span class="s3">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">start</span><span class="s3">=</span><span class="s4">1</span><span class="s3">):</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">lengths</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">len</span><span class="s3">(</span><span class="s1">item</span><span class="s3">))</span>
+            <span class="s2">except </span><span class="s1">TypeError</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                    <span class="s5">f&quot;FOR IN ZIP items must have length in the STRICT mode, &quot;</span>
+                    <span class="s5">f&quot;but item </span><span class="s2">{</span><span class="s1">index</span><span class="s2">} </span><span class="s5">does not.&quot;</span>
+                <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">len</span><span class="s3">(</span><span class="s1">set</span><span class="s3">(</span><span class="s1">lengths</span><span class="s3">)) &gt; </span><span class="s4">1</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;FOR IN ZIP items must have equal lengths in the STRICT mode, &quot;</span>
+                <span class="s5">f&quot;but lengths are </span><span class="s2">{</span><span class="s1">seq2str</span><span class="s3">(</span><span class="s1">lengths</span><span class="s3">, </span><span class="s1">quote</span><span class="s3">=</span><span class="s5">''</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+            <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_deprecate_different_lengths</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_validate_strict_lengths</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s1">logger</span><span class="s3">.</span><span class="s1">warn</span><span class="s3">(</span>
+                <span class="s5">f&quot;FOR IN ZIP default mode will be changed from SHORTEST to STRICT in &quot;</span>
+                <span class="s5">f&quot;Robot Framework 8.0. Use 'mode=SHORTEST' to keep using the SHORTEST &quot;</span>
+                <span class="s5">f&quot;mode. If the mode is not changed, execution will fail like this in &quot;</span>
+                <span class="s5">f&quot;the future: </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span>
+            <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">ForInEnumerateRunner</span><span class="s3">(</span><span class="s1">ForInRunner</span><span class="s3">):</span>
+    <span class="s1">flavor </span><span class="s3">= </span><span class="s5">&quot;IN ENUMERATE&quot;</span>
+    <span class="s1">_start </span><span class="s3">= </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">_get_values_for_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_start </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_resolve_start</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">start</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">super</span><span class="s3">().</span><span class="s1">_get_values_for_rounds</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_start</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">start</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">start </span><span class="s2">or </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s4">0</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">start </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">start</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">int</span><span class="s3">(</span><span class="s1">start</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Value must be an integer, got '</span><span class="s2">{</span><span class="s1">start</span><span class="s2">}</span><span class="s5">'.&quot;</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid FOR IN ENUMERATE start value: </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_map_dict_values_to_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">per_round </span><span class="s3">&gt; </span><span class="s4">3</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Number of FOR IN ENUMERATE loop variables must be 1-3 &quot;</span>
+                <span class="s5">f&quot;when iterating over dictionaries, got </span><span class="s2">{</span><span class="s1">per_round</span><span class="s2">}</span><span class="s5">.&quot;</span><span class="s3">,</span>
+                <span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">per_round </span><span class="s3">== </span><span class="s4">2</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s3">((</span><span class="s1">i</span><span class="s3">, </span><span class="s1">v</span><span class="s3">) </span><span class="s2">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">start</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_start</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s3">((</span><span class="s1">i</span><span class="s3">, *</span><span class="s1">v</span><span class="s3">) </span><span class="s2">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">start</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_start</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">values</span><span class="s3">, </span><span class="s1">per_round</span><span class="s3">):</span>
+        <span class="s1">values </span><span class="s3">= </span><span class="s1">super</span><span class="s3">().</span><span class="s1">_map_values_to_rounds</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">max</span><span class="s3">(</span><span class="s1">per_round </span><span class="s3">- </span><span class="s4">1</span><span class="s3">, </span><span class="s4">1</span><span class="s3">))</span>
+        <span class="s2">return </span><span class="s3">((</span><span class="s1">i</span><span class="s3">, *</span><span class="s1">v</span><span class="s3">) </span><span class="s2">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">values</span><span class="s3">, </span><span class="s1">start</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_start</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_raise_wrong_variable_count</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">, </span><span class="s1">values</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+            <span class="s5">f&quot;Number of FOR IN ENUMERATE loop values should be multiple of its &quot;</span>
+            <span class="s5">f&quot;variables (excluding the index). Got </span><span class="s2">{</span><span class="s1">variables</span><span class="s2">} </span><span class="s5">variables but &quot;</span>
+            <span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">values</span><span class="s2">} </span><span class="s5">value</span><span class="s2">{</span><span class="s1">s</span><span class="s3">(</span><span class="s1">values</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+        <span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">WhileRunner</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s3">= </span><span class="s1">templated</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">ctx </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span>
+        <span class="s1">error </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s1">run </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s1">result</span><span class="s3">.</span><span class="s1">start_time </span><span class="s3">= </span><span class="s1">datetime</span><span class="s3">.</span><span class="s1">now</span><span class="s3">()</span>
+        <span class="s1">iter_result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_iteration</span><span class="s3">(</span><span class="s1">start_time</span><span class="s3">=</span><span class="s1">datetime</span><span class="s3">.</span><span class="s1">now</span><span class="s3">())</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s1">error </span><span class="s3">= </span><span class="s1">DataError</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">, </span><span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+            <span class="s2">elif not </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">run </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_should_run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">condition</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                    <span class="s1">error </span><span class="s3">= </span><span class="s1">err</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+            <span class="s1">iter_data </span><span class="s3">= </span><span class="s1">data</span><span class="s3">.</span><span class="s1">get_iteration</span><span class="s3">()</span>
+            <span class="s2">if </span><span class="s1">run</span><span class="s3">:</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s1">limit </span><span class="s3">= </span><span class="s1">WhileLimit</span><span class="s3">.</span><span class="s1">create</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                    <span class="s1">error </span><span class="s3">= </span><span class="s1">err</span>
+                    <span class="s1">run </span><span class="s3">= </span><span class="s2">False</span>
+            <span class="s2">if </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">dry_run </span><span class="s2">or not </span><span class="s1">run</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_iteration</span><span class="s3">(</span><span class="s1">iter_data</span><span class="s3">, </span><span class="s1">iter_result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">)</span>
+                <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">error</span>
+                <span class="s2">return</span>
+            <span class="s1">errors </span><span class="s3">= []</span>
+            <span class="s2">while True</span><span class="s3">:</span>
+                <span class="s2">try</span><span class="s3">:</span>
+                    <span class="s2">with </span><span class="s1">limit</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_iteration</span><span class="s3">(</span><span class="s1">iter_data</span><span class="s3">, </span><span class="s1">iter_result</span><span class="s3">)</span>
+                <span class="s2">except </span><span class="s3">(</span><span class="s1">BreakLoop</span><span class="s3">, </span><span class="s1">ContinueLoop</span><span class="s3">) </span><span class="s2">as </span><span class="s1">ctrl</span><span class="s3">:</span>
+                    <span class="s2">if </span><span class="s1">ctrl</span><span class="s3">.</span><span class="s1">earlier_failures</span><span class="s3">:</span>
+                        <span class="s1">errors</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">ctrl</span><span class="s3">.</span><span class="s1">earlier_failures</span><span class="s3">.</span><span class="s1">get_errors</span><span class="s3">())</span>
+                    <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">ctrl</span><span class="s3">, </span><span class="s1">BreakLoop</span><span class="s3">):</span>
+                        <span class="s2">break</span>
+                <span class="s2">except </span><span class="s1">ExecutionPassed </span><span class="s2">as </span><span class="s1">passed</span><span class="s3">:</span>
+                    <span class="s1">passed</span><span class="s3">.</span><span class="s1">set_earlier_failures</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+                    <span class="s2">raise </span><span class="s1">passed</span>
+                <span class="s2">except </span><span class="s1">LimitExceeded </span><span class="s2">as </span><span class="s1">exceeded</span><span class="s3">:</span>
+                    <span class="s2">if </span><span class="s1">exceeded</span><span class="s3">.</span><span class="s1">on_limit_pass</span><span class="s3">:</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">info</span><span class="s3">(</span><span class="s1">exceeded</span><span class="s3">.</span><span class="s1">message</span><span class="s3">)</span>
+                    <span class="s2">else</span><span class="s3">:</span>
+                        <span class="s1">errors</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">exceeded</span><span class="s3">)</span>
+                    <span class="s2">break</span>
+                <span class="s2">except </span><span class="s1">ExecutionFailed </span><span class="s2">as </span><span class="s1">failed</span><span class="s3">:</span>
+                    <span class="s1">errors</span><span class="s3">.</span><span class="s1">extend</span><span class="s3">(</span><span class="s1">failed</span><span class="s3">.</span><span class="s1">get_errors</span><span class="s3">())</span>
+                    <span class="s2">if not </span><span class="s1">failed</span><span class="s3">.</span><span class="s1">can_continue</span><span class="s3">(</span><span class="s1">ctx</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">):</span>
+                        <span class="s2">break</span>
+                <span class="s1">iter_result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_iteration</span><span class="s3">(</span><span class="s1">start_time</span><span class="s3">=</span><span class="s1">datetime</span><span class="s3">.</span><span class="s1">now</span><span class="s3">())</span>
+                <span class="s1">iter_data </span><span class="s3">= </span><span class="s1">data</span><span class="s3">.</span><span class="s1">get_iteration</span><span class="s3">()</span>
+                <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_should_run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">condition</span><span class="s3">, </span><span class="s1">ctx</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">):</span>
+                    <span class="s2">break</span>
+            <span class="s2">if </span><span class="s1">errors</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">ExecutionFailures</span><span class="s3">(</span><span class="s1">errors</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_run_iteration</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+        <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+            <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_should_run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">condition</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">condition</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">evaluate_expression</span><span class="s3">(</span>
+                <span class="s1">condition</span><span class="s3">,</span>
+                <span class="s1">variables</span><span class="s3">.</span><span class="s1">current</span><span class="s3">,</span>
+                <span class="s1">resolve_variables</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s1">get_error_message</span><span class="s3">()</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid WHILE loop condition: </span><span class="s2">{</span><span class="s1">msg</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">GroupRunner</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s3">= </span><span class="s1">templated</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">:</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_initialize</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s1">run </span><span class="s3">= </span><span class="s1">error </span><span class="s2">is None</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s1">run </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s1">run</span><span class="s3">):</span>
+            <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+            <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">error</span>
+
+    <span class="s2">def </span><span class="s1">_initialize</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">DataError</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">, </span><span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">result</span><span class="s3">.</span><span class="s1">name </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">result</span><span class="s3">.</span><span class="s1">name</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">err</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">IfRunner</span><span class="s3">:</span>
+    <span class="s1">_dry_run_stack </span><span class="s3">= []</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s3">= </span><span class="s1">templated</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s2">with </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dry_run_recursion_detection</span><span class="s3">(</span><span class="s1">data</span><span class="s3">) </span><span class="s2">as </span><span class="s1">recursive_dry_run</span><span class="s3">:</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">):</span>
+                <span class="s2">for </span><span class="s1">branch </span><span class="s2">in </span><span class="s1">data</span><span class="s3">.</span><span class="s1">body</span><span class="s3">:</span>
+                    <span class="s2">try</span><span class="s3">:</span>
+                        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_if_branch</span><span class="s3">(</span>
+                            <span class="s1">branch</span><span class="s3">,</span>
+                            <span class="s1">result</span><span class="s3">,</span>
+                            <span class="s1">recursive_dry_run</span><span class="s3">,</span>
+                            <span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">,</span>
+                        <span class="s3">):</span>
+                            <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s2">False</span>
+                    <span class="s2">except </span><span class="s1">ExecutionStatus </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                        <span class="s1">error </span><span class="s3">= </span><span class="s1">err</span>
+                        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s2">False</span>
+                <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">error</span>
+
+    <span class="s3">@</span><span class="s1">contextmanager</span>
+    <span class="s2">def </span><span class="s1">_dry_run_recursion_detection</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">yield False</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">data </span><span class="s3">= </span><span class="s1">data</span><span class="s3">.</span><span class="s1">to_dict</span><span class="s3">()</span>
+            <span class="s1">recursive </span><span class="s3">= </span><span class="s1">data </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_dry_run_stack</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_dry_run_stack</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">data</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">yield </span><span class="s1">recursive</span>
+            <span class="s2">finally</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_dry_run_stack</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">_run_if_branch</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">recursive_dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">syntax_error</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">context </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_branch</span><span class="s3">(</span>
+            <span class="s1">data</span><span class="s3">.</span><span class="s1">type</span><span class="s3">,</span>
+            <span class="s1">data</span><span class="s3">.</span><span class="s1">condition</span><span class="s3">,</span>
+            <span class="s1">start_time</span><span class="s3">=</span><span class="s1">datetime</span><span class="s3">.</span><span class="s1">now</span><span class="s3">(),</span>
+        <span class="s3">)</span>
+        <span class="s1">error </span><span class="s3">= </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">syntax_error</span><span class="s3">:</span>
+            <span class="s1">run_branch </span><span class="s3">= </span><span class="s2">False</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s1">DataError</span><span class="s3">(</span><span class="s1">syntax_error</span><span class="s3">, </span><span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">run_branch </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_should_run_branch</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">recursive_dry_run</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                <span class="s1">error </span><span class="s3">= </span><span class="s1">err</span>
+                <span class="s1">run_branch </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run_branch</span><span class="s3">):</span>
+            <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">context</span><span class="s3">, </span><span class="s1">run_branch</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">recursive_dry_run</span><span class="s3">:</span>
+                <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">error </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">error</span>
+        <span class="s2">return </span><span class="s1">run_branch</span>
+
+    <span class="s2">def </span><span class="s1">_should_run_branch</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">recursive_dry_run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">context</span><span class="s3">.</span><span class="s1">dry_run</span><span class="s3">:</span>
+            <span class="s2">return not </span><span class="s1">recursive_dry_run</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span><span class="s3">:</span>
+            <span class="s2">return False</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">condition </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">evaluate_expression</span><span class="s3">(</span>
+                <span class="s1">data</span><span class="s3">.</span><span class="s1">condition</span><span class="s3">,</span>
+                <span class="s1">context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">current</span><span class="s3">,</span>
+                <span class="s1">resolve_variables</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">Exception</span><span class="s3">:</span>
+            <span class="s1">msg </span><span class="s3">= </span><span class="s1">get_error_message</span><span class="s3">()</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid </span><span class="s2">{</span><span class="s1">data</span><span class="s3">.</span><span class="s1">type</span><span class="s2">} </span><span class="s5">condition: </span><span class="s2">{</span><span class="s1">msg</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">TryRunner</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s2">False</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_context </span><span class="s3">= </span><span class="s1">context</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_run </span><span class="s3">= </span><span class="s1">run</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_templated </span><span class="s3">= </span><span class="s1">templated</span>
+
+    <span class="s2">def </span><span class="s1">run</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">run </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run</span>
+        <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+            <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_invalid</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+                <span class="s2">return</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_try</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">)</span>
+            <span class="s1">run_excepts_or_else </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_should_run_excepts_or_else</span><span class="s3">(</span><span class="s1">error</span><span class="s3">, </span><span class="s1">run</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s1">error </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_excepts</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">error</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s1">run_excepts_or_else</span><span class="s3">)</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_else</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_excepts</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">error</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+                <span class="s1">error </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_else</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s1">run_excepts_or_else</span><span class="s3">)</span>
+            <span class="s1">error </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_finally</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">) </span><span class="s2">or </span><span class="s1">error</span>
+            <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                <span class="s2">raise </span><span class="s1">error</span>
+
+    <span class="s2">def </span><span class="s1">_run_invalid</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">):</span>
+        <span class="s1">error_reported </span><span class="s3">= </span><span class="s2">False</span>
+        <span class="s2">for </span><span class="s1">branch </span><span class="s2">in </span><span class="s1">data</span><span class="s3">.</span><span class="s1">body</span><span class="s3">:</span>
+            <span class="s1">branch_result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_branch</span><span class="s3">(</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">type</span><span class="s3">,</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">patterns</span><span class="s3">,</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">pattern_type</span><span class="s3">,</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span>
+                <span class="s1">branch</span><span class="s3">,</span>
+                <span class="s1">branch_result</span><span class="s3">,</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">,</span>
+                <span class="s1">run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">,</span>
+                <span class="s1">suppress</span><span class="s3">=</span><span class="s2">True</span><span class="s3">,</span>
+            <span class="s3">):</span>
+                <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">templated</span><span class="s3">=</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+                <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">branch</span><span class="s3">, </span><span class="s1">branch_result</span><span class="s3">)</span>
+                <span class="s2">if not </span><span class="s1">error_reported</span><span class="s3">:</span>
+                    <span class="s1">error_reported </span><span class="s3">= </span><span class="s2">True</span>
+                    <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">, </span><span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+        <span class="s2">raise </span><span class="s1">ExecutionFailed</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">error</span><span class="s3">, </span><span class="s1">syntax</span><span class="s3">=</span><span class="s2">True</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_run_try</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+        <span class="s1">result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_branch</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">TRY</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_branch</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">try_branch</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_should_run_excepts_or_else</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">error</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">run</span><span class="s3">:</span>
+            <span class="s2">return False</span>
+        <span class="s2">if not </span><span class="s1">error</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s2">return not </span><span class="s3">(</span><span class="s1">error</span><span class="s3">.</span><span class="s1">skip </span><span class="s2">or </span><span class="s1">error</span><span class="s3">.</span><span class="s1">syntax </span><span class="s2">or </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">error</span><span class="s3">, </span><span class="s1">ExecutionPassed</span><span class="s3">))</span>
+
+    <span class="s2">def </span><span class="s1">_run_branch</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">True</span><span class="s3">, </span><span class="s1">error</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+                <span class="s2">if </span><span class="s1">error</span><span class="s3">:</span>
+                    <span class="s2">raise </span><span class="s1">error</span>
+                <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+                <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">ExecutionStatus </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">err</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_run_excepts</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">error</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+        <span class="s2">for </span><span class="s1">branch </span><span class="s2">in </span><span class="s1">data</span><span class="s3">.</span><span class="s1">except_branches</span><span class="s3">:</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s1">run_branch </span><span class="s3">= </span><span class="s1">run </span><span class="s2">and </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_should_run_except</span><span class="s3">(</span><span class="s1">branch</span><span class="s3">, </span><span class="s1">error</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                <span class="s1">run_branch </span><span class="s3">= </span><span class="s2">True</span>
+                <span class="s1">pattern_error </span><span class="s3">= </span><span class="s1">err</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">pattern_error </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s1">branch_result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_branch</span><span class="s3">(</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">type</span><span class="s3">,</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">patterns</span><span class="s3">,</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">pattern_type</span><span class="s3">,</span>
+                <span class="s1">branch</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">,</span>
+            <span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">run_branch</span><span class="s3">:</span>
+                <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">:</span>
+                    <span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">[</span><span class="s1">branch</span><span class="s3">.</span><span class="s1">assign</span><span class="s3">] = </span><span class="s1">str</span><span class="s3">(</span><span class="s1">error</span><span class="s3">)</span>
+                <span class="s1">error </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_branch</span><span class="s3">(</span><span class="s1">branch</span><span class="s3">, </span><span class="s1">branch_result</span><span class="s3">, </span><span class="s1">error</span><span class="s3">=</span><span class="s1">pattern_error</span><span class="s3">)</span>
+                <span class="s1">run </span><span class="s3">= </span><span class="s2">False</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">_run_branch</span><span class="s3">(</span><span class="s1">branch</span><span class="s3">, </span><span class="s1">branch_result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">=</span><span class="s2">False</span><span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">error</span>
+
+    <span class="s2">def </span><span class="s1">_should_run_except</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">branch</span><span class="s3">, </span><span class="s1">error</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">patterns</span><span class="s3">:</span>
+            <span class="s2">return True</span>
+        <span class="s1">matchers </span><span class="s3">= {</span>
+            <span class="s5">&quot;GLOB&quot;</span><span class="s3">: </span><span class="s2">lambda </span><span class="s1">m</span><span class="s3">, </span><span class="s1">p</span><span class="s3">: </span><span class="s1">Matcher</span><span class="s3">(</span><span class="s1">p</span><span class="s3">, </span><span class="s1">spaceless</span><span class="s3">=</span><span class="s2">False</span><span class="s3">, </span><span class="s1">caseless</span><span class="s3">=</span><span class="s2">False</span><span class="s3">).</span><span class="s1">match</span><span class="s3">(</span><span class="s1">m</span><span class="s3">),</span>
+            <span class="s5">&quot;REGEXP&quot;</span><span class="s3">: </span><span class="s2">lambda </span><span class="s1">m</span><span class="s3">, </span><span class="s1">p</span><span class="s3">: </span><span class="s1">re</span><span class="s3">.</span><span class="s1">fullmatch</span><span class="s3">(</span><span class="s1">p</span><span class="s3">, </span><span class="s1">m</span><span class="s3">) </span><span class="s2">is not None</span><span class="s3">,</span>
+            <span class="s5">&quot;START&quot;</span><span class="s3">: </span><span class="s2">lambda </span><span class="s1">m</span><span class="s3">, </span><span class="s1">p</span><span class="s3">: </span><span class="s1">m</span><span class="s3">.</span><span class="s1">startswith</span><span class="s3">(</span><span class="s1">p</span><span class="s3">),</span>
+            <span class="s5">&quot;LITERAL&quot;</span><span class="s3">: </span><span class="s2">lambda </span><span class="s1">m</span><span class="s3">, </span><span class="s1">p</span><span class="s3">: </span><span class="s1">m </span><span class="s3">== </span><span class="s1">p</span><span class="s3">,</span>
+        <span class="s3">}</span>
+        <span class="s2">if </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">pattern_type</span><span class="s3">:</span>
+            <span class="s1">pattern_type </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">branch</span><span class="s3">.</span><span class="s1">pattern_type</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">pattern_type </span><span class="s3">= </span><span class="s5">&quot;LITERAL&quot;</span>
+        <span class="s1">matcher </span><span class="s3">= </span><span class="s1">matchers</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s1">pattern_type</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">())</span>
+        <span class="s2">if not </span><span class="s1">matcher</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Invalid EXCEPT pattern type '</span><span class="s2">{</span><span class="s1">pattern_type</span><span class="s2">}</span><span class="s5">'. &quot;</span>
+                <span class="s5">f&quot;Valid values are </span><span class="s2">{</span><span class="s1">seq2str</span><span class="s3">(</span><span class="s1">matchers</span><span class="s3">)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">branch</span><span class="s3">.</span><span class="s1">patterns</span><span class="s3">:</span>
+            <span class="s2">if </span><span class="s1">matcher</span><span class="s3">(</span><span class="s1">error</span><span class="s3">.</span><span class="s1">message</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">.</span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">pattern</span><span class="s3">)):</span>
+                <span class="s2">return True</span>
+        <span class="s2">return False</span>
+
+    <span class="s2">def </span><span class="s1">_run_else</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">else_branch</span><span class="s3">:</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_branch</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">ELSE</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_run_branch</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">else_branch</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_run_finally</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">data</span><span class="s3">.</span><span class="s1">finally_branch</span><span class="s3">:</span>
+            <span class="s1">result </span><span class="s3">= </span><span class="s1">result</span><span class="s3">.</span><span class="s1">body</span><span class="s3">.</span><span class="s1">create_branch</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">FINALLY</span><span class="s3">)</span>
+            <span class="s2">try</span><span class="s3">:</span>
+                <span class="s2">with </span><span class="s1">StatusReporter</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">finally_branch</span><span class="s3">, </span><span class="s1">result</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">):</span>
+                    <span class="s1">runner </span><span class="s3">= </span><span class="s1">BodyRunner</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">_context</span><span class="s3">, </span><span class="s1">run</span><span class="s3">, </span><span class="s1">self</span><span class="s3">.</span><span class="s1">_templated</span><span class="s3">)</span>
+                    <span class="s1">runner</span><span class="s3">.</span><span class="s1">run</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">finally_branch</span><span class="s3">, </span><span class="s1">result</span><span class="s3">)</span>
+            <span class="s2">except </span><span class="s1">ExecutionStatus </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+                <span class="s2">return </span><span class="s1">err</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">WhileLimit</span><span class="s3">:</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">=</span><span class="s2">None</span><span class="s3">, </span><span class="s1">on_limit_message</span><span class="s3">=</span><span class="s2">None</span><span class="s3">):</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">on_limit </span><span class="s3">= </span><span class="s1">on_limit</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">on_limit_message </span><span class="s3">= </span><span class="s1">on_limit_message</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">create</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">):</span>
+        <span class="s1">limit </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">_parse_limit</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">limit</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">)</span>
+        <span class="s1">on_limit </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">_parse_on_limit</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">)</span>
+        <span class="s1">on_limit_msg </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">_parse_on_limit_message</span><span class="s3">(</span><span class="s1">data</span><span class="s3">.</span><span class="s1">on_limit_message</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">limit</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">IterationCountLimit</span><span class="s3">(</span><span class="s1">DEFAULT_WHILE_LIMIT</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_msg</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">limit</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">() == </span><span class="s5">&quot;NONE&quot;</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">NoLimit</span><span class="s3">()</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">count </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">_parse_limit_as_count</span><span class="s3">(</span><span class="s1">limit</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">ValueError</span><span class="s3">:</span>
+            <span class="s1">seconds </span><span class="s3">= </span><span class="s1">cls</span><span class="s3">.</span><span class="s1">_parse_limit_as_timestr</span><span class="s3">(</span><span class="s1">limit</span><span class="s3">)</span>
+            <span class="s2">return </span><span class="s1">DurationLimit</span><span class="s3">(</span><span class="s1">seconds</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_msg</span><span class="s3">)</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">IterationCountLimit</span><span class="s3">(</span><span class="s1">count</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_msg</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_parse_limit</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">limit</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">limit</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">limit</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid WHILE loop limit: </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_parse_on_limit</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">on_limit</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">on_limit </span><span class="s3">= </span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">on_limit</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">on_limit</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">() </span><span class="s2">in </span><span class="s3">(</span><span class="s5">&quot;PASS&quot;</span><span class="s3">, </span><span class="s5">&quot;FAIL&quot;</span><span class="s3">):</span>
+                <span class="s2">return </span><span class="s1">on_limit</span><span class="s3">.</span><span class="s1">upper</span><span class="s3">()</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Value '</span><span class="s2">{</span><span class="s1">on_limit</span><span class="s2">}</span><span class="s5">' is not accepted. Valid values are &quot;</span>
+                <span class="s5">f&quot;'PASS' and 'FAIL'.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid WHILE loop 'on_limit': </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_parse_on_limit_message</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">on_limit_message</span><span class="s3">, </span><span class="s1">variables</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">on_limit_message</span><span class="s3">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">variables</span><span class="s3">.</span><span class="s1">replace_string</span><span class="s3">(</span><span class="s1">on_limit_message</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">DataError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid WHILE loop 'on_limit_message': '</span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_parse_limit_as_count</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">limit</span><span class="s3">):</span>
+        <span class="s1">limit </span><span class="s3">= </span><span class="s1">normalize</span><span class="s3">(</span><span class="s1">limit</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">limit</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;times&quot;</span><span class="s3">):</span>
+            <span class="s1">limit </span><span class="s3">= </span><span class="s1">limit</span><span class="s3">[:-</span><span class="s4">5</span><span class="s3">]</span>
+        <span class="s2">elif </span><span class="s1">limit</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s5">&quot;x&quot;</span><span class="s3">):</span>
+            <span class="s1">limit </span><span class="s3">= </span><span class="s1">limit</span><span class="s3">[:-</span><span class="s4">1</span><span class="s3">]</span>
+        <span class="s1">count </span><span class="s3">= </span><span class="s1">int</span><span class="s3">(</span><span class="s1">limit</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">count </span><span class="s3">&lt;= </span><span class="s4">0</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span>
+                <span class="s5">f&quot;Invalid WHILE loop limit: Iteration count must be a positive &quot;</span>
+                <span class="s5">f&quot;integer, got '</span><span class="s2">{</span><span class="s1">count</span><span class="s2">}</span><span class="s5">'.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">return </span><span class="s1">count</span>
+
+    <span class="s3">@</span><span class="s1">classmethod</span>
+    <span class="s2">def </span><span class="s1">_parse_limit_as_timestr</span><span class="s3">(</span><span class="s1">cls</span><span class="s3">, </span><span class="s1">limit</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">timestr_to_secs</span><span class="s3">(</span><span class="s1">limit</span><span class="s3">)</span>
+        <span class="s2">except </span><span class="s1">ValueError </span><span class="s2">as </span><span class="s1">err</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">DataError</span><span class="s3">(</span><span class="s5">f&quot;Invalid WHILE loop limit: </span><span class="s2">{</span><span class="s1">err</span><span class="s3">.</span><span class="s1">args</span><span class="s3">[</span><span class="s4">0</span><span class="s3">]</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">limit_exceeded</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">on_limit_message</span><span class="s3">:</span>
+            <span class="s1">message </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">on_limit_message</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s1">message </span><span class="s3">= (</span>
+                <span class="s5">f&quot;WHILE loop was aborted because it did not finish within the limit &quot;</span>
+                <span class="s5">f&quot;of </span><span class="s2">{</span><span class="s1">self</span><span class="s2">}</span><span class="s5">. Use the 'limit' argument to increase or remove the limit &quot;</span>
+                <span class="s5">f&quot;if needed.&quot;</span>
+            <span class="s3">)</span>
+        <span class="s2">raise </span><span class="s1">LimitExceeded</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">on_limit </span><span class="s3">== </span><span class="s5">&quot;PASS&quot;</span><span class="s3">, </span><span class="s1">message</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">__exit__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">exc_type</span><span class="s3">, </span><span class="s1">exc_val</span><span class="s3">, </span><span class="s1">exc_tb</span><span class="s3">):</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">DurationLimit</span><span class="s3">(</span><span class="s1">WhileLimit</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">max_time</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_message</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_message</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">max_time </span><span class="s3">= </span><span class="s1">max_time</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">start_time </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if not </span><span class="s1">self</span><span class="s3">.</span><span class="s1">start_time</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">start_time </span><span class="s3">= </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">()</span>
+        <span class="s2">if </span><span class="s1">time</span><span class="s3">.</span><span class="s1">time</span><span class="s3">() - </span><span class="s1">self</span><span class="s3">.</span><span class="s1">start_time </span><span class="s3">&gt; </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_time</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">limit_exceeded</span><span class="s3">()</span>
+
+    <span class="s2">def </span><span class="s1">__str__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">secs_to_timestr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_time</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">IterationCountLimit</span><span class="s3">(</span><span class="s1">WhileLimit</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">max_iterations</span><span class="s3">, </span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_message</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">on_limit</span><span class="s3">, </span><span class="s1">on_limit_message</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">max_iterations </span><span class="s3">= </span><span class="s1">max_iterations</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">current_iterations </span><span class="s3">= </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">current_iterations </span><span class="s3">&gt;= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_iterations</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">limit_exceeded</span><span class="s3">()</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">current_iterations </span><span class="s3">+= </span><span class="s4">1</span>
+
+    <span class="s2">def </span><span class="s1">__str__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">max_iterations</span><span class="s2">} </span><span class="s5">iterations&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">NoLimit</span><span class="s3">(</span><span class="s1">WhileLimit</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__enter__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">LimitExceeded</span><span class="s3">(</span><span class="s1">ExecutionFailed</span><span class="s3">):</span>
+
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">on_limit_pass</span><span class="s3">, </span><span class="s1">message</span><span class="s3">):</span>
+        <span class="s1">super</span><span class="s3">().</span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">message</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">on_limit_pass </span><span class="s3">= </span><span class="s1">on_limit_pass</span>
+</pre>
+</body>
+</html>

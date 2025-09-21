@@ -1,0 +1,187 @@
+<html>
+<head>
+<title>ast_transforms.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #7a7e85;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #2aacb8;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ast_transforms.py</font>
+</center></td></tr></table>
+<pre><span class="s0">#------------------------------------------------------------------------------</span>
+<span class="s0"># pycparser: ast_transforms.py</span>
+<span class="s0">#</span>
+<span class="s0"># Some utilities used by the parser to create a friendlier AST.</span>
+<span class="s0">#</span>
+<span class="s0"># Eli Bendersky [https://eli.thegreenplace.net/]</span>
+<span class="s0"># License: BSD</span>
+<span class="s0">#------------------------------------------------------------------------------</span>
+
+<span class="s2">from </span><span class="s3">. </span><span class="s2">import </span><span class="s1">c_ast</span>
+
+
+<span class="s2">def </span><span class="s1">fix_switch_cases</span><span class="s3">(</span><span class="s1">switch_node</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot; The 'case' statements in a 'switch' come out of parsing with one 
+        child node, so subsequent statements are just tucked to the parent 
+        Compound. Additionally, consecutive (fall-through) case statements 
+        come out messy. This is a peculiarity of the C grammar. The following: 
+ 
+            switch (myvar) { 
+                case 10: 
+                    k = 10; 
+                    p = k + 1; 
+                    return 10; 
+                case 20: 
+                case 30: 
+                    return 20; 
+                default: 
+                    break; 
+            } 
+ 
+        Creates this tree (pseudo-dump): 
+ 
+            Switch 
+                ID: myvar 
+                Compound: 
+                    Case 10: 
+                        k = 10 
+                    p = k + 1 
+                    return 10 
+                    Case 20: 
+                        Case 30: 
+                            return 20 
+                    Default: 
+                        break 
+ 
+        The goal of this transform is to fix this mess, turning it into the 
+        following: 
+ 
+            Switch 
+                ID: myvar 
+                Compound: 
+                    Case 10: 
+                        k = 10 
+                        p = k + 1 
+                        return 10 
+                    Case 20: 
+                    Case 30: 
+                        return 20 
+                    Default: 
+                        break 
+ 
+        A fixed AST node is returned. The argument may be modified. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">switch_node</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Switch</span><span class="s3">)</span>
+    <span class="s2">if not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">switch_node</span><span class="s3">.</span><span class="s1">stmt</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Compound</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s1">switch_node</span>
+
+    <span class="s0"># The new Compound child for the Switch, which will collect children in the</span>
+    <span class="s0"># correct order</span>
+    <span class="s1">new_compound </span><span class="s3">= </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Compound</span><span class="s3">([], </span><span class="s1">switch_node</span><span class="s3">.</span><span class="s1">stmt</span><span class="s3">.</span><span class="s1">coord</span><span class="s3">)</span>
+
+    <span class="s0"># The last Case/Default node</span>
+    <span class="s1">last_case </span><span class="s3">= </span><span class="s2">None</span>
+
+    <span class="s0"># Goes over the children of the Compound below the Switch, adding them</span>
+    <span class="s0"># either directly below new_compound or below the last Case as appropriate</span>
+    <span class="s0"># (for `switch(cond) {}`, block_items would have been None)</span>
+    <span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s3">(</span><span class="s1">switch_node</span><span class="s3">.</span><span class="s1">stmt</span><span class="s3">.</span><span class="s1">block_items </span><span class="s2">or </span><span class="s3">[]):</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">child</span><span class="s3">, (</span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Case</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Default</span><span class="s3">)):</span>
+            <span class="s0"># If it's a Case/Default:</span>
+            <span class="s0"># 1. Add it to the Compound and mark as &quot;last case&quot;</span>
+            <span class="s0"># 2. If its immediate child is also a Case or Default, promote it</span>
+            <span class="s0">#    to a sibling.</span>
+            <span class="s1">new_compound</span><span class="s3">.</span><span class="s1">block_items</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">child</span><span class="s3">)</span>
+            <span class="s1">_extract_nested_case</span><span class="s3">(</span><span class="s1">child</span><span class="s3">, </span><span class="s1">new_compound</span><span class="s3">.</span><span class="s1">block_items</span><span class="s3">)</span>
+            <span class="s1">last_case </span><span class="s3">= </span><span class="s1">new_compound</span><span class="s3">.</span><span class="s1">block_items</span><span class="s3">[-</span><span class="s5">1</span><span class="s3">]</span>
+        <span class="s2">else</span><span class="s3">:</span>
+            <span class="s0"># Other statements are added as children to the last case, if it</span>
+            <span class="s0"># exists.</span>
+            <span class="s2">if </span><span class="s1">last_case </span><span class="s2">is None</span><span class="s3">:</span>
+                <span class="s1">new_compound</span><span class="s3">.</span><span class="s1">block_items</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">child</span><span class="s3">)</span>
+            <span class="s2">else</span><span class="s3">:</span>
+                <span class="s1">last_case</span><span class="s3">.</span><span class="s1">stmts</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">child</span><span class="s3">)</span>
+
+    <span class="s1">switch_node</span><span class="s3">.</span><span class="s1">stmt </span><span class="s3">= </span><span class="s1">new_compound</span>
+    <span class="s2">return </span><span class="s1">switch_node</span>
+
+
+<span class="s2">def </span><span class="s1">_extract_nested_case</span><span class="s3">(</span><span class="s1">case_node</span><span class="s3">, </span><span class="s1">stmts_list</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot; Recursively extract consecutive Case statements that are made nested 
+        by the parser and add them to the stmts_list. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">case_node</span><span class="s3">.</span><span class="s1">stmts</span><span class="s3">[</span><span class="s5">0</span><span class="s3">], (</span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Case</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Default</span><span class="s3">)):</span>
+        <span class="s1">stmts_list</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s1">case_node</span><span class="s3">.</span><span class="s1">stmts</span><span class="s3">.</span><span class="s1">pop</span><span class="s3">())</span>
+        <span class="s1">_extract_nested_case</span><span class="s3">(</span><span class="s1">stmts_list</span><span class="s3">[-</span><span class="s5">1</span><span class="s3">], </span><span class="s1">stmts_list</span><span class="s3">)</span>
+
+
+<span class="s2">def </span><span class="s1">fix_atomic_specifiers</span><span class="s3">(</span><span class="s1">decl</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot; Atomic specifiers like _Atomic(type) are unusually structured, 
+        conferring a qualifier upon the contained type. 
+ 
+        This function fixes a decl with atomic specifiers to have a sane AST 
+        structure, by removing spurious Typename-&gt;TypeDecl pairs and attaching 
+        the _Atomic qualifier in the right place. 
+    &quot;&quot;&quot;</span>
+    <span class="s0"># There can be multiple levels of _Atomic in a decl; fix them until a</span>
+    <span class="s0"># fixed point is reached.</span>
+    <span class="s2">while True</span><span class="s3">:</span>
+        <span class="s1">decl</span><span class="s3">, </span><span class="s1">found </span><span class="s3">= </span><span class="s1">_fix_atomic_specifiers_once</span><span class="s3">(</span><span class="s1">decl</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">found</span><span class="s3">:</span>
+            <span class="s2">break</span>
+
+    <span class="s0"># Make sure to add an _Atomic qual on the topmost decl if needed. Also</span>
+    <span class="s0"># restore the declname on the innermost TypeDecl (it gets placed in the</span>
+    <span class="s0"># wrong place during construction).</span>
+    <span class="s1">typ </span><span class="s3">= </span><span class="s1">decl</span>
+    <span class="s2">while not </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">typ</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">TypeDecl</span><span class="s3">):</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">typ </span><span class="s3">= </span><span class="s1">typ</span><span class="s3">.</span><span class="s1">type</span>
+        <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+            <span class="s2">return </span><span class="s1">decl</span>
+    <span class="s2">if </span><span class="s6">'_Atomic' </span><span class="s2">in </span><span class="s1">typ</span><span class="s3">.</span><span class="s1">quals </span><span class="s2">and </span><span class="s6">'_Atomic' </span><span class="s2">not in </span><span class="s1">decl</span><span class="s3">.</span><span class="s1">quals</span><span class="s3">:</span>
+        <span class="s1">decl</span><span class="s3">.</span><span class="s1">quals</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s6">'_Atomic'</span><span class="s3">)</span>
+    <span class="s2">if </span><span class="s1">typ</span><span class="s3">.</span><span class="s1">declname </span><span class="s2">is None</span><span class="s3">:</span>
+        <span class="s1">typ</span><span class="s3">.</span><span class="s1">declname </span><span class="s3">= </span><span class="s1">decl</span><span class="s3">.</span><span class="s1">name</span>
+
+    <span class="s2">return </span><span class="s1">decl</span>
+
+
+<span class="s2">def </span><span class="s1">_fix_atomic_specifiers_once</span><span class="s3">(</span><span class="s1">decl</span><span class="s3">):</span>
+    <span class="s4">&quot;&quot;&quot; Performs one 'fix' round of atomic specifiers. 
+        Returns (modified_decl, found) where found is True iff a fix was made. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parent </span><span class="s3">= </span><span class="s1">decl</span>
+    <span class="s1">grandparent </span><span class="s3">= </span><span class="s2">None</span>
+    <span class="s1">node </span><span class="s3">= </span><span class="s1">decl</span><span class="s3">.</span><span class="s1">type</span>
+    <span class="s2">while </span><span class="s1">node </span><span class="s2">is not None</span><span class="s3">:</span>
+        <span class="s2">if </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">node</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">Typename</span><span class="s3">) </span><span class="s2">and </span><span class="s6">'_Atomic' </span><span class="s2">in </span><span class="s1">node</span><span class="s3">.</span><span class="s1">quals</span><span class="s3">:</span>
+            <span class="s2">break</span>
+        <span class="s2">try</span><span class="s3">:</span>
+            <span class="s1">grandparent </span><span class="s3">= </span><span class="s1">parent</span>
+            <span class="s1">parent </span><span class="s3">= </span><span class="s1">node</span>
+            <span class="s1">node </span><span class="s3">= </span><span class="s1">node</span><span class="s3">.</span><span class="s1">type</span>
+        <span class="s2">except </span><span class="s1">AttributeError</span><span class="s3">:</span>
+            <span class="s0"># If we've reached a node without a `type` field, it means we won't</span>
+            <span class="s0"># find what we're looking for at this point; give up the search</span>
+            <span class="s0"># and return the original decl unmodified.</span>
+            <span class="s2">return </span><span class="s1">decl</span><span class="s3">, </span><span class="s2">False</span>
+
+    <span class="s2">assert </span><span class="s1">isinstance</span><span class="s3">(</span><span class="s1">parent</span><span class="s3">, </span><span class="s1">c_ast</span><span class="s3">.</span><span class="s1">TypeDecl</span><span class="s3">)</span>
+    <span class="s1">grandparent</span><span class="s3">.</span><span class="s1">type </span><span class="s3">= </span><span class="s1">node</span><span class="s3">.</span><span class="s1">type</span>
+    <span class="s2">if </span><span class="s6">'_Atomic' </span><span class="s2">not in </span><span class="s1">node</span><span class="s3">.</span><span class="s1">type</span><span class="s3">.</span><span class="s1">quals</span><span class="s3">:</span>
+        <span class="s1">node</span><span class="s3">.</span><span class="s1">type</span><span class="s3">.</span><span class="s1">quals</span><span class="s3">.</span><span class="s1">append</span><span class="s3">(</span><span class="s6">'_Atomic'</span><span class="s3">)</span>
+    <span class="s2">return </span><span class="s1">decl</span><span class="s3">, </span><span class="s2">True</span>
+</pre>
+</body>
+</html>

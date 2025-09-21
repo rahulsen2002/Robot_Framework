@@ -1,0 +1,98 @@
+<html>
+<head>
+<title>_wakeup_socketpair.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #7a7e85;}
+.s4 { color: #2aacb8;}
+.s5 { color: #a5c261;}
+.s6 { color: #6aab73;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_wakeup_socketpair.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_util </span><span class="s0">import </span><span class="s1">is_main_thread</span>
+
+
+<span class="s0">class </span><span class="s1">WakeupSocketpair</span><span class="s2">:</span>
+    <span class="s0">def </span><span class="s1">__init__</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s3"># explicitly typed to please `pyright --verifytypes` without `--ignoreexternal`</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">: </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socket</span>
+
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">, </span><span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock </span><span class="s2">= </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">socketpair</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">.</span><span class="s1">setblocking</span><span class="s2">(</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s3"># This somewhat reduces the amount of memory wasted queueing up data</span>
+        <span class="s3"># for wakeups. With these settings, maximum number of 1-byte sends</span>
+        <span class="s3"># before getting BlockingIOError:</span>
+        <span class="s3">#   Linux 4.8: 6</span>
+        <span class="s3">#   macOS (darwin 15.5): 1</span>
+        <span class="s3">#   Windows 10: 525347</span>
+        <span class="s3"># Windows you're weird. (And on Windows setting SNDBUF to 0 makes send</span>
+        <span class="s3"># blocking, even on non-blocking sockets, so don't do that.)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_SOCKET</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SO_RCVBUF</span><span class="s2">, </span><span class="s4">1</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SOL_SOCKET</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">SO_SNDBUF</span><span class="s2">, </span><span class="s4">1</span><span class="s2">)</span>
+        <span class="s3"># On Windows this is a TCP socket so this might matter. On other</span>
+        <span class="s3"># platforms this fails b/c AF_UNIX sockets aren't actually TCP.</span>
+        <span class="s0">with </span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">suppress</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">.</span><span class="s1">setsockopt</span><span class="s2">(</span><span class="s1">socket</span><span class="s2">.</span><span class="s1">IPPROTO_TCP</span><span class="s2">, </span><span class="s1">socket</span><span class="s2">.</span><span class="s1">TCP_NODELAY</span><span class="s2">, </span><span class="s4">1</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">old_wakeup_fd</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s0">None </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">wakeup_thread_and_signal_safe</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">contextlib</span><span class="s2">.</span><span class="s1">suppress</span><span class="s2">(</span><span class="s1">BlockingIOError</span><span class="s2">):</span>
+            <span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">.</span><span class="s1">send</span><span class="s2">(</span><span class="s5">b&quot;</span><span class="s0">\x00</span><span class="s5">&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">wait_woken</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">wait_readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">)</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">drain</span><span class="s2">()</span>
+
+    <span class="s0">def </span><span class="s1">drain</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">while True</span><span class="s2">:</span>
+                <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">.</span><span class="s1">recv</span><span class="s2">(</span><span class="s4">2</span><span class="s2">**</span><span class="s4">16</span><span class="s2">)</span>
+        <span class="s0">except </span><span class="s1">BlockingIOError</span><span class="s2">:</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">wakeup_on_signals</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">self</span><span class="s2">.</span><span class="s1">old_wakeup_fd </span><span class="s0">is None</span>
+        <span class="s0">if not </span><span class="s1">is_main_thread</span><span class="s2">():</span>
+            <span class="s0">return</span>
+        <span class="s1">fd </span><span class="s2">= </span><span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">old_wakeup_fd </span><span class="s2">= </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">set_wakeup_fd</span><span class="s2">(</span><span class="s1">fd</span><span class="s2">, </span><span class="s1">warn_on_full_buffer</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">old_wakeup_fd </span><span class="s2">!= -</span><span class="s4">1</span><span class="s2">:</span>
+            <span class="s1">warnings</span><span class="s2">.</span><span class="s1">warn</span><span class="s2">(</span>
+                <span class="s1">RuntimeWarning</span><span class="s2">(</span>
+                    <span class="s6">&quot;It looks like Trio's signal handling code might have &quot;</span>
+                    <span class="s6">&quot;collided with another library you're using. If you're &quot;</span>
+                    <span class="s6">&quot;running Trio in guest mode, then this might mean you &quot;</span>
+                    <span class="s6">&quot;should set host_uses_signal_set_wakeup_fd=True. &quot;</span>
+                    <span class="s6">&quot;Otherwise, file a bug on Trio and we'll help you figure &quot;</span>
+                    <span class="s6">&quot;out what's going on.&quot;</span><span class="s2">,</span>
+                <span class="s2">),</span>
+                <span class="s1">stacklevel</span><span class="s2">=</span><span class="s4">1</span><span class="s2">,</span>
+            <span class="s2">)</span>
+
+    <span class="s0">def </span><span class="s1">close</span><span class="s2">(</span><span class="s1">self</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">wakeup_sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s1">self</span><span class="s2">.</span><span class="s1">write_sock</span><span class="s2">.</span><span class="s1">close</span><span class="s2">()</span>
+        <span class="s0">if </span><span class="s1">self</span><span class="s2">.</span><span class="s1">old_wakeup_fd </span><span class="s0">is not None</span><span class="s2">:</span>
+            <span class="s1">signal</span><span class="s2">.</span><span class="s1">set_wakeup_fd</span><span class="s2">(</span><span class="s1">self</span><span class="s2">.</span><span class="s1">old_wakeup_fd</span><span class="s2">)</span>
+</pre>
+</body>
+</html>

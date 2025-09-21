@@ -1,0 +1,790 @@
+<html>
+<head>
+<title>test_subprocess.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #7a7e85;}
+.s5 { color: #2aacb8;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_subprocess.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">gc</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">random</span>
+<span class="s0">import </span><span class="s1">signal</span>
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">collections</span><span class="s2">.</span><span class="s1">abc </span><span class="s0">import </span><span class="s1">AsyncIterator</span><span class="s2">, </span><span class="s1">Callable</span>
+<span class="s0">from </span><span class="s1">contextlib </span><span class="s0">import </span><span class="s1">AbstractAsyncContextManager</span><span class="s2">, </span><span class="s1">asynccontextmanager</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">pathlib </span><span class="s0">import </span><span class="s1">Path </span><span class="s0">as </span><span class="s1">SyncPath</span>
+<span class="s0">from </span><span class="s1">signal </span><span class="s0">import </span><span class="s1">Signals</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">NoReturn</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s1">unittest </span><span class="s0">import </span><span class="s1">mock</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">import </span><span class="s1">trio</span>
+<span class="s0">from </span><span class="s1">trio</span><span class="s2">.</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">Matcher</span><span class="s2">, </span><span class="s1">RaisesGroup</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s2">(</span>
+    <span class="s1">Event</span><span class="s2">,</span>
+    <span class="s1">Process</span><span class="s2">,</span>
+    <span class="s1">_core</span><span class="s2">,</span>
+    <span class="s1">fail_after</span><span class="s2">,</span>
+    <span class="s1">move_on_after</span><span class="s2">,</span>
+    <span class="s1">run_process</span><span class="s2">,</span>
+    <span class="s1">sleep</span><span class="s2">,</span>
+    <span class="s1">sleep_forever</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_tests</span><span class="s2">.</span><span class="s1">tutil </span><span class="s0">import </span><span class="s1">skip_if_fbsd_pipes_broken</span><span class="s2">, </span><span class="s1">slow</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">lowlevel </span><span class="s0">import </span><span class="s1">open_process</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">MockClock</span><span class="s2">, </span><span class="s1">assert_no_checkpoints</span><span class="s2">, </span><span class="s1">wait_all_tasks_blocked</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">types </span><span class="s0">import </span><span class="s1">FrameType</span>
+
+    <span class="s0">from </span><span class="s1">typing_extensions </span><span class="s0">import </span><span class="s1">TypeAlias</span>
+
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_abc </span><span class="s0">import </span><span class="s1">ReceiveStream</span>
+
+<span class="s0">if </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;win32&quot;</span><span class="s2">:</span>
+    <span class="s1">SignalType</span><span class="s2">: </span><span class="s1">TypeAlias </span><span class="s2">= </span><span class="s0">None</span>
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s1">SignalType</span><span class="s2">: </span><span class="s1">TypeAlias </span><span class="s2">= </span><span class="s1">Signals</span>
+
+<span class="s1">SIGKILL</span><span class="s2">: </span><span class="s1">SignalType</span>
+<span class="s1">SIGTERM</span><span class="s2">: </span><span class="s1">SignalType</span>
+<span class="s1">SIGUSR1</span><span class="s2">: </span><span class="s1">SignalType</span>
+
+<span class="s1">posix </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s3">&quot;posix&quot;</span>
+<span class="s0">if </span><span class="s2">(</span><span class="s0">not </span><span class="s1">TYPE_CHECKING </span><span class="s0">and </span><span class="s1">posix</span><span class="s2">) </span><span class="s0">or </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;win32&quot;</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s1">signal </span><span class="s0">import </span><span class="s1">SIGKILL</span><span class="s2">, </span><span class="s1">SIGTERM</span><span class="s2">, </span><span class="s1">SIGUSR1</span>
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s1">SIGKILL</span><span class="s2">, </span><span class="s1">SIGTERM</span><span class="s2">, </span><span class="s1">SIGUSR1 </span><span class="s2">= </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span><span class="s2">, </span><span class="s0">None</span>
+
+
+<span class="s4"># Since Windows has very few command-line utilities generally available,</span>
+<span class="s4"># all of our subprocesses are Python processes running short bits of</span>
+<span class="s4"># (mostly) cross-platform code.</span>
+<span class="s0">def </span><span class="s1">python</span><span class="s2">(</span><span class="s1">code</span><span class="s2">: </span><span class="s1">str</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+    <span class="s0">return </span><span class="s2">[</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">executable</span><span class="s2">, </span><span class="s3">&quot;-u&quot;</span><span class="s2">, </span><span class="s3">&quot;-c&quot;</span><span class="s2">, </span><span class="s3">&quot;import sys; &quot; </span><span class="s2">+ </span><span class="s1">code</span><span class="s2">]</span>
+
+
+<span class="s1">EXIT_TRUE </span><span class="s2">= </span><span class="s1">python</span><span class="s2">(</span><span class="s3">&quot;sys.exit(0)&quot;</span><span class="s2">)</span>
+<span class="s1">EXIT_FALSE </span><span class="s2">= </span><span class="s1">python</span><span class="s2">(</span><span class="s3">&quot;sys.exit(1)&quot;</span><span class="s2">)</span>
+<span class="s1">CAT </span><span class="s2">= </span><span class="s1">python</span><span class="s2">(</span><span class="s3">&quot;sys.stdout.buffer.write(sys.stdin.buffer.read())&quot;</span><span class="s2">)</span>
+
+<span class="s0">if </span><span class="s1">posix</span><span class="s2">:</span>
+
+    <span class="s0">def </span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s2">[</span><span class="s3">&quot;sleep&quot;</span><span class="s2">, </span><span class="s1">str</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">)]</span>
+
+<span class="s0">else</span><span class="s2">:</span>
+
+    <span class="s0">def </span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s1">seconds</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; list</span><span class="s2">[</span><span class="s1">str</span><span class="s2">]:</span>
+        <span class="s0">return </span><span class="s1">python</span><span class="s2">(</span><span class="s3">f&quot;import time; time.sleep(</span><span class="s0">{</span><span class="s1">seconds</span><span class="s0">}</span><span class="s3">)&quot;</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">asynccontextmanager</span>
+<span class="s0">async def </span><span class="s1">open_process_then_kill</span><span class="s2">(  </span><span class="s4"># type: ignore[misc, explicit-any]</span>
+    <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIterator</span><span class="s2">[</span><span class="s1">Process</span><span class="s2">]:</span>
+    <span class="s1">proc </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_process</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">yield </span><span class="s1">proc</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">proc</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">asynccontextmanager</span>
+<span class="s0">async def </span><span class="s1">run_process_in_nursery</span><span class="s2">(  </span><span class="s4"># type: ignore[misc, explicit-any]</span>
+    <span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">,</span>
+    <span class="s2">**</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">Any</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; AsyncIterator</span><span class="s2">[</span><span class="s1">Process</span><span class="s2">]:</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">kwargs</span><span class="s2">.</span><span class="s1">setdefault</span><span class="s2">(</span><span class="s3">&quot;check&quot;</span><span class="s2">, </span><span class="s0">False</span><span class="s2">)</span>
+        <span class="s1">value </span><span class="s2">= </span><span class="s0">await </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">start</span><span class="s2">(</span><span class="s1">partial</span><span class="s2">(</span><span class="s1">run_process</span><span class="s2">, *</span><span class="s1">args</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">))</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">value</span><span class="s2">, </span><span class="s1">Process</span><span class="s2">)</span>
+        <span class="s1">proc</span><span class="s2">: </span><span class="s1">Process </span><span class="s2">= </span><span class="s1">value</span>
+        <span class="s0">yield </span><span class="s1">proc</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+
+<span class="s1">background_process_param </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">parametrize</span><span class="s2">(</span>
+    <span class="s3">&quot;background_process&quot;</span><span class="s2">,</span>
+    <span class="s2">[</span><span class="s1">open_process_then_kill</span><span class="s2">, </span><span class="s1">run_process_in_nursery</span><span class="s2">],</span>
+    <span class="s1">ids</span><span class="s2">=[</span><span class="s3">&quot;open_process&quot;</span><span class="s2">, </span><span class="s3">&quot;run_process in nursery&quot;</span><span class="s2">],</span>
+<span class="s2">)</span>
+
+<span class="s1">BackgroundProcessType</span><span class="s2">: </span><span class="s1">TypeAlias </span><span class="s2">= </span><span class="s1">Callable</span><span class="s2">[  </span><span class="s4"># type: ignore[explicit-any]</span>
+    <span class="s2">...,</span>
+    <span class="s1">AbstractAsyncContextManager</span><span class="s2">[</span><span class="s1">Process</span><span class="s2">],</span>
+<span class="s2">]</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_basic</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">EXIT_TRUE</span><span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">, </span><span class="s1">Process</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s0">is None</span>
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">assert </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">) == </span><span class="s3">f&quot;&lt;trio.Process </span><span class="s0">{</span><span class="s1">EXIT_TRUE</span><span class="s0">}</span><span class="s3">: exited with status 0&gt;&quot;</span>
+
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">EXIT_FALSE</span><span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">1</span>
+    <span class="s0">assert </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">) == </span><span class="s3">&quot;&lt;trio.Process {!r}: {}&gt;&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span>
+        <span class="s1">EXIT_FALSE</span><span class="s2">,</span>
+        <span class="s3">&quot;exited with status 1&quot;</span><span class="s2">,</span>
+    <span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_basic_no_pidfd</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">mock</span><span class="s2">.</span><span class="s1">patch</span><span class="s2">(</span><span class="s3">&quot;trio._subprocess.can_try_pidfd_open&quot;</span><span class="s2">, </span><span class="s1">new</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+        <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">EXIT_TRUE</span><span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s0">is None</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">, </span><span class="s1">Process</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s0">is None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+        <span class="s0">assert </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">) == </span><span class="s3">f&quot;&lt;trio.Process </span><span class="s0">{</span><span class="s1">EXIT_TRUE</span><span class="s0">}</span><span class="s3">: exited with status 0&gt;&quot;</span>
+
+        <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">EXIT_FALSE</span><span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">1</span>
+        <span class="s0">assert </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">) == </span><span class="s3">&quot;&lt;trio.Process {!r}: {}&gt;&quot;</span><span class="s2">.</span><span class="s1">format</span><span class="s2">(</span>
+            <span class="s1">EXIT_FALSE</span><span class="s2">,</span>
+            <span class="s3">&quot;exited with status 1&quot;</span><span class="s2">,</span>
+        <span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_auto_update_returncode</span><span class="s2">(</span>
+    <span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">9999</span><span class="s2">)) </span><span class="s0">as </span><span class="s1">p</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">p</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is None</span>
+        <span class="s0">assert </span><span class="s3">&quot;running&quot; </span><span class="s0">in </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">p</span><span class="s2">)</span>
+        <span class="s1">p</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+        <span class="s1">p</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">p</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is not None</span>
+        <span class="s0">assert </span><span class="s3">&quot;exited&quot; </span><span class="s0">in </span><span class="s1">repr</span><span class="s2">(</span><span class="s1">p</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">p</span><span class="s2">.</span><span class="s1">_pidfd </span><span class="s0">is None</span>
+        <span class="s0">assert </span><span class="s1">p</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is not None</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_multi_wait</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">10</span><span class="s2">)) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s4"># Check that wait (including multi-wait) tolerates being cancelled</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+        <span class="s4"># Now try waiting for real</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">proc</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_multi_wait_no_pidfd</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">mock</span><span class="s2">.</span><span class="s1">patch</span><span class="s2">(</span><span class="s3">&quot;trio._subprocess.can_try_pidfd_open&quot;</span><span class="s2">, </span><span class="s1">new</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+        <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">10</span><span class="s2">)) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+            <span class="s4"># Check that wait (including multi-wait) tolerates being cancelled</span>
+            <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+            <span class="s4"># Now try waiting for real</span>
+            <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+
+
+<span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR </span><span class="s2">= </span><span class="s1">python</span><span class="s2">(</span>
+    <span class="s3">&quot;data = sys.stdin.buffer.read(); &quot;</span>
+    <span class="s3">&quot;sys.stdout.buffer.write(data); &quot;</span>
+    <span class="s3">&quot;sys.stderr.buffer.write(data[::-1])&quot;</span><span class="s2">,</span>
+<span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_pipes</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span>
+        <span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR</span><span class="s2">,</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stdout</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s1">msg </span><span class="s2">= </span><span class="s6">b&quot;the quick brown fox jumps over the lazy dog&quot;</span>
+
+        <span class="s0">async def </span><span class="s1">feed_input</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin </span><span class="s0">is not None</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">msg</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+        <span class="s0">async def </span><span class="s1">check_output</span><span class="s2">(</span><span class="s1">stream</span><span class="s2">: </span><span class="s1">ReceiveStream</span><span class="s2">, </span><span class="s1">expected</span><span class="s2">: </span><span class="s1">bytes</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s1">seen </span><span class="s2">= </span><span class="s1">bytearray</span><span class="s2">()</span>
+            <span class="s0">async for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">stream</span><span class="s2">:</span>
+                <span class="s1">seen </span><span class="s2">+= </span><span class="s1">chunk</span>
+            <span class="s0">assert </span><span class="s1">seen </span><span class="s2">== </span><span class="s1">expected</span>
+
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is not None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is not None</span>
+
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s4"># fail eventually if something is broken</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">deadline </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() + </span><span class="s5">30.0</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">feed_input</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">check_output</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">msg</span><span class="s2">)</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">check_output</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">, </span><span class="s1">msg</span><span class="s2">[::-</span><span class="s5">1</span><span class="s2">])</span>
+
+        <span class="s0">assert not </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+        <span class="s0">assert await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">() == </span><span class="s5">0</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_interactive</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># Test some back-and-forth with a subprocess. This one works like so:</span>
+    <span class="s4"># in: 32\n</span>
+    <span class="s4"># out: 0000...0000\n (32 zeroes)</span>
+    <span class="s4"># err: 1111...1111\n (64 ones)</span>
+    <span class="s4"># in: 10\n</span>
+    <span class="s4"># out: 2222222222\n (10 twos)</span>
+    <span class="s4"># err: 3333....3333\n (20 threes)</span>
+    <span class="s4"># in: EOF</span>
+    <span class="s4"># out: EOF</span>
+    <span class="s4"># err: EOF</span>
+
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span>
+        <span class="s1">python</span><span class="s2">(</span>
+            <span class="s3">&quot;idx = 0</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;while True:</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;    line = sys.stdin.readline()</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;    if line == '': break</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;    request = int(line.strip())</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;    print(str(idx * 2) * request)</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;    print(str(idx * 2 + 1) * request * 2, file=sys.stderr)</span><span class="s0">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;    idx += 1</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s2">,</span>
+        <span class="s2">),</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stdout</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s1">newline </span><span class="s2">= </span><span class="s6">b&quot;</span><span class="s0">\n</span><span class="s6">&quot; </span><span class="s0">if </span><span class="s1">posix </span><span class="s0">else </span><span class="s6">b&quot;</span><span class="s0">\r\n</span><span class="s6">&quot;</span>
+
+        <span class="s0">async def </span><span class="s1">expect</span><span class="s2">(</span><span class="s1">idx</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">request</span><span class="s2">: </span><span class="s1">int</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+
+                <span class="s0">async def </span><span class="s1">drain_one</span><span class="s2">(</span>
+                    <span class="s1">stream</span><span class="s2">: </span><span class="s1">ReceiveStream</span><span class="s2">,</span>
+                    <span class="s1">count</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+                    <span class="s1">digit</span><span class="s2">: </span><span class="s1">int</span><span class="s2">,</span>
+                <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+                    <span class="s0">while </span><span class="s1">count </span><span class="s2">&gt; </span><span class="s5">0</span><span class="s2">:</span>
+                        <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s1">count</span><span class="s2">)</span>
+                        <span class="s0">assert </span><span class="s1">result </span><span class="s2">== (</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">digit</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s2">.</span><span class="s1">encode</span><span class="s2">() * </span><span class="s1">len</span><span class="s2">(</span><span class="s1">result</span><span class="s2">))</span>
+                        <span class="s1">count </span><span class="s2">-= </span><span class="s1">len</span><span class="s2">(</span><span class="s1">result</span><span class="s2">)</span>
+                    <span class="s0">assert </span><span class="s1">count </span><span class="s2">== </span><span class="s5">0</span>
+                    <span class="s0">assert await </span><span class="s1">stream</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s1">len</span><span class="s2">(</span><span class="s1">newline</span><span class="s2">)) == </span><span class="s1">newline</span>
+
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is not None</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is not None</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">drain_one</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">, </span><span class="s1">request</span><span class="s2">, </span><span class="s1">idx </span><span class="s2">* </span><span class="s5">2</span><span class="s2">)</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">drain_one</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">, </span><span class="s1">request </span><span class="s2">* </span><span class="s5">2</span><span class="s2">, </span><span class="s1">idx </span><span class="s2">* </span><span class="s5">2 </span><span class="s2">+ </span><span class="s5">1</span><span class="s2">)</span>
+
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin </span><span class="s0">is not None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is not None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is not None</span>
+        <span class="s0">with </span><span class="s1">fail_after</span><span class="s2">(</span><span class="s5">5</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;12&quot;</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">sleep</span><span class="s2">(</span><span class="s5">0.1</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;345&quot; </span><span class="s2">+ </span><span class="s1">newline</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">expect</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">12345</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;100&quot; </span><span class="s2">+ </span><span class="s1">newline </span><span class="s2">+ </span><span class="s6">b&quot;200&quot; </span><span class="s2">+ </span><span class="s1">newline</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">expect</span><span class="s2">(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">100</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">expect</span><span class="s2">(</span><span class="s5">2</span><span class="s2">, </span><span class="s5">200</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;0&quot; </span><span class="s2">+ </span><span class="s1">newline</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">expect</span><span class="s2">(</span><span class="s5">3</span><span class="s2">, </span><span class="s5">0</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;999999&quot;</span><span class="s2">)</span>
+            <span class="s0">with </span><span class="s1">move_on_after</span><span class="s2">(</span><span class="s5">0.1</span><span class="s2">) </span><span class="s0">as </span><span class="s1">scope</span><span class="s2">:</span>
+                <span class="s0">await </span><span class="s1">expect</span><span class="s2">(</span><span class="s5">4</span><span class="s2">, </span><span class="s5">0</span><span class="s2">)</span>
+            <span class="s0">assert </span><span class="s1">scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">newline</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">expect</span><span class="s2">(</span><span class="s5">4</span><span class="s2">, </span><span class="s5">999999</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+            <span class="s0">assert await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s5">1</span><span class="s2">) == </span><span class="s6">b&quot;&quot;</span>
+            <span class="s0">assert await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s5">1</span><span class="s2">) == </span><span class="s6">b&quot;&quot;</span>
+            <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">data </span><span class="s2">= </span><span class="s1">bytes</span><span class="s2">(</span><span class="s1">random</span><span class="s2">.</span><span class="s1">randint</span><span class="s2">(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">255</span><span class="s2">) </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range</span><span class="s2">(</span><span class="s5">2</span><span class="s2">**</span><span class="s5">18</span><span class="s2">))</span>
+
+    <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span>
+        <span class="s1">CAT</span><span class="s2">,</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s1">data</span><span class="s2">,</span>
+        <span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">capture_stderr</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">args </span><span class="s2">== </span><span class="s1">CAT</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">== </span><span class="s1">data</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">== </span><span class="s6">b&quot;&quot;</span>
+
+    <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">args </span><span class="s2">== </span><span class="s1">CAT</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">== </span><span class="s6">b&quot;&quot;</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is None</span>
+
+    <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span>
+        <span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR</span><span class="s2">,</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s1">data</span><span class="s2">,</span>
+        <span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">capture_stderr</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">args </span><span class="s2">== </span><span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">== </span><span class="s1">data</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">== </span><span class="s1">data</span><span class="s2">[::-</span><span class="s5">1</span><span class="s2">]</span>
+
+    <span class="s4"># invalid combinations</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">UnicodeError</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">stdin</span><span class="s2">=</span><span class="s3">&quot;oh no, it's text&quot;</span><span class="s2">)</span>
+
+    <span class="s1">pipe_stdout_error </span><span class="s2">= </span><span class="s3">r&quot;^stdout=subprocess\.PIPE is only valid with nursery\.start, since that's the only way to access the pipe(; use nursery\.start or pass the data you want to write directly)*$&quot;</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s1">pipe_stdout_error</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s1">pipe_stdout_error</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span>
+        <span class="s1">ValueError</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">=</span><span class="s1">pipe_stdout_error</span><span class="s2">.</span><span class="s1">replace</span><span class="s2">(</span><span class="s3">&quot;stdout&quot;</span><span class="s2">, </span><span class="s3">&quot;stderr&quot;</span><span class="s2">, </span><span class="s5">1</span><span class="s2">),</span>
+    <span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span>
+        <span class="s1">ValueError</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;^can't specify both stdout and capture_stdout$&quot;</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">, </span><span class="s1">stdout</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">DEVNULL</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span>
+        <span class="s1">ValueError</span><span class="s2">,</span>
+        <span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;^can't specify both stderr and capture_stderr$&quot;</span><span class="s2">,</span>
+    <span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">CAT</span><span class="s2">, </span><span class="s1">capture_stderr</span><span class="s2">=</span><span class="s0">True</span><span class="s2">, </span><span class="s1">stderr</span><span class="s2">=</span><span class="s0">None</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_check</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">cmd </span><span class="s2">= </span><span class="s1">python</span><span class="s2">(</span><span class="s3">&quot;sys.stderr.buffer.write(b'test</span><span class="s0">\\</span><span class="s3">n'); sys.exit(1)&quot;</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">CalledProcessError</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">cmd</span><span class="s2">, </span><span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">DEVNULL</span><span class="s2">, </span><span class="s1">capture_stderr</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">cmd </span><span class="s2">== </span><span class="s1">cmd</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">1</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">== </span><span class="s6">b&quot;test</span><span class="s0">\n</span><span class="s6">&quot;</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is None</span>
+
+    <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span>
+        <span class="s1">cmd</span><span class="s2">,</span>
+        <span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">capture_stderr</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">check</span><span class="s2">=</span><span class="s0">False</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">args </span><span class="s2">== </span><span class="s1">cmd</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">== </span><span class="s6">b&quot;&quot;</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stderr </span><span class="s2">== </span><span class="s6">b&quot;test</span><span class="s0">\n</span><span class="s6">&quot;</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">1</span>
+
+
+<span class="s2">@</span><span class="s1">skip_if_fbsd_pipes_broken</span>
+<span class="s0">async def </span><span class="s1">test_run_with_broken_pipe</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span>
+        <span class="s2">[</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">executable</span><span class="s2">, </span><span class="s3">&quot;-c&quot;</span><span class="s2">, </span><span class="s3">&quot;import sys; sys.stdin.close()&quot;</span><span class="s2">],</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s6">b&quot;x&quot; </span><span class="s2">* </span><span class="s5">131072</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is None</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_stderr_stdout</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span>
+        <span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR</span><span class="s2">,</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stdout</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">STDOUT</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio </span><span class="s0">is not None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is not None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is None</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;1234&quot;</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio</span><span class="s2">.</span><span class="s1">send_eof</span><span class="s2">()</span>
+
+        <span class="s1">output </span><span class="s2">= []</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s1">chunk </span><span class="s2">= </span><span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s5">16</span><span class="s2">)</span>
+            <span class="s0">if </span><span class="s1">chunk </span><span class="s2">== </span><span class="s6">b&quot;&quot;</span><span class="s2">:</span>
+                <span class="s0">break</span>
+            <span class="s1">output</span><span class="s2">.</span><span class="s1">append</span><span class="s2">(</span><span class="s1">chunk</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s6">b&quot;&quot;</span><span class="s2">.</span><span class="s1">join</span><span class="s2">(</span><span class="s1">output</span><span class="s2">) == </span><span class="s6">b&quot;12344321&quot;</span>
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+
+    <span class="s4"># equivalent test with run_process()</span>
+    <span class="s1">result </span><span class="s2">= </span><span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span>
+        <span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR</span><span class="s2">,</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s6">b&quot;1234&quot;</span><span class="s2">,</span>
+        <span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">,</span>
+        <span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">STDOUT</span><span class="s2">,</span>
+    <span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stdout </span><span class="s2">== </span><span class="s6">b&quot;12344321&quot;</span>
+    <span class="s0">assert </span><span class="s1">result</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is None</span>
+
+    <span class="s4"># this one hits the branch where stderr=STDOUT but stdout</span>
+    <span class="s4"># is not redirected</span>
+    <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span>
+        <span class="s1">CAT</span><span class="s2">,</span>
+        <span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+        <span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">STDOUT</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is None</span>
+        <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is None</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0</span>
+
+    <span class="s0">if </span><span class="s1">posix</span><span class="s2">:</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">r</span><span class="s2">, </span><span class="s1">w </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">pipe</span><span class="s2">()</span>
+
+            <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span>
+                <span class="s1">COPY_STDIN_TO_STDOUT_AND_BACKWARD_TO_STDERR</span><span class="s2">,</span>
+                <span class="s1">stdin</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">PIPE</span><span class="s2">,</span>
+                <span class="s1">stdout</span><span class="s2">=</span><span class="s1">w</span><span class="s2">,</span>
+                <span class="s1">stderr</span><span class="s2">=</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">STDOUT</span><span class="s2">,</span>
+            <span class="s2">) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+                <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">w</span><span class="s2">)</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdio </span><span class="s0">is None</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdout </span><span class="s0">is None</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stderr </span><span class="s0">is None</span>
+                <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s6">b&quot;1234&quot;</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">stdin</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+                <span class="s0">assert await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">() == </span><span class="s5">0</span>
+                <span class="s0">assert </span><span class="s1">os</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">r</span><span class="s2">, </span><span class="s5">4096</span><span class="s2">) == </span><span class="s6">b&quot;12344321&quot;</span>
+                <span class="s0">assert </span><span class="s1">os</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">r</span><span class="s2">, </span><span class="s5">4096</span><span class="s2">) == </span><span class="s6">b&quot;&quot;</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">r</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_errors</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s4"># call-overload on unix, call-arg on windows</span>
+        <span class="s0">await </span><span class="s1">open_process</span><span class="s2">([</span><span class="s3">&quot;ls&quot;</span><span class="s2">], </span><span class="s1">encoding</span><span class="s2">=</span><span class="s3">&quot;utf-8&quot;</span><span class="s2">)  </span><span class="s4"># type: ignore</span>
+    <span class="s0">assert </span><span class="s3">&quot;unbuffered byte streams&quot; </span><span class="s0">in </span><span class="s1">str</span><span class="s2">(</span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s3">&quot;the 'encoding' option is not supported&quot; </span><span class="s0">in </span><span class="s1">str</span><span class="s2">(</span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">)</span>
+
+    <span class="s0">if </span><span class="s1">posix</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">open_process</span><span class="s2">([</span><span class="s3">&quot;ls&quot;</span><span class="s2">], </span><span class="s1">shell</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">open_process</span><span class="s2">(</span><span class="s3">&quot;ls&quot;</span><span class="s2">, </span><span class="s1">shell</span><span class="s2">=</span><span class="s0">False</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_signals</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async def </span><span class="s1">test_one_signal</span><span class="s2">(</span>
+        <span class="s1">send_it</span><span class="s2">: </span><span class="s1">Callable</span><span class="s2">[[</span><span class="s1">Process</span><span class="s2">], </span><span class="s0">None</span><span class="s2">],</span>
+        <span class="s1">signum</span><span class="s2">: </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">Signals </span><span class="s2">| </span><span class="s0">None</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">move_on_after</span><span class="s2">(</span><span class="s5">1.0</span><span class="s2">) </span><span class="s0">as </span><span class="s1">scope</span><span class="s2">:</span>
+            <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">3600</span><span class="s2">)) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+                <span class="s1">send_it</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">assert not </span><span class="s1">scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+        <span class="s0">if </span><span class="s1">posix</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">signum </span><span class="s0">is not None</span>
+            <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== -</span><span class="s1">signum</span>
+        <span class="s0">else</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">!= </span><span class="s5">0</span>
+
+    <span class="s0">await </span><span class="s1">test_one_signal</span><span class="s2">(</span><span class="s1">Process</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">, </span><span class="s1">SIGKILL</span><span class="s2">)</span>
+    <span class="s0">await </span><span class="s1">test_one_signal</span><span class="s2">(</span><span class="s1">Process</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">, </span><span class="s1">SIGTERM</span><span class="s2">)</span>
+    <span class="s4"># Test that we can send arbitrary signals.</span>
+    <span class="s4">#</span>
+    <span class="s4"># We used to use SIGINT here, but it turns out that the Python interpreter</span>
+    <span class="s4"># has race conditions that can cause it to explode in weird ways if it</span>
+    <span class="s4"># tries to handle SIGINT during startup. SIGUSR1's default disposition is</span>
+    <span class="s4"># to terminate the target process, and Python doesn't try to do anything</span>
+    <span class="s4"># clever to handle it.</span>
+    <span class="s0">if </span><span class="s2">(</span><span class="s0">not </span><span class="s1">TYPE_CHECKING </span><span class="s0">and </span><span class="s1">posix</span><span class="s2">) </span><span class="s0">or </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">!= </span><span class="s3">&quot;win32&quot;</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">test_one_signal</span><span class="s2">(</span><span class="s0">lambda </span><span class="s1">proc</span><span class="s2">: </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">send_signal</span><span class="s2">(</span><span class="s1">SIGUSR1</span><span class="s2">), </span><span class="s1">SIGUSR1</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s0">not </span><span class="s1">posix</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;POSIX specific&quot;</span><span class="s2">)</span>
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_wait_reapable_fails</span><span class="s2">(</span><span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">TYPE_CHECKING </span><span class="s0">and </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;win32&quot;</span><span class="s2">:</span>
+        <span class="s0">return</span>
+    <span class="s1">old_sigchld </span><span class="s2">= </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGCHLD</span><span class="s2">, </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIG_IGN</span><span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s4"># With SIGCHLD disabled, the wait() syscall will wait for the</span>
+        <span class="s4"># process to exit but then fail with ECHILD. Make sure we</span>
+        <span class="s4"># support this case as the stdlib subprocess module does.</span>
+        <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">3600</span><span class="s2">)) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+            <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+                <span class="s1">proc</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+                <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">deadline </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() + </span><span class="s5">1.0</span>
+            <span class="s0">assert not </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+            <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0  </span><span class="s4"># exit status unknowable, so...</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGCHLD</span><span class="s2">, </span><span class="s1">old_sigchld</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s0">not </span><span class="s1">posix</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;POSIX specific&quot;</span><span class="s2">)</span>
+<span class="s2">@</span><span class="s1">background_process_param</span>
+<span class="s0">async def </span><span class="s1">test_wait_reapable_fails_no_pidfd</span><span class="s2">(</span>
+    <span class="s1">background_process</span><span class="s2">: </span><span class="s1">BackgroundProcessType</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">if </span><span class="s1">TYPE_CHECKING </span><span class="s0">and </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;win32&quot;</span><span class="s2">:</span>
+        <span class="s0">return</span>
+    <span class="s0">with </span><span class="s1">mock</span><span class="s2">.</span><span class="s1">patch</span><span class="s2">(</span><span class="s3">&quot;trio._subprocess.can_try_pidfd_open&quot;</span><span class="s2">, </span><span class="s1">new</span><span class="s2">=</span><span class="s0">False</span><span class="s2">):</span>
+        <span class="s1">old_sigchld </span><span class="s2">= </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGCHLD</span><span class="s2">, </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIG_IGN</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s4"># With SIGCHLD disabled, the wait() syscall will wait for the</span>
+            <span class="s4"># process to exit but then fail with ECHILD. Make sure we</span>
+            <span class="s4"># support this case as the stdlib subprocess module does.</span>
+            <span class="s0">async with </span><span class="s1">background_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">3600</span><span class="s2">)) </span><span class="s0">as </span><span class="s1">proc</span><span class="s2">:</span>
+                <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+                    <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">)</span>
+                    <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+                    <span class="s1">proc</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+                    <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">deadline </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">current_time</span><span class="s2">() + </span><span class="s5">1.0</span>
+                <span class="s0">assert not </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancelled_caught</span>
+                <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">0  </span><span class="s4"># exit status unknowable, so...</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGCHLD</span><span class="s2">, </span><span class="s1">old_sigchld</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">slow</span>
+<span class="s0">def </span><span class="s1">test_waitid_eintr</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># This only matters on PyPy (where we're coding EINTR handling</span>
+    <span class="s4"># ourselves) but the test works on all waitid platforms.</span>
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_subprocess_platform </span><span class="s0">import </span><span class="s1">wait_child_exiting</span>
+
+    <span class="s0">if </span><span class="s1">TYPE_CHECKING </span><span class="s0">and </span><span class="s2">(</span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;win32&quot; </span><span class="s0">or </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;darwin&quot;</span><span class="s2">):</span>
+        <span class="s0">return</span>
+
+    <span class="s0">if not </span><span class="s1">wait_child_exiting</span><span class="s2">.</span><span class="s1">__module__</span><span class="s2">.</span><span class="s1">endswith</span><span class="s2">(</span><span class="s3">&quot;waitid&quot;</span><span class="s2">):</span>
+        <span class="s1">pytest</span><span class="s2">.</span><span class="s1">skip</span><span class="s2">(</span><span class="s3">&quot;waitid only&quot;</span><span class="s2">)</span>
+
+    <span class="s4"># despite the TYPE_CHECKING early return silencing warnings about signal.SIGALRM etc</span>
+    <span class="s4"># this import is still checked on win32&amp;darwin and raises [attr-defined].</span>
+    <span class="s4"># Linux doesn't raise [attr-defined] though, so we need [unused-ignore]</span>
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_subprocess_platform</span><span class="s2">.</span><span class="s1">waitid </span><span class="s0">import </span><span class="s2">(  </span><span class="s4"># type: ignore[attr-defined, unused-ignore]</span>
+        <span class="s1">sync_wait_reapable</span><span class="s2">,</span>
+    <span class="s2">)</span>
+
+    <span class="s1">got_alarm </span><span class="s2">= </span><span class="s0">False</span>
+    <span class="s1">sleeper </span><span class="s2">= </span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">Popen</span><span class="s2">([</span><span class="s3">&quot;sleep&quot;</span><span class="s2">, </span><span class="s3">&quot;3600&quot;</span><span class="s2">])</span>
+
+    <span class="s0">def </span><span class="s1">on_alarm</span><span class="s2">(</span><span class="s1">sig</span><span class="s2">: </span><span class="s1">int</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">: </span><span class="s1">FrameType </span><span class="s2">| </span><span class="s0">None</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">nonlocal </span><span class="s1">got_alarm</span>
+        <span class="s1">got_alarm </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">sleeper</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+
+    <span class="s1">old_sigalrm </span><span class="s2">= </span><span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGALRM</span><span class="s2">, </span><span class="s1">on_alarm</span><span class="s2">)</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s1">signal</span><span class="s2">.</span><span class="s1">alarm</span><span class="s2">(</span><span class="s5">1</span><span class="s2">)</span>
+        <span class="s1">sync_wait_reapable</span><span class="s2">(</span><span class="s1">sleeper</span><span class="s2">.</span><span class="s1">pid</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s1">sleeper</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">(</span><span class="s1">timeout</span><span class="s2">=</span><span class="s5">1</span><span class="s2">) == -</span><span class="s5">9</span>
+    <span class="s0">finally</span><span class="s2">:</span>
+        <span class="s0">if </span><span class="s1">sleeper</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is None</span><span class="s2">:  </span><span class="s4"># pragma: no cover</span>
+            <span class="s4"># We only get here if something fails in the above;</span>
+            <span class="s4"># if the test passes, wait() will reap the process</span>
+            <span class="s1">sleeper</span><span class="s2">.</span><span class="s1">kill</span><span class="s2">()</span>
+            <span class="s1">sleeper</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s1">signal</span><span class="s2">.</span><span class="s1">signal</span><span class="s2">(</span><span class="s1">signal</span><span class="s2">.</span><span class="s1">SIGALRM</span><span class="s2">, </span><span class="s1">old_sigalrm</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_custom_deliver_cancel</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">custom_deliver_cancel_called </span><span class="s2">= </span><span class="s0">False</span>
+
+    <span class="s0">async def </span><span class="s1">custom_deliver_cancel</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">: </span><span class="s1">Process</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">nonlocal </span><span class="s1">custom_deliver_cancel_called</span>
+        <span class="s1">custom_deliver_cancel_called </span><span class="s2">= </span><span class="s0">True</span>
+        <span class="s1">proc</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">()</span>
+        <span class="s4"># Make sure this does get cancelled when the process exits, and that</span>
+        <span class="s4"># the process really exited.</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s0">await </span><span class="s1">sleep_forever</span><span class="s2">()</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s0">is not None</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span>
+            <span class="s1">partial</span><span class="s2">(</span><span class="s1">run_process</span><span class="s2">, </span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">9999</span><span class="s2">), </span><span class="s1">deliver_cancel</span><span class="s2">=</span><span class="s1">custom_deliver_cancel</span><span class="s2">),</span>
+        <span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+    <span class="s0">assert </span><span class="s1">custom_deliver_cancel_called</span>
+
+
+<span class="s0">def </span><span class="s1">test_bad_deliver_cancel</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">async def </span><span class="s1">custom_deliver_cancel</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">: </span><span class="s1">Process</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">proc</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">()</span>
+        <span class="s0">raise </span><span class="s1">ValueError</span><span class="s2">(</span><span class="s3">&quot;foo&quot;</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">do_stuff</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span>
+                <span class="s1">partial</span><span class="s2">(</span><span class="s1">run_process</span><span class="s2">, </span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">9999</span><span class="s2">), </span><span class="s1">deliver_cancel</span><span class="s2">=</span><span class="s1">custom_deliver_cancel</span><span class="s2">),</span>
+            <span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+    <span class="s4"># double wrap from our nursery + the internal nursery</span>
+    <span class="s0">with </span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">Matcher</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s3">&quot;^foo$&quot;</span><span class="s2">))):</span>
+        <span class="s1">_core</span><span class="s2">.</span><span class="s1">run</span><span class="s2">(</span><span class="s1">do_stuff</span><span class="s2">, </span><span class="s1">strict_exception_groups</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_warn_on_failed_cancel_terminate</span><span class="s2">(</span><span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">original_terminate </span><span class="s2">= </span><span class="s1">Process</span><span class="s2">.</span><span class="s1">terminate</span>
+
+    <span class="s0">def </span><span class="s1">broken_terminate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">: </span><span class="s1">Process</span><span class="s2">) </span><span class="s1">-&gt; NoReturn</span><span class="s2">:</span>
+        <span class="s1">original_terminate</span><span class="s2">(</span><span class="s1">self</span><span class="s2">)</span>
+        <span class="s0">raise </span><span class="s1">OSError</span><span class="s2">(</span><span class="s3">&quot;whoops&quot;</span><span class="s2">)</span>
+
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">Process</span><span class="s2">, </span><span class="s3">&quot;terminate&quot;</span><span class="s2">, </span><span class="s1">broken_terminate</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">warns</span><span class="s2">(</span><span class="s1">RuntimeWarning</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">&quot;.*whoops.*&quot;</span><span class="s2">):  </span><span class="s4"># noqa: PT031</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">run_process</span><span class="s2">, </span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">9999</span><span class="s2">))</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s0">not </span><span class="s1">posix</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;posix only&quot;</span><span class="s2">)</span>
+<span class="s0">async def </span><span class="s1">test_warn_on_cancel_SIGKILL_escalation</span><span class="s2">(</span>
+    <span class="s1">autojump_clock</span><span class="s2">: </span><span class="s1">MockClock</span><span class="s2">,</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">Process</span><span class="s2">, </span><span class="s3">&quot;terminate&quot;</span><span class="s2">, </span><span class="s0">lambda </span><span class="s2">*</span><span class="s1">args</span><span class="s2">: </span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">warns</span><span class="s2">(</span><span class="s1">RuntimeWarning</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">&quot;.*ignored SIGTERM.*&quot;</span><span class="s2">):  </span><span class="s4"># noqa: PT031</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">run_process</span><span class="s2">, </span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">9999</span><span class="s2">))</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">cancel_scope</span><span class="s2">.</span><span class="s1">cancel</span><span class="s2">()</span>
+
+
+<span class="s4"># the background_process_param exercises a lot of run_process cases, but it uses</span>
+<span class="s4"># check=False, so lets have a test that uses check=True as well</span>
+<span class="s0">async def </span><span class="s1">test_run_process_background_fail</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">CalledProcessError</span><span class="s2">):</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">value </span><span class="s2">= </span><span class="s0">await </span><span class="s1">nursery</span><span class="s2">.</span><span class="s1">start</span><span class="s2">(</span><span class="s1">run_process</span><span class="s2">, </span><span class="s1">EXIT_FALSE</span><span class="s2">)</span>
+            <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">value</span><span class="s2">, </span><span class="s1">Process</span><span class="s2">)</span>
+            <span class="s1">proc</span><span class="s2">: </span><span class="s1">Process </span><span class="s2">= </span><span class="s1">value</span>
+    <span class="s0">assert </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">returncode </span><span class="s2">== </span><span class="s5">1</span>
+
+
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span>
+    <span class="s0">not </span><span class="s1">SyncPath</span><span class="s2">(</span><span class="s3">&quot;/dev/fd&quot;</span><span class="s2">).</span><span class="s1">exists</span><span class="s2">(),</span>
+    <span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;requires a way to iterate through open files&quot;</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">async def </span><span class="s1">test_for_leaking_fds</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">gc</span><span class="s2">.</span><span class="s1">collect</span><span class="s2">()  </span><span class="s4"># address possible flakiness on PyPy</span>
+
+    <span class="s1">starting_fds </span><span class="s2">= </span><span class="s1">set</span><span class="s2">(</span><span class="s1">SyncPath</span><span class="s2">(</span><span class="s3">&quot;/dev/fd&quot;</span><span class="s2">).</span><span class="s1">iterdir</span><span class="s2">())</span>
+    <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">EXIT_TRUE</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">SyncPath</span><span class="s2">(</span><span class="s3">&quot;/dev/fd&quot;</span><span class="s2">).</span><span class="s1">iterdir</span><span class="s2">()) == </span><span class="s1">starting_fds</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">subprocess</span><span class="s2">.</span><span class="s1">CalledProcessError</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">EXIT_FALSE</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">SyncPath</span><span class="s2">(</span><span class="s3">&quot;/dev/fd&quot;</span><span class="s2">).</span><span class="s1">iterdir</span><span class="s2">()) == </span><span class="s1">starting_fds</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">PermissionError</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">([</span><span class="s3">&quot;/dev/fd/0&quot;</span><span class="s2">])</span>
+    <span class="s0">assert </span><span class="s1">set</span><span class="s2">(</span><span class="s1">SyncPath</span><span class="s2">(</span><span class="s3">&quot;/dev/fd&quot;</span><span class="s2">).</span><span class="s1">iterdir</span><span class="s2">()) == </span><span class="s1">starting_fds</span>
+
+
+<span class="s0">async def </span><span class="s1">test_run_process_internal_error</span><span class="s2">(</span><span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s4"># There's probably less extreme ways of triggering errors inside the nursery</span>
+    <span class="s4"># in run_process.</span>
+    <span class="s0">async def </span><span class="s1">very_broken_open</span><span class="s2">(*</span><span class="s1">args</span><span class="s2">: </span><span class="s1">object</span><span class="s2">, **</span><span class="s1">kwargs</span><span class="s2">: </span><span class="s1">object</span><span class="s2">) </span><span class="s1">-&gt; str</span><span class="s2">:</span>
+        <span class="s0">return </span><span class="s3">&quot;oops&quot;</span>
+
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">trio</span><span class="s2">.</span><span class="s1">_subprocess</span><span class="s2">, </span><span class="s3">&quot;open_process&quot;</span><span class="s2">, </span><span class="s1">very_broken_open</span><span class="s2">)</span>
+    <span class="s0">with </span><span class="s1">RaisesGroup</span><span class="s2">(</span><span class="s1">AttributeError</span><span class="s2">, </span><span class="s1">AttributeError</span><span class="s2">):</span>
+        <span class="s0">await </span><span class="s1">run_process</span><span class="s2">(</span><span class="s1">EXIT_TRUE</span><span class="s2">, </span><span class="s1">capture_stdout</span><span class="s2">=</span><span class="s0">True</span><span class="s2">)</span>
+
+
+<span class="s4"># regression test for #2209</span>
+<span class="s0">async def </span><span class="s1">test_subprocess_pidfd_unnotified</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">noticed_exit </span><span class="s2">= </span><span class="s0">None</span>
+
+    <span class="s0">async def </span><span class="s1">wait_and_tell</span><span class="s2">(</span><span class="s1">proc</span><span class="s2">: </span><span class="s1">Process</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">nonlocal </span><span class="s1">noticed_exit</span>
+        <span class="s1">noticed_exit </span><span class="s2">= </span><span class="s1">Event</span><span class="s2">()</span>
+        <span class="s0">await </span><span class="s1">proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s1">noticed_exit</span><span class="s2">.</span><span class="s1">set</span><span class="s2">()</span>
+
+    <span class="s1">proc </span><span class="s2">= </span><span class="s0">await </span><span class="s1">open_process</span><span class="s2">(</span><span class="s1">SLEEP</span><span class="s2">(</span><span class="s5">9999</span><span class="s2">))</span>
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+        <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">wait_and_tell</span><span class="s2">, </span><span class="s1">proc</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">isinstance</span><span class="s2">(</span><span class="s1">noticed_exit</span><span class="s2">, </span><span class="s1">Event</span><span class="s2">)</span>
+        <span class="s1">proc</span><span class="s2">.</span><span class="s1">terminate</span><span class="s2">()</span>
+        <span class="s4"># without giving trio a chance to do so,</span>
+        <span class="s0">with </span><span class="s1">assert_no_checkpoints</span><span class="s2">():</span>
+            <span class="s4"># wait until the process has actually exited;</span>
+            <span class="s1">proc</span><span class="s2">.</span><span class="s1">_proc</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+            <span class="s4"># force a call to poll (that closes the pidfd on linux)</span>
+            <span class="s1">proc</span><span class="s2">.</span><span class="s1">poll</span><span class="s2">()</span>
+        <span class="s0">with </span><span class="s1">move_on_after</span><span class="s2">(</span><span class="s5">5</span><span class="s2">):</span>
+            <span class="s4"># Some platforms use threads to wait for exit, so it might take a bit</span>
+            <span class="s4"># for everything to notice</span>
+            <span class="s0">await </span><span class="s1">noticed_exit</span><span class="s2">.</span><span class="s1">wait</span><span class="s2">()</span>
+        <span class="s0">assert </span><span class="s1">noticed_exit</span><span class="s2">.</span><span class="s1">is_set</span><span class="s2">(), </span><span class="s3">&quot;child task wasn't woken after poll, DEADLOCK&quot;</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,258 @@
+<html>
+<head>
+<title>wheel.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #5f826b; font-style: italic;}
+.s1 { color: #bcbec4;}
+.s2 { color: #cf8e6d;}
+.s3 { color: #bcbec4;}
+.s4 { color: #6aab73;}
+.s5 { color: #7a7e85;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+wheel.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Wheels support.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">email</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">posixpath</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">zipfile</span>
+
+<span class="s2">from </span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">tags </span><span class="s2">import </span><span class="s1">sys_tags</span>
+<span class="s2">from </span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">utils </span><span class="s2">import </span><span class="s1">canonicalize_name</span>
+<span class="s2">from </span><span class="s1">packaging</span><span class="s3">.</span><span class="s1">version </span><span class="s2">import </span><span class="s1">Version </span><span class="s2">as </span><span class="s1">parse_version</span>
+
+<span class="s2">import </span><span class="s1">setuptools</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">archive_util </span><span class="s2">import </span><span class="s1">_unpack_zipfile_obj</span>
+<span class="s2">from </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">command</span><span class="s3">.</span><span class="s1">egg_info </span><span class="s2">import </span><span class="s1">_egg_basename</span><span class="s3">, </span><span class="s1">write_requirements</span>
+
+<span class="s2">from </span><span class="s3">.</span><span class="s1">unicode_utils </span><span class="s2">import </span><span class="s1">_read_utf8_with_fallback</span>
+
+<span class="s2">from </span><span class="s1">distutils</span><span class="s3">.</span><span class="s1">util </span><span class="s2">import </span><span class="s1">get_platform</span>
+
+<span class="s1">WHEEL_NAME </span><span class="s3">= </span><span class="s1">re</span><span class="s3">.</span><span class="s1">compile</span><span class="s3">(</span>
+    <span class="s4">r&quot;&quot;&quot;^(?P&lt;project_name&gt;.+?)-(?P&lt;version&gt;\d.*?) 
+    ((-(?P&lt;build&gt;\d.*?))?-(?P&lt;py_version&gt;.+?)-(?P&lt;abi&gt;.+?)-(?P&lt;platform&gt;.+?) 
+    )\.whl$&quot;&quot;&quot;</span><span class="s3">,</span>
+    <span class="s1">re</span><span class="s3">.</span><span class="s1">VERBOSE</span><span class="s3">,</span>
+<span class="s3">).</span><span class="s1">match</span>
+
+<span class="s1">NAMESPACE_PACKAGE_INIT </span><span class="s3">= </span><span class="s4">&quot;__import__('pkg_resources').declare_namespace(__name__)</span><span class="s2">\n</span><span class="s4">&quot;</span>
+
+
+<span class="s3">@</span><span class="s1">functools</span><span class="s3">.</span><span class="s1">cache</span>
+<span class="s2">def </span><span class="s1">_get_supported_tags</span><span class="s3">():</span>
+    <span class="s5"># We calculate the supported tags only once, otherwise calling</span>
+    <span class="s5"># this method on thousands of wheels takes seconds instead of</span>
+    <span class="s5"># milliseconds.</span>
+    <span class="s2">return </span><span class="s3">{(</span><span class="s1">t</span><span class="s3">.</span><span class="s1">interpreter</span><span class="s3">, </span><span class="s1">t</span><span class="s3">.</span><span class="s1">abi</span><span class="s3">, </span><span class="s1">t</span><span class="s3">.</span><span class="s1">platform</span><span class="s3">) </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">sys_tags</span><span class="s3">()}</span>
+
+
+<span class="s2">def </span><span class="s1">unpack</span><span class="s3">(</span><span class="s1">src_dir</span><span class="s3">, </span><span class="s1">dst_dir</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+    <span class="s0">&quot;&quot;&quot;Move everything under `src_dir` to `dst_dir`, and delete the former.&quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">dirnames</span><span class="s3">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">walk</span><span class="s3">(</span><span class="s1">src_dir</span><span class="s3">):</span>
+        <span class="s1">subdir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">relpath</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">src_dir</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">filenames</span><span class="s3">:</span>
+            <span class="s1">src </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">f</span><span class="s3">)</span>
+            <span class="s1">dst </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dst_dir</span><span class="s3">, </span><span class="s1">subdir</span><span class="s3">, </span><span class="s1">f</span><span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">renames</span><span class="s3">(</span><span class="s1">src</span><span class="s3">, </span><span class="s1">dst</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">n</span><span class="s3">, </span><span class="s1">d </span><span class="s2">in </span><span class="s1">reversed</span><span class="s3">(</span><span class="s1">list</span><span class="s3">(</span><span class="s1">enumerate</span><span class="s3">(</span><span class="s1">dirnames</span><span class="s3">))):</span>
+            <span class="s1">src </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">d</span><span class="s3">)</span>
+            <span class="s1">dst </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dst_dir</span><span class="s3">, </span><span class="s1">subdir</span><span class="s3">, </span><span class="s1">d</span><span class="s3">)</span>
+            <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">dst</span><span class="s3">):</span>
+                <span class="s5"># Directory does not exist in destination,</span>
+                <span class="s5"># rename it and prune it from os.walk list.</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">renames</span><span class="s3">(</span><span class="s1">src</span><span class="s3">, </span><span class="s1">dst</span><span class="s3">)</span>
+                <span class="s2">del </span><span class="s1">dirnames</span><span class="s3">[</span><span class="s1">n</span><span class="s3">]</span>
+    <span class="s5"># Cleanup.</span>
+    <span class="s2">for </span><span class="s1">dirpath</span><span class="s3">, </span><span class="s1">dirnames</span><span class="s3">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">walk</span><span class="s3">(</span><span class="s1">src_dir</span><span class="s3">, </span><span class="s1">topdown</span><span class="s3">=</span><span class="s2">True</span><span class="s3">):</span>
+        <span class="s2">assert not </span><span class="s1">filenames</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">rmdir</span><span class="s3">(</span><span class="s1">dirpath</span><span class="s3">)</span>
+
+
+<span class="s3">@</span><span class="s1">contextlib</span><span class="s3">.</span><span class="s1">contextmanager</span>
+<span class="s2">def </span><span class="s1">disable_info_traces</span><span class="s3">():</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Temporarily disable info traces. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+
+    <span class="s1">saved </span><span class="s3">= </span><span class="s1">log</span><span class="s3">.</span><span class="s1">set_threshold</span><span class="s3">(</span><span class="s1">log</span><span class="s3">.</span><span class="s1">WARN</span><span class="s3">)</span>
+    <span class="s2">try</span><span class="s3">:</span>
+        <span class="s2">yield</span>
+    <span class="s2">finally</span><span class="s3">:</span>
+        <span class="s1">log</span><span class="s3">.</span><span class="s1">set_threshold</span><span class="s3">(</span><span class="s1">saved</span><span class="s3">)</span>
+
+
+<span class="s2">class </span><span class="s1">Wheel</span><span class="s3">:</span>
+    <span class="s2">def </span><span class="s1">__init__</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">filename</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s1">match </span><span class="s3">= </span><span class="s1">WHEEL_NAME</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">basename</span><span class="s3">(</span><span class="s1">filename</span><span class="s3">))</span>
+        <span class="s2">if </span><span class="s1">match </span><span class="s2">is None</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">f'invalid wheel name: </span><span class="s2">{</span><span class="s1">filename</span><span class="s2">!r}</span><span class="s4">'</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">filename </span><span class="s3">= </span><span class="s1">filename</span>
+        <span class="s2">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">match</span><span class="s3">.</span><span class="s1">groupdict</span><span class="s3">().</span><span class="s1">items</span><span class="s3">():</span>
+            <span class="s1">setattr</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">tags</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;List tags (py_version, abi, platform) supported by this wheel.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">itertools</span><span class="s3">.</span><span class="s1">product</span><span class="s3">(</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">py_version</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'.'</span><span class="s3">),</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">abi</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'.'</span><span class="s3">),</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">platform</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'.'</span><span class="s3">),</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">is_compatible</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Is the wheel compatible with the current platform?&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">next</span><span class="s3">((</span><span class="s2">True for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">self</span><span class="s3">.</span><span class="s1">tags</span><span class="s3">() </span><span class="s2">if </span><span class="s1">t </span><span class="s2">in </span><span class="s1">_get_supported_tags</span><span class="s3">()), </span><span class="s2">False</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">egg_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">):</span>
+        <span class="s2">return </span><span class="s3">(</span>
+            <span class="s1">_egg_basename</span><span class="s3">(</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">project_name</span><span class="s3">,</span>
+                <span class="s1">self</span><span class="s3">.</span><span class="s1">version</span><span class="s3">,</span>
+                <span class="s1">platform</span><span class="s3">=(</span><span class="s2">None if </span><span class="s1">self</span><span class="s3">.</span><span class="s1">platform </span><span class="s3">== </span><span class="s4">'any' </span><span class="s2">else </span><span class="s1">get_platform</span><span class="s3">()),</span>
+            <span class="s3">)</span>
+            <span class="s3">+ </span><span class="s4">&quot;.egg&quot;</span>
+        <span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">get_dist_info</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">zf</span><span class="s3">):</span>
+        <span class="s5"># find the correct name of the .dist-info dir in the wheel file</span>
+        <span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">zf</span><span class="s3">.</span><span class="s1">namelist</span><span class="s3">():</span>
+            <span class="s1">dirname </span><span class="s3">= </span><span class="s1">posixpath</span><span class="s3">.</span><span class="s1">dirname</span><span class="s3">(</span><span class="s1">member</span><span class="s3">)</span>
+            <span class="s2">if </span><span class="s1">dirname</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">'.dist-info'</span><span class="s3">) </span><span class="s2">and </span><span class="s1">canonicalize_name</span><span class="s3">(</span><span class="s1">dirname</span><span class="s3">).</span><span class="s1">startswith</span><span class="s3">(</span>
+                <span class="s1">canonicalize_name</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_name</span><span class="s3">)</span>
+            <span class="s3">):</span>
+                <span class="s2">return </span><span class="s1">dirname</span>
+        <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">&quot;unsupported wheel format. .dist-info not found&quot;</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">install_as_egg</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">) </span><span class="s1">-&gt; </span><span class="s2">None</span><span class="s3">:</span>
+        <span class="s0">&quot;&quot;&quot;Install wheel as an egg directory.&quot;&quot;&quot;</span>
+        <span class="s2">with </span><span class="s1">zipfile</span><span class="s3">.</span><span class="s1">ZipFile</span><span class="s3">(</span><span class="s1">self</span><span class="s3">.</span><span class="s1">filename</span><span class="s3">) </span><span class="s2">as </span><span class="s1">zf</span><span class="s3">:</span>
+            <span class="s1">self</span><span class="s3">.</span><span class="s1">_install_as_egg</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">zf</span><span class="s3">)</span>
+
+    <span class="s2">def </span><span class="s1">_install_as_egg</span><span class="s3">(</span><span class="s1">self</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">zf</span><span class="s3">):</span>
+        <span class="s1">dist_basename </span><span class="s3">= </span><span class="s4">f'</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">project_name</span><span class="s2">}</span><span class="s4">-</span><span class="s2">{</span><span class="s1">self</span><span class="s3">.</span><span class="s1">version</span><span class="s2">}</span><span class="s4">'</span>
+        <span class="s1">dist_info </span><span class="s3">= </span><span class="s1">self</span><span class="s3">.</span><span class="s1">get_dist_info</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">)</span>
+        <span class="s1">dist_data </span><span class="s3">= </span><span class="s4">f'</span><span class="s2">{</span><span class="s1">dist_basename</span><span class="s2">}</span><span class="s4">.data'</span>
+        <span class="s1">egg_info </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s4">'EGG-INFO'</span><span class="s3">)</span>
+
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_convert_metadata</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_info</span><span class="s3">, </span><span class="s1">egg_info</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_move_data_entries</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_data</span><span class="s3">)</span>
+        <span class="s1">self</span><span class="s3">.</span><span class="s1">_fix_namespace_packages</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">_convert_metadata</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_info</span><span class="s3">, </span><span class="s1">egg_info</span><span class="s3">):</span>
+        <span class="s2">import </span><span class="s1">pkg_resources</span>
+
+        <span class="s2">def </span><span class="s1">get_metadata</span><span class="s3">(</span><span class="s1">name</span><span class="s3">):</span>
+            <span class="s2">with </span><span class="s1">zf</span><span class="s3">.</span><span class="s1">open</span><span class="s3">(</span><span class="s1">posixpath</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist_info</span><span class="s3">, </span><span class="s1">name</span><span class="s3">)) </span><span class="s2">as </span><span class="s1">fp</span><span class="s3">:</span>
+                <span class="s1">value </span><span class="s3">= </span><span class="s1">fp</span><span class="s3">.</span><span class="s1">read</span><span class="s3">().</span><span class="s1">decode</span><span class="s3">(</span><span class="s4">'utf-8'</span><span class="s3">)</span>
+                <span class="s2">return </span><span class="s1">email</span><span class="s3">.</span><span class="s1">parser</span><span class="s3">.</span><span class="s1">Parser</span><span class="s3">().</span><span class="s1">parsestr</span><span class="s3">(</span><span class="s1">value</span><span class="s3">)</span>
+
+        <span class="s1">wheel_metadata </span><span class="s3">= </span><span class="s1">get_metadata</span><span class="s3">(</span><span class="s4">'WHEEL'</span><span class="s3">)</span>
+        <span class="s5"># Check wheel format version is supported.</span>
+        <span class="s1">wheel_version </span><span class="s3">= </span><span class="s1">parse_version</span><span class="s3">(</span><span class="s1">wheel_metadata</span><span class="s3">.</span><span class="s1">get</span><span class="s3">(</span><span class="s4">'Wheel-Version'</span><span class="s3">))</span>
+        <span class="s1">wheel_v1 </span><span class="s3">= </span><span class="s1">parse_version</span><span class="s3">(</span><span class="s4">'1.0'</span><span class="s3">) &lt;= </span><span class="s1">wheel_version </span><span class="s3">&lt; </span><span class="s1">parse_version</span><span class="s3">(</span><span class="s4">'2.0dev0'</span><span class="s3">)</span>
+        <span class="s2">if not </span><span class="s1">wheel_v1</span><span class="s3">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span><span class="s3">(</span><span class="s4">f'unsupported wheel format version: </span><span class="s2">{</span><span class="s1">wheel_version</span><span class="s2">}</span><span class="s4">'</span><span class="s3">)</span>
+        <span class="s5"># Extract to target directory.</span>
+        <span class="s1">_unpack_zipfile_obj</span><span class="s3">(</span><span class="s1">zf</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">)</span>
+        <span class="s5"># Convert metadata.</span>
+        <span class="s1">dist_info </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_info</span><span class="s3">)</span>
+        <span class="s1">dist </span><span class="s3">= </span><span class="s1">pkg_resources</span><span class="s3">.</span><span class="s1">Distribution</span><span class="s3">.</span><span class="s1">from_location</span><span class="s3">(</span>
+            <span class="s1">destination_eggdir</span><span class="s3">,</span>
+            <span class="s1">dist_info</span><span class="s3">,</span>
+            <span class="s1">metadata</span><span class="s3">=</span><span class="s1">pkg_resources</span><span class="s3">.</span><span class="s1">PathMetadata</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_info</span><span class="s3">),</span>
+        <span class="s3">)</span>
+
+        <span class="s5"># Note: Evaluate and strip markers now,</span>
+        <span class="s5"># as it's difficult to convert back from the syntax:</span>
+        <span class="s5"># foobar; &quot;linux&quot; in sys_platform and extra == 'test'</span>
+        <span class="s2">def </span><span class="s1">raw_req</span><span class="s3">(</span><span class="s1">req</span><span class="s3">):</span>
+            <span class="s1">req</span><span class="s3">.</span><span class="s1">marker </span><span class="s3">= </span><span class="s2">None</span>
+            <span class="s2">return </span><span class="s1">str</span><span class="s3">(</span><span class="s1">req</span><span class="s3">)</span>
+
+        <span class="s1">install_requires </span><span class="s3">= </span><span class="s1">list</span><span class="s3">(</span><span class="s1">map</span><span class="s3">(</span><span class="s1">raw_req</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">requires</span><span class="s3">()))</span>
+        <span class="s1">extras_require </span><span class="s3">= {</span>
+            <span class="s1">extra</span><span class="s3">: [</span>
+                <span class="s1">req</span>
+                <span class="s2">for </span><span class="s1">req </span><span class="s2">in </span><span class="s1">map</span><span class="s3">(</span><span class="s1">raw_req</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">requires</span><span class="s3">((</span><span class="s1">extra</span><span class="s3">,)))</span>
+                <span class="s2">if </span><span class="s1">req </span><span class="s2">not in </span><span class="s1">install_requires</span>
+            <span class="s3">]</span>
+            <span class="s2">for </span><span class="s1">extra </span><span class="s2">in </span><span class="s1">dist</span><span class="s3">.</span><span class="s1">extras</span>
+        <span class="s3">}</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">rename</span><span class="s3">(</span><span class="s1">dist_info</span><span class="s3">, </span><span class="s1">egg_info</span><span class="s3">)</span>
+        <span class="s1">os</span><span class="s3">.</span><span class="s1">rename</span><span class="s3">(</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s4">'METADATA'</span><span class="s3">),</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s4">'PKG-INFO'</span><span class="s3">),</span>
+        <span class="s3">)</span>
+        <span class="s1">setup_dist </span><span class="s3">= </span><span class="s1">setuptools</span><span class="s3">.</span><span class="s1">Distribution</span><span class="s3">(</span>
+            <span class="s1">attrs</span><span class="s3">=</span><span class="s1">dict</span><span class="s3">(</span>
+                <span class="s1">install_requires</span><span class="s3">=</span><span class="s1">install_requires</span><span class="s3">,</span>
+                <span class="s1">extras_require</span><span class="s3">=</span><span class="s1">extras_require</span><span class="s3">,</span>
+            <span class="s3">),</span>
+        <span class="s3">)</span>
+        <span class="s2">with </span><span class="s1">disable_info_traces</span><span class="s3">():</span>
+            <span class="s1">write_requirements</span><span class="s3">(</span>
+                <span class="s1">setup_dist</span><span class="s3">.</span><span class="s1">get_command_obj</span><span class="s3">(</span><span class="s4">'egg_info'</span><span class="s3">),</span>
+                <span class="s2">None</span><span class="s3">,</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s4">'requires.txt'</span><span class="s3">),</span>
+            <span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">_move_data_entries</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_data</span><span class="s3">):</span>
+        <span class="s0">&quot;&quot;&quot;Move data entries to their correct location.&quot;&quot;&quot;</span>
+        <span class="s1">dist_data </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s1">dist_data</span><span class="s3">)</span>
+        <span class="s1">dist_data_scripts </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist_data</span><span class="s3">, </span><span class="s4">'scripts'</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">dist_data_scripts</span><span class="s3">):</span>
+            <span class="s1">egg_info_scripts </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, </span><span class="s4">'EGG-INFO'</span><span class="s3">, </span><span class="s4">'scripts'</span><span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">egg_info_scripts</span><span class="s3">)</span>
+            <span class="s2">for </span><span class="s1">entry </span><span class="s2">in </span><span class="s1">os</span><span class="s3">.</span><span class="s1">listdir</span><span class="s3">(</span><span class="s1">dist_data_scripts</span><span class="s3">):</span>
+                <span class="s5"># Remove bytecode, as it's not properly handled</span>
+                <span class="s5"># during easy_install scripts install phase.</span>
+                <span class="s2">if </span><span class="s1">entry</span><span class="s3">.</span><span class="s1">endswith</span><span class="s3">(</span><span class="s4">'.pyc'</span><span class="s3">):</span>
+                    <span class="s1">os</span><span class="s3">.</span><span class="s1">unlink</span><span class="s3">(</span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist_data_scripts</span><span class="s3">, </span><span class="s1">entry</span><span class="s3">))</span>
+                <span class="s2">else</span><span class="s3">:</span>
+                    <span class="s1">os</span><span class="s3">.</span><span class="s1">rename</span><span class="s3">(</span>
+                        <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist_data_scripts</span><span class="s3">, </span><span class="s1">entry</span><span class="s3">),</span>
+                        <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info_scripts</span><span class="s3">, </span><span class="s1">entry</span><span class="s3">),</span>
+                    <span class="s3">)</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">rmdir</span><span class="s3">(</span><span class="s1">dist_data_scripts</span><span class="s3">)</span>
+        <span class="s2">for </span><span class="s1">subdir </span><span class="s2">in </span><span class="s1">filter</span><span class="s3">(</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">,</span>
+            <span class="s3">(</span>
+                <span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">dist_data</span><span class="s3">, </span><span class="s1">d</span><span class="s3">)</span>
+                <span class="s2">for </span><span class="s1">d </span><span class="s2">in </span><span class="s3">(</span><span class="s4">'data'</span><span class="s3">, </span><span class="s4">'headers'</span><span class="s3">, </span><span class="s4">'purelib'</span><span class="s3">, </span><span class="s4">'platlib'</span><span class="s3">)</span>
+            <span class="s3">),</span>
+        <span class="s3">):</span>
+            <span class="s1">unpack</span><span class="s3">(</span><span class="s1">subdir</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">dist_data</span><span class="s3">):</span>
+            <span class="s1">os</span><span class="s3">.</span><span class="s1">rmdir</span><span class="s3">(</span><span class="s1">dist_data</span><span class="s3">)</span>
+
+    <span class="s3">@</span><span class="s1">staticmethod</span>
+    <span class="s2">def </span><span class="s1">_fix_namespace_packages</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s1">destination_eggdir</span><span class="s3">):</span>
+        <span class="s1">namespace_packages </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">egg_info</span><span class="s3">, </span><span class="s4">'namespace_packages.txt'</span><span class="s3">)</span>
+        <span class="s2">if </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">namespace_packages</span><span class="s3">):</span>
+            <span class="s1">namespace_packages </span><span class="s3">= </span><span class="s1">_read_utf8_with_fallback</span><span class="s3">(</span><span class="s1">namespace_packages</span><span class="s3">).</span><span class="s1">split</span><span class="s3">()</span>
+
+            <span class="s2">for </span><span class="s1">mod </span><span class="s2">in </span><span class="s1">namespace_packages</span><span class="s3">:</span>
+                <span class="s1">mod_dir </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">destination_eggdir</span><span class="s3">, *</span><span class="s1">mod</span><span class="s3">.</span><span class="s1">split</span><span class="s3">(</span><span class="s4">'.'</span><span class="s3">))</span>
+                <span class="s1">mod_init </span><span class="s3">= </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">join</span><span class="s3">(</span><span class="s1">mod_dir</span><span class="s3">, </span><span class="s4">'__init__.py'</span><span class="s3">)</span>
+                <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">mod_dir</span><span class="s3">):</span>
+                    <span class="s1">os</span><span class="s3">.</span><span class="s1">mkdir</span><span class="s3">(</span><span class="s1">mod_dir</span><span class="s3">)</span>
+                <span class="s2">if not </span><span class="s1">os</span><span class="s3">.</span><span class="s1">path</span><span class="s3">.</span><span class="s1">exists</span><span class="s3">(</span><span class="s1">mod_init</span><span class="s3">):</span>
+                    <span class="s2">with </span><span class="s1">open</span><span class="s3">(</span><span class="s1">mod_init</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding</span><span class="s3">=</span><span class="s4">&quot;utf-8&quot;</span><span class="s3">) </span><span class="s2">as </span><span class="s1">fp</span><span class="s3">:</span>
+                        <span class="s1">fp</span><span class="s3">.</span><span class="s1">write</span><span class="s3">(</span><span class="s1">NAMESPACE_PACKAGE_INIT</span><span class="s3">)</span>
+</pre>
+</body>
+</html>

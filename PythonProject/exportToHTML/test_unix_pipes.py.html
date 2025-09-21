@@ -1,0 +1,315 @@
+<html>
+<head>
+<title>test_unix_pipes.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cf8e6d;}
+.s1 { color: #bcbec4;}
+.s2 { color: #bcbec4;}
+.s3 { color: #6aab73;}
+.s4 { color: #5f826b; font-style: italic;}
+.s5 { color: #7a7e85;}
+.s6 { color: #2aacb8;}
+.s7 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#1e1f22">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_unix_pipes.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">errno</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">select</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">from </span><span class="s2">.. </span><span class="s0">import </span><span class="s1">_core</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_tests</span><span class="s2">.</span><span class="s1">tutil </span><span class="s0">import </span><span class="s1">gc_collect_harder</span><span class="s2">, </span><span class="s1">skip_if_fbsd_pipes_broken</span>
+<span class="s0">from </span><span class="s2">..</span><span class="s1">testing </span><span class="s0">import </span><span class="s1">check_one_way_stream</span><span class="s2">, </span><span class="s1">wait_all_tasks_blocked</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_file_io </span><span class="s0">import </span><span class="s1">_HasFileNo</span>
+
+<span class="s1">posix </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">name </span><span class="s2">== </span><span class="s3">&quot;posix&quot;</span>
+<span class="s1">pytestmark </span><span class="s2">= </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span><span class="s0">not </span><span class="s1">posix</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;posix only&quot;</span><span class="s2">)</span>
+
+<span class="s0">assert not </span><span class="s1">TYPE_CHECKING </span><span class="s0">or </span><span class="s1">sys</span><span class="s2">.</span><span class="s1">platform </span><span class="s2">== </span><span class="s3">&quot;unix&quot;</span>
+
+<span class="s0">if </span><span class="s1">posix</span><span class="s2">:</span>
+    <span class="s0">from </span><span class="s2">..</span><span class="s1">_unix_pipes </span><span class="s0">import </span><span class="s1">FdStream</span>
+<span class="s0">else</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ImportError</span><span class="s2">):</span>
+        <span class="s0">from </span><span class="s2">..</span><span class="s1">_unix_pipes </span><span class="s0">import </span><span class="s1">FdStream</span>
+
+
+<span class="s0">async def </span><span class="s1">make_pipe</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">FdStream</span><span class="s2">, </span><span class="s1">FdStream</span><span class="s2">]:</span>
+    <span class="s4">&quot;&quot;&quot;Makes a new pair of pipes.&quot;&quot;&quot;</span>
+    <span class="s2">(</span><span class="s1">r</span><span class="s2">, </span><span class="s1">w</span><span class="s2">) = </span><span class="s1">os</span><span class="s2">.</span><span class="s1">pipe</span><span class="s2">()</span>
+    <span class="s0">return </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">w</span><span class="s2">), </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">r</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">make_clogged_pipe</span><span class="s2">() </span><span class="s1">-&gt; tuple</span><span class="s2">[</span><span class="s1">FdStream</span><span class="s2">, </span><span class="s1">FdStream</span><span class="s2">]:</span>
+    <span class="s1">s</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s0">try</span><span class="s2">:</span>
+        <span class="s0">while True</span><span class="s2">:</span>
+            <span class="s5"># We want to totally fill up the pipe buffer.</span>
+            <span class="s5"># This requires working around a weird feature that POSIX pipes</span>
+            <span class="s5"># have.</span>
+            <span class="s5"># If you do a write of &lt;= PIPE_BUF bytes, then it's guaranteed</span>
+            <span class="s5"># to either complete entirely, or not at all. So if we tried to</span>
+            <span class="s5"># write PIPE_BUF bytes, and the buffer's free space is only</span>
+            <span class="s5"># PIPE_BUF/2, then the write will raise BlockingIOError... even</span>
+            <span class="s5"># though a smaller write could still succeed! To avoid this,</span>
+            <span class="s5"># make sure to write &gt;PIPE_BUF bytes each time, which disables</span>
+            <span class="s5"># the special behavior.</span>
+            <span class="s5"># For details, search for PIPE_BUF here:</span>
+            <span class="s5">#   http://pubs.opengroup.org/onlinepubs/9699919799/functions/write.html</span>
+
+            <span class="s5"># for the getattr:</span>
+            <span class="s5"># https://bitbucket.org/pypy/pypy/issues/2876/selectpipe_buf-is-missing-on-pypy3</span>
+            <span class="s1">buf_size </span><span class="s2">= </span><span class="s1">getattr</span><span class="s2">(</span><span class="s1">select</span><span class="s2">, </span><span class="s3">&quot;PIPE_BUF&quot;</span><span class="s2">, </span><span class="s6">8192</span><span class="s2">)</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">s</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">(), </span><span class="s7">b&quot;x&quot; </span><span class="s2">* </span><span class="s1">buf_size </span><span class="s2">* </span><span class="s6">2</span><span class="s2">)</span>
+    <span class="s0">except </span><span class="s1">BlockingIOError</span><span class="s2">:</span>
+        <span class="s0">pass</span>
+    <span class="s0">return </span><span class="s1">s</span><span class="s2">, </span><span class="s1">r</span>
+
+
+<span class="s0">async def </span><span class="s1">test_send_pipe</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">r</span><span class="s2">, </span><span class="s1">w </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">pipe</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">w</span><span class="s2">) </span><span class="s0">as </span><span class="s1">send</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">send</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">() == </span><span class="s1">w</span>
+        <span class="s0">await </span><span class="s1">send</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s7">b&quot;123&quot;</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s2">(</span><span class="s1">os</span><span class="s2">.</span><span class="s1">read</span><span class="s2">(</span><span class="s1">r</span><span class="s2">, </span><span class="s6">8</span><span class="s2">)) == </span><span class="s7">b&quot;123&quot;</span>
+
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">r</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_receive_pipe</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">r</span><span class="s2">, </span><span class="s1">w </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">pipe</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">r</span><span class="s2">) </span><span class="s0">as </span><span class="s1">recv</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s2">(</span><span class="s1">recv</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()) == </span><span class="s1">r</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">write</span><span class="s2">(</span><span class="s1">w</span><span class="s2">, </span><span class="s7">b&quot;123&quot;</span><span class="s2">)</span>
+        <span class="s0">assert </span><span class="s2">(</span><span class="s0">await </span><span class="s1">recv</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">8</span><span class="s2">)) == </span><span class="s7">b&quot;123&quot;</span>
+
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">w</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_pipes_combined</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">write</span><span class="s2">, </span><span class="s1">read </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s1">count </span><span class="s2">= </span><span class="s6">2</span><span class="s2">**</span><span class="s6">20</span>
+
+    <span class="s0">async def </span><span class="s1">sender</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s1">big </span><span class="s2">= </span><span class="s1">bytearray</span><span class="s2">(</span><span class="s1">count</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">write</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s1">big</span><span class="s2">)</span>
+
+    <span class="s0">async def </span><span class="s1">reader</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+        <span class="s1">received </span><span class="s2">= </span><span class="s6">0</span>
+        <span class="s0">while </span><span class="s1">received </span><span class="s2">&lt; </span><span class="s1">count</span><span class="s2">:</span>
+            <span class="s1">received </span><span class="s2">+= </span><span class="s1">len</span><span class="s2">(</span><span class="s0">await </span><span class="s1">read</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">4096</span><span class="s2">))</span>
+
+        <span class="s0">assert </span><span class="s1">received </span><span class="s2">== </span><span class="s1">count</span>
+
+    <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">n</span><span class="s2">:</span>
+        <span class="s1">n</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">sender</span><span class="s2">)</span>
+        <span class="s1">n</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">reader</span><span class="s2">)</span>
+
+    <span class="s0">await </span><span class="s1">read</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+    <span class="s0">await </span><span class="s1">write</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+
+<span class="s0">async def </span><span class="s1">test_pipe_errors</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">TypeError</span><span class="s2">):</span>
+        <span class="s1">FdStream</span><span class="s2">(</span><span class="s0">None</span><span class="s2">)</span>
+
+    <span class="s1">r</span><span class="s2">, </span><span class="s1">w </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">pipe</span><span class="s2">()</span>
+    <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">w</span><span class="s2">)</span>
+    <span class="s0">async with </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">r</span><span class="s2">) </span><span class="s0">as </span><span class="s1">s</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;^max_bytes must be integer &gt;= 1$&quot;</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">s</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">0</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_del</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">w</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s1">f1</span><span class="s2">, </span><span class="s1">f2 </span><span class="s2">= </span><span class="s1">w</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">(), </span><span class="s1">r</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span>
+    <span class="s0">del </span><span class="s1">w</span><span class="s2">, </span><span class="s1">r</span>
+    <span class="s1">gc_collect_harder</span><span class="s2">()</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;Bad file descriptor$&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">f1</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EBADF</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;Bad file descriptor$&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">f2</span><span class="s2">)</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EBADF</span>
+
+
+<span class="s0">async def </span><span class="s1">test_async_with</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s1">w</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">w</span><span class="s2">, </span><span class="s1">r</span><span class="s2">:</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">assert </span><span class="s1">w</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">() == -</span><span class="s6">1</span>
+    <span class="s0">assert </span><span class="s1">r</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">() == -</span><span class="s6">1</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;Bad file descriptor$&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">w</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EBADF</span>
+
+    <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">OSError</span><span class="s2">, </span><span class="s1">match</span><span class="s2">=</span><span class="s3">r&quot;Bad file descriptor$&quot;</span><span class="s2">) </span><span class="s0">as </span><span class="s1">excinfo</span><span class="s2">:</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">r</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+    <span class="s0">assert </span><span class="s1">excinfo</span><span class="s2">.</span><span class="s1">value</span><span class="s2">.</span><span class="s1">errno </span><span class="s2">== </span><span class="s1">errno</span><span class="s2">.</span><span class="s1">EBADF</span>
+
+
+<span class="s0">async def </span><span class="s1">test_misdirected_aclose_regression</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># https://github.com/python-trio/trio/issues/661#issuecomment-456582356</span>
+    <span class="s1">w</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s1">old_r_fd </span><span class="s2">= </span><span class="s1">r</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">()</span>
+
+    <span class="s5"># Close the original objects</span>
+    <span class="s0">await </span><span class="s1">w</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+    <span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+    <span class="s5"># Do a little dance to get a new pipe whose receive handle matches the old</span>
+    <span class="s5"># receive handle.</span>
+    <span class="s1">r2_fd</span><span class="s2">, </span><span class="s1">w2_fd </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">pipe</span><span class="s2">()</span>
+    <span class="s0">if </span><span class="s1">r2_fd </span><span class="s2">!= </span><span class="s1">old_r_fd</span><span class="s2">:  </span><span class="s5"># pragma: no cover</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">dup2</span><span class="s2">(</span><span class="s1">r2_fd</span><span class="s2">, </span><span class="s1">old_r_fd</span><span class="s2">)</span>
+        <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">r2_fd</span><span class="s2">)</span>
+    <span class="s0">async with </span><span class="s1">FdStream</span><span class="s2">(</span><span class="s1">old_r_fd</span><span class="s2">) </span><span class="s0">as </span><span class="s1">r2</span><span class="s2">:</span>
+        <span class="s0">assert </span><span class="s1">r2</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">() == </span><span class="s1">old_r_fd</span>
+
+        <span class="s5"># And now set up a background task that's working on the new receive</span>
+        <span class="s5"># handle</span>
+        <span class="s0">async def </span><span class="s1">expect_eof</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+            <span class="s0">assert await </span><span class="s1">r2</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">10</span><span class="s2">) == </span><span class="s7">b&quot;&quot;</span>
+
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">expect_eof</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+
+            <span class="s5"># Here's the key test: does calling aclose() again on the *old*</span>
+            <span class="s5"># handle, cause the task blocked on the *new* handle to raise</span>
+            <span class="s5"># ClosedResourceError?</span>
+            <span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+
+            <span class="s5"># Guess we survived! Close the new write handle so that the task</span>
+            <span class="s5"># gets an EOF and can exit cleanly.</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">w2_fd</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_close_at_bad_time_for_receive_some</span><span class="s2">(</span>
+    <span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">,</span>
+<span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># We used to have race conditions where if one task was using the pipe,</span>
+    <span class="s5"># and another closed it at *just* the wrong moment, it would give an</span>
+    <span class="s5"># unexpected error instead of ClosedResourceError:</span>
+    <span class="s5"># https://github.com/python-trio/trio/issues/661</span>
+    <span class="s5">#</span>
+    <span class="s5"># This tests what happens if the pipe gets closed in the moment *between*</span>
+    <span class="s5"># when receive_some wakes up, and when it tries to call os.read</span>
+    <span class="s0">async def </span><span class="s1">expect_closedresourceerror</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">10</span><span class="s2">)</span>
+
+    <span class="s1">orig_wait_readable </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">TheIOManager</span><span class="s2">.</span><span class="s1">wait_readable</span>
+
+    <span class="s0">async def </span><span class="s1">patched_wait_readable</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">TheIOManager</span><span class="s2">,</span>
+        <span class="s1">fd</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">_HasFileNo</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">orig_wait_readable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">TheIOManager</span><span class="s2">, </span><span class="s3">&quot;wait_readable&quot;</span><span class="s2">, </span><span class="s1">patched_wait_readable</span><span class="s2">)</span>
+    <span class="s1">s</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">s</span><span class="s2">, </span><span class="s1">r</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">expect_closedresourceerror</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s5"># Trigger everything by waking up the receiver</span>
+            <span class="s0">await </span><span class="s1">s</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s7">b&quot;x&quot;</span><span class="s2">)</span>
+
+
+<span class="s0">async def </span><span class="s1">test_close_at_bad_time_for_send_all</span><span class="s2">(</span><span class="s1">monkeypatch</span><span class="s2">: </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">MonkeyPatch</span><span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># We used to have race conditions where if one task was using the pipe,</span>
+    <span class="s5"># and another closed it at *just* the wrong moment, it would give an</span>
+    <span class="s5"># unexpected error instead of ClosedResourceError:</span>
+    <span class="s5"># https://github.com/python-trio/trio/issues/661</span>
+    <span class="s5">#</span>
+    <span class="s5"># This tests what happens if the pipe gets closed in the moment *between*</span>
+    <span class="s5"># when send_all wakes up, and when it tries to call os.write</span>
+    <span class="s0">async def </span><span class="s1">expect_closedresourceerror</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">ClosedResourceError</span><span class="s2">):</span>
+            <span class="s0">await </span><span class="s1">s</span><span class="s2">.</span><span class="s1">send_all</span><span class="s2">(</span><span class="s7">b&quot;x&quot; </span><span class="s2">* </span><span class="s6">100</span><span class="s2">)</span>
+
+    <span class="s1">orig_wait_writable </span><span class="s2">= </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">TheIOManager</span><span class="s2">.</span><span class="s1">wait_writable</span>
+
+    <span class="s0">async def </span><span class="s1">patched_wait_writable</span><span class="s2">(</span>
+        <span class="s1">self</span><span class="s2">: </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">TheIOManager</span><span class="s2">,</span>
+        <span class="s1">fd</span><span class="s2">: </span><span class="s1">int </span><span class="s2">| </span><span class="s1">_HasFileNo</span><span class="s2">,</span>
+    <span class="s2">) </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+        <span class="s0">await </span><span class="s1">orig_wait_writable</span><span class="s2">(</span><span class="s1">self</span><span class="s2">, </span><span class="s1">fd</span><span class="s2">)</span>
+        <span class="s0">await </span><span class="s1">s</span><span class="s2">.</span><span class="s1">aclose</span><span class="s2">()</span>
+
+    <span class="s1">monkeypatch</span><span class="s2">.</span><span class="s1">setattr</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">_run</span><span class="s2">.</span><span class="s1">TheIOManager</span><span class="s2">, </span><span class="s3">&quot;wait_writable&quot;</span><span class="s2">, </span><span class="s1">patched_wait_writable</span><span class="s2">)</span>
+    <span class="s1">s</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_clogged_pipe</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">s</span><span class="s2">, </span><span class="s1">r</span><span class="s2">:</span>
+        <span class="s0">async with </span><span class="s1">_core</span><span class="s2">.</span><span class="s1">open_nursery</span><span class="s2">() </span><span class="s0">as </span><span class="s1">nursery</span><span class="s2">:</span>
+            <span class="s1">nursery</span><span class="s2">.</span><span class="s1">start_soon</span><span class="s2">(</span><span class="s1">expect_closedresourceerror</span><span class="s2">)</span>
+            <span class="s0">await </span><span class="s1">wait_all_tasks_blocked</span><span class="s2">()</span>
+            <span class="s5"># Trigger everything by waking up the sender. On ppc64el, PIPE_BUF</span>
+            <span class="s5"># is 8192 but make_clogged_pipe() ends up writing a total of</span>
+            <span class="s5"># 1048576 bytes before the pipe is full, and then a subsequent</span>
+            <span class="s5"># receive_some(10000) isn't sufficient for orig_wait_writable() to</span>
+            <span class="s5"># return for our subsequent aclose() call. It's necessary to empty</span>
+            <span class="s5"># the pipe further before this happens. So we loop here until the</span>
+            <span class="s5"># pipe is empty to make sure that the sender wakes up even in this</span>
+            <span class="s5"># case. Otherwise patched_wait_writable() never gets to the</span>
+            <span class="s5"># aclose(), so expect_closedresourceerror() never returns, the</span>
+            <span class="s5"># nursery never finishes all tasks and this test hangs.</span>
+            <span class="s1">received_data </span><span class="s2">= </span><span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">10000</span><span class="s2">)</span>
+            <span class="s0">while </span><span class="s1">received_data</span><span class="s2">:</span>
+                <span class="s1">received_data </span><span class="s2">= </span><span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">10000</span><span class="s2">)</span>
+
+
+<span class="s5"># On FreeBSD, directories are readable, and we haven't found any other trick</span>
+<span class="s5"># for making an unreadable fd, so there's no way to run this test. Fortunately</span>
+<span class="s5"># the logic this is testing doesn't depend on the platform, so testing on</span>
+<span class="s5"># other platforms is probably good enough.</span>
+<span class="s2">@</span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">mark</span><span class="s2">.</span><span class="s1">skipif</span><span class="s2">(</span>
+    <span class="s1">sys</span><span class="s2">.</span><span class="s1">platform</span><span class="s2">.</span><span class="s1">startswith</span><span class="s2">(</span><span class="s3">&quot;freebsd&quot;</span><span class="s2">),</span>
+    <span class="s1">reason</span><span class="s2">=</span><span class="s3">&quot;no way to make read() return a bizarro error on FreeBSD&quot;</span><span class="s2">,</span>
+<span class="s2">)</span>
+<span class="s0">async def </span><span class="s1">test_bizarro_OSError_from_receive</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s5"># Make sure that if the read syscall returns some bizarro error, then we</span>
+    <span class="s5"># get a BrokenResourceError. This is incredibly unlikely; there's almost</span>
+    <span class="s5"># no way to trigger a failure here intentionally (except for EBADF, but we</span>
+    <span class="s5"># exploit that to detect file closure, so it takes a different path). So</span>
+    <span class="s5"># we set up a strange scenario where the pipe fd somehow transmutes into a</span>
+    <span class="s5"># directory fd, causing os.read to raise IsADirectoryError (yes, that's a</span>
+    <span class="s5"># real built-in exception type).</span>
+    <span class="s1">s</span><span class="s2">, </span><span class="s1">r </span><span class="s2">= </span><span class="s0">await </span><span class="s1">make_pipe</span><span class="s2">()</span>
+    <span class="s0">async with </span><span class="s1">s</span><span class="s2">, </span><span class="s1">r</span><span class="s2">:</span>
+        <span class="s1">dir_fd </span><span class="s2">= </span><span class="s1">os</span><span class="s2">.</span><span class="s1">open</span><span class="s2">(</span><span class="s3">&quot;/&quot;</span><span class="s2">, </span><span class="s1">os</span><span class="s2">.</span><span class="s1">O_DIRECTORY</span><span class="s2">, </span><span class="s6">0</span><span class="s2">)</span>
+        <span class="s0">try</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">dup2</span><span class="s2">(</span><span class="s1">dir_fd</span><span class="s2">, </span><span class="s1">r</span><span class="s2">.</span><span class="s1">fileno</span><span class="s2">())</span>
+            <span class="s0">with </span><span class="s1">pytest</span><span class="s2">.</span><span class="s1">raises</span><span class="s2">(</span><span class="s1">_core</span><span class="s2">.</span><span class="s1">BrokenResourceError</span><span class="s2">):</span>
+                <span class="s0">await </span><span class="s1">r</span><span class="s2">.</span><span class="s1">receive_some</span><span class="s2">(</span><span class="s6">10</span><span class="s2">)</span>
+        <span class="s0">finally</span><span class="s2">:</span>
+            <span class="s1">os</span><span class="s2">.</span><span class="s1">close</span><span class="s2">(</span><span class="s1">dir_fd</span><span class="s2">)</span>
+
+
+<span class="s2">@</span><span class="s1">skip_if_fbsd_pipes_broken</span>
+<span class="s0">async def </span><span class="s1">test_pipe_fully</span><span class="s2">() </span><span class="s1">-&gt; </span><span class="s0">None</span><span class="s2">:</span>
+    <span class="s0">await </span><span class="s1">check_one_way_stream</span><span class="s2">(</span><span class="s1">make_pipe</span><span class="s2">, </span><span class="s1">make_clogged_pipe</span><span class="s2">)</span>
+</pre>
+</body>
+</html>
