@@ -49,10 +49,10 @@ Search Hotel
     Press Keys    ${HOTELS_CITY}    ARROW_DOWN
     Press Keys    ${HOTELS_CITY}    ENTER
 
-    Wait Until Element Is Visible    //div[@aria-label='Sat Sep 20 2025']    10s
-    Click Element    //div[@aria-label='Sat Sep 20 2025']
-    Wait Until Element Is Visible    //div[@aria-label='Sun Sep 21 2025']    10s
-    Click Element    //div[@aria-label='Sun Sep 21 2025']
+    Wait Until Element Is Visible    ${HOTEL_CHECKIN}    10s
+    Click Element    ${HOTEL_CHECKIN}
+    Wait Until Element Is Visible    ${HOTEL_CHECKOUT}    10s
+    Click Element    ${HOTEL_CHECKOUT}
     Wait Until Element Is Visible    ${APP_BTN}    10s       
     Click Element    ${APP_BTN}
 
@@ -82,8 +82,11 @@ Search Train
     Press Keys    ${TRAIN_TO}    ARROW_DOWN
     Press Keys    ${TRAIN_TO}    ENTER
 
-    Click Element    xpath=//div[@aria-label='Sat Sep 20 2025']
-    Click Element    xpath=//li[normalize-space()='All Class']
+    Wait Until Element Is Visible  ${TRAIN_DATE}     12s
+
+    Click Element    ${TRAIN_DATE}
+    Wait Until Element Is Visible   ${TRAIN_CLASS}    10s
+    Click Element    ${TRAIN_CLASS}
     Wait Until Element Is Visible    ${TRAIN_SEARCH}    10s
     Click Element    ${TRAIN_SEARCH}
     Sleep    10s
