@@ -25,12 +25,12 @@ TRAIN_FROM      = "//input[@placeholder='From']"
 TRAIN_TO        = "//input[@placeholder='To']"
 TRAIN_SEARCH    = "//a[contains(@class,'primaryBtn')]"
 # Flight date
-DATE_FLIGHT = "//div[@aria-label='Mon Sep 22 2025']//div[@class='dateInnerCell']"
+DATE_FLIGHT = "//div[@aria-label='Wed Sep 24 2025']//div[@class='dateInnerCell']"
 
 # Hotel check-in/out
-HOTEL_CHECKIN = "//div[@aria-label='Mon Sep 22 2025']"
-HOTEL_CHECKOUT = "//div[@aria-label='Wed Sep 24 2025']"
+HOTEL_CHECKIN = "//div[@aria-label='Wed Sep 24 2025']"
+HOTEL_CHECKOUT = "//div[@aria-label='Fri Sep 26 2025']"
 
 # Train date/class
-TRAIN_DATE = "//div[@aria-label='Mon Sep 22 2025']"
+TRAIN_DATE = "//div[@aria-label='Wed Sep 24 2025']"
 TRAIN_CLASS = "//li[normalize-space()='All Class']"
